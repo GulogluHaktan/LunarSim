@@ -102,7 +102,7 @@ for elev in (2.0, 15.0, 45.0, 80.0):
         continue
 
     rgb_np = rgb[0].cpu().numpy() if hasattr(rgb, "cpu") else np.asarray(rgb[0])
-    radiance = rgb_np[..., :3].astype(np.float64).mean(axis=-1) * 50.0
+    radiance = rgb_np[..., :3].astype(np.float64).mean(axis=-1) * 15000.0
     dn = noise_model.apply(radiance, exposure_s=0.01, rng=rng)
     max_dn = 2**noise_model.bit_depth - 1
     sat_frac = float(np.mean(dn >= max_dn * 0.99))

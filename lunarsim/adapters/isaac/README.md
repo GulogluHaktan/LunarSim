@@ -5,12 +5,15 @@ position + quality profile) into an Isaac Sim USD stage: heightfield-equivalent
 collision, a separate (finer) render mesh, rock instancing, sun light,
 regolith material, and camera/LiDAR sensor prims.
 
-**Status: validated against a real Isaac Sim 6.0.1 container** (GPU: RTX 5060
-Laptop, 8GB VRAM, via the `lunar-rocket-isaaclab:6.0.1` / `nvcr.io/nvidia/isaac-sim:6.0.1`
-images) — see `scripts/isaac_smoke_test.py` (structural: every authoring
-function runs against a live stage, no errors) and
-`scripts/isaac_validation_suite.py` (behavioral: LiDAR ground truth vs. live
-PhysX, physics step speed). Run them with `scripts/run_isaac_smoke_test.sh`.
+**Status: fully validated against a real Isaac Sim 6.0.1 container**, GPU/render
+included (RTX 5060 Laptop, 8GB VRAM; `lunarsim-isaacsim:6.0.1` for everything
+except camera pixels, `lunarsim-isaaclab:6.0.1` for those -- see
+`docker/Dockerfile.isaacsim` / `docker/Dockerfile.isaaclab`). Run
+`scripts/run_all_isaac_validations.sh` for the full one-command regression
+suite (structural authoring, sun-direction math, rock collision physics,
+dust trajectories, LiDAR-vs-PhysX, physics speed); camera rendering has its
+own script (`scripts/isaaclab_test_camera.py`) since it needs the Isaac Lab
+image.
 
 ## What's been verified for real (not just written against API docs)
 
@@ -82,43 +85,39 @@ PhysX, physics step speed). Run them with `scripts/run_isaac_smoke_test.sh`.
   per-instance size control (the custom attribute also tripped a harmless
   but pointless Fabric/Hydra warning). (`scripts/isaac_test_dust.py`.)
 
-## Status update: chasing the camera gap via a real Isaac Lab install
+## RESOLVED: RGB camera rendering works via Isaac Lab's SimulationContext
 
-The gap below was diagnosed by comparing against LunarRocket's one working
-rendered-video pipeline, which goes through `isaaclab.sim.SimulationContext`
-+ `isaaclab.sensors.camera.Camera` (see IsaacLab's own
-`scripts/tutorials/04_sensors/run_usd_camera.py` for the reference pattern:
-`AppLauncher` with `--enable_cameras`, then `sim.step()` +
+`create_camera` (bare `isaacsim.sensors.camera.Camera` + `isaacsim.core.api.World`)
+never got the render product's frame counter past 0 in this headless docker
+setup -- tried with/without `enable_cameras=True`, up to 100 warm-up ticks,
+`--network=host --ipc=host`, both the `lunar-rocket-isaaclab:6.0.1` and
+stock `nvcr.io/nvidia/isaac-sim:6.0.1` images. **Fix: drive the camera
+through `isaaclab.sim.SimulationContext` + `isaaclab.sensors.camera.Camera`
+instead** (see `scripts/isaaclab_test_camera.py`, following IsaacLab's own
+`scripts/tutorials/04_sensors/run_usd_camera.py` reference pattern:
+`AppLauncher(args_cli)` with `--enable_cameras`, `sim.step()` +
 `camera.update(dt=sim.get_physics_dt())` each tick, reading
-`camera.data.output["rgb"]`). A `lunarsim-isaaclab:6.0.1` image
-(`docker/Dockerfile.isaaclab`, IsaacLab pinned at `v3.0.0-beta2.patch1`) is
-being built to test this properly. Note for next time: an earlier attempt at
-this ran `isaaclab.sh --install` inside a plain `docker run --rm` container
--- torch and isaaclab installed successfully, then were destroyed the
-instant that ephemeral container exited, since nothing was baked into an
-image layer or a persistent volume. Always bake a multi-GB toolchain install
-like this into a Dockerfile `RUN` step, never a throwaway `--rm` container.
+`camera.data.output["rgb"]`). Confirmed real RGB frames (240x320x3) with a
+**physically correct trend**: mean scene brightness rose monotonically with
+sun elevation (raw RGB mean 2°→28.0, 15°→54.4, 45°→94.1, 80°→106.5; after
+`core.lighting.camera`'s sensor model at a fixed exposure, mean DN out of a
+4095 max 2°→516, 15°→1003, 45°→1735, 80°→1964) -- exactly the expected "no
+ambient, brightness/signal tracks direct illumination angle" behavior, and
+confirms the sun-direction fix above is visually correct too, not just
+numerically. Note the low-elevation case genuinely only fills ~13% of the
+sensor's dynamic range at this fixed exposure -- the real, physical reason
+low-sun operations (e.g. near the south pole) are harder to see by: less
+signal reaches the sensor, not a rendering artifact. Building this took a
+real Isaac Lab checkout (`docker/Dockerfile.isaaclab`, pinned
+`v3.0.0-beta2.patch1`, ~5GB of torch+cu128 -- lesson from an earlier failed
+attempt: bake a toolchain install like this into a Dockerfile `RUN` step,
+never a throwaway `docker run --rm` container, or everything pip-installed
+is destroyed the instant that container exits).
 
-## Known gap: RGB camera rendering in headless docker
-
-`create_camera` (via `isaacsim.sensors.camera.Camera`) authors correctly and
-the prim exists on the stage, but in this environment the render product's
-frame counter never advances past 0 through bare `isaacsim.core.api.World` +
-`world.step(render=True)` -- tried with/without `enable_cameras=True`, with
-up to 100 warm-up ticks, with `--network=host --ipc=host`, and against both
-the `lunar-rocket-isaaclab:6.0.1` and stock `nvcr.io/nvidia/isaac-sim:6.0.1`
-images (same result on both, ruling out the custom image as the cause).
-
-The one thing on this machine that *did* produce real rendered frames
-(`LunarRocket/outputs/videos/trained_lunar_landing.mp4`, real PNGs on disk)
-drove the camera through an actual Isaac Lab environment's own
-`SimulationContext` (`isaaclab.envs.DirectRLEnv` / `env.world.step`), not
-bare `isaacsim.core.api.World`. That's a materially bigger dependency (a real
-Isaac Lab task, not just isaac-sim) than this adapter currently pulls in --
-left as a documented, reproducible gap (see the "KNOWN GAP" comment in
-`scripts/isaac_validation_suite.py`) rather than silently claimed as working.
-Anyone picking this up: try driving the camera through a minimal
-`isaaclab.sim.SimulationContext` instead of `isaacsim.core.api.World` first.
+Bare `isaacsim.core.api.World` is still fine (and much lighter/faster to
+start) for everything that doesn't need camera pixels -- collision, LiDAR
+ground truth, dust, physics speed were all validated on it. Only reach for
+the Isaac Lab image when you actually need rendered images.
 
 ## Other unverified pieces (documented, not yet exercised against a live scene)
 
@@ -139,15 +138,18 @@ Anyone picking this up: try driving the camera through a minimal
 - `materials.py` — `UsdPreviewSurface` visual material (verified pattern,
   reliable across render modes) with an optional real MDL asset bind-through.
 - `lighting.py` — distant light sized from `SUN_ANGULAR_DIAMETER_DEG`,
-  oriented from `core.lighting.sun.SunPosition`, ambient forced off (verified
-  to author correctly; not yet validated as visually correct without working
-  camera rendering).
+  oriented from `core.lighting.sun.SunPosition`, ambient forced off. Verified
+  two ways: pure transform math (light's actual local-to-world -Z direction
+  matches the intended sun direction, dot=1.0000) and visually (real
+  rendered frames show brightness rising monotonically with sun elevation).
 - `rocks.py` — individual per-rock prims referencing a prototype asset
   (verified pattern + the typeName bug above), plus `cap_rock_count` for the
   quality profile's `rocks.max_count`.
-- `sensors.py` — `isaacsim.sensors.camera.Camera` wrapper (authors/creates
-  correctly; frame capture blocked by the gap above) and the RTX LiDAR
-  placeholder.
+- `sensors.py` — `isaacsim.sensors.camera.Camera` wrapper: authors correctly;
+  for actual frame capture use `isaaclab.sensors.camera.Camera` +
+  `isaaclab.sim.SimulationContext` instead (see the RESOLVED section above) --
+  bare `isaacsim.core.api.World` never advances the render product. RTX LiDAR
+  remains a structural placeholder.
 - `dust.py` — bakes `core.dust.plume` ballistic trajectories as a
   time-sampled `PointInstancer` (verified, see above); `dust_event_from_disturbance`
   is a convenience constructor scaling particle count/speed from a single

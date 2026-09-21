@@ -144,12 +144,20 @@ edilebilir (bkz. `lunarsim/adapters/isaac/README.md`daki Isaac Lab notları).
 
 ## Isaac Sim doğrulaması
 
-Bu makinede kurulu gerçek bir Isaac Sim 6.0.1 docker imajına (`lunar-rocket-isaaclab:6.0.1`,
-RTX 5060 Laptop GPU) karşı çalıştırıldı ve düzeltildi:
+Sıfırdan kurulum: `./scripts/install_isaac_docker.sh` (Docker + NVIDIA Container
+Toolkit + `lunarsim-isaacsim:6.0.1` + opsiyonel `lunarsim-isaaclab:6.0.1` build eder).
+Bu makinede RTX 5060 Laptop GPU'ya karşı çalıştırıldı ve düzeltildi:
 
 ```bash
-scripts/run_isaac_smoke_test.sh scripts/isaac_smoke_test.py     # yapısal: her authoring fonksiyonu
-scripts/run_isaac_smoke_test.sh scripts/isaac_validation_suite.py  # davranışsal: LiDAR/fizik hızı
+scripts/run_all_isaac_validations.sh   # hepsi tek komutta: yapısal + fizik + LiDAR + toz + ışık + hız
+# veya tek tek:
+scripts/run_isaac_smoke_test.sh scripts/isaac_smoke_test.py          # yapısal: her authoring fonksiyonu
+scripts/run_isaac_smoke_test.sh scripts/isaac_validation_suite.py    # davranışsal: LiDAR/fizik hızı
+scripts/run_isaac_smoke_test.sh scripts/isaac_test_rock_collision.py # kaya collision (gerçek top düşürme)
+scripts/run_isaac_smoke_test.sh scripts/isaac_test_dust.py           # toz parçacık yörüngeleri
+scripts/run_isaac_smoke_test.sh scripts/isaac_test_sun_rotation.py   # güneş ışığı yön matematiği
+# kamera (Isaac Lab imajı gerekir, ./scripts/install_isaac_docker.sh ile build edilir):
+scripts/run_isaaclab_camera_test.sh
 ```
 
 **Doğrulanan sonuçlar:**
@@ -160,7 +168,7 @@ scripts/run_isaac_smoke_test.sh scripts/isaac_validation_suite.py  # davranışs
 - **Toz parçacıkları gerçekten hareket ediyor**: 410 parçacıklı patlama, gerçek balistik yörüngeyle 265 zaman örneği, 89m'ye varan menzil (drag yok, tam vakum kinematiği).
 - **RL arayüzü uçtan uca çalışıyor**: gerçek bir SB3 PPO, `AnalyticLanderEnv` üzerinde 4 paralel env ile ~3200 step/s eğitim yapıyor.
 - Bu süreçte gerçek hatalar bulundu ve düzeltildi: kaya prim'leri açık `Xform` tipiyle authoring edilirse referans edilen asset'in gerçek tipini gölgeliyordu; `PointInstancer.CreateAttribute` diye bir şey yok (`GetPrim().CreateAttribute` gerekiyor); çift physics scene LiDAR sonuçlarını bozuyordu.
-- Bilinen eksik / devam eden iş: headless docker'da RGB kamera render pipeline'ı bare `isaacsim.core.api.World` ile ilerlemiyor (frame sayacı 0'da kalıyor) — gerçek bir Isaac Lab `SimulationContext` + `isaaclab.sensors.camera.Camera` ile çözülmeye çalışılıyor (`docker/Dockerfile.isaaclab` build ediliyor). Detay: `lunarsim/adapters/isaac/README.md`.
+- **Kamera render çözüldü**: bare `isaacsim.core.api.World` ile RGB frame hiç ilerlemiyordu; gerçek Isaac Lab `SimulationContext` + `isaaclab.sensors.camera.Camera` ile (`docker/Dockerfile.isaaclab`, `scripts/isaaclab_test_camera.py`) çözüldü. Gerçek 240×320 RGB görüntü üretildi ve güneş açısıyla sinyal **fiziksel olarak doğru şekilde** arttı (12-bit DN ortalaması: 2°→516, 15°→1003, 45°→1735, 80°→1964) — düşük güneş açısında sensöre gerçekten az ışık ulaşıyor (güney kutbu gibi zor aydınlatma koşullarının gerçek fiziksel karşılığı, render hatası değil).
 
 ## Depo yapısı
 
