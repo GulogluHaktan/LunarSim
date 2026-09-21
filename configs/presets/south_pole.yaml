@@ -1,0 +1,26 @@
+# South pole: the hardest lighting/shadow case (plan section 7 -- sun elevation
+# 0-3 deg, extremely long shadows, some crater floors in permanent shadow).
+# Real DEM strongly recommended here (LOLA polar mosaic / NAC DTMs of specific
+# PSR-adjacent sites) since shadow geometry near the pole is dominated by real
+# local topography that procedural noise cannot faithfully stand in for.
+terrain:
+  mode: blend
+  size_m: 1000
+  res_m: 0.5
+  coarse_res_m: 4.0
+  seed: 300
+  split_m: 20.0
+  coarse_source: dem
+  dem_path: /path/to/south_pole_site_dem.tif
+  site_lat_deg: -89.0
+  site_lon_deg: 0.0
+  hills:      {amplitude_m: [1.0, 6.0], wavelength_m: [50, 300], hurst: [0.65, 0.85]}
+  craters:    {count_scale: [1.0, 2.5], d_min_m: 0.5, d_max_m: 150, b: [2.2, 2.8],
+               depth_ratio: [0.1, 0.2], age: [0, 0.8]}
+  rocks:      {density_scale: [0.5, 2.0], d_max_m: 2.5}
+  roi:        {sigma_m: 200, centers: random_16}
+  curvature:  true
+
+quality:
+  profile: high   # low-angle penumbra needs more sun samples than 'fast' gives
+  overrides: {}

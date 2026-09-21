@@ -1,0 +1,14 @@
+# LunarSim's own Isaac Sim image: the stock NVIDIA Isaac Sim 6.0.1 image plus
+# the extra Python packages lunarsim.core needs (rasterio, skyfield, pyyaml --
+# numpy/scipy already ship in Isaac Sim's bundled Python). Everything else
+# (lunarsim itself) is mounted at run time, not baked in, so code changes
+# don't require a rebuild.
+FROM nvcr.io/nvidia/isaac-sim:6.0.1
+
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
+    rasterio \
+    skyfield \
+    pyyaml
+
+LABEL org.opencontainers.image.title="lunarsim-isaacsim"
+LABEL org.opencontainers.image.description="Isaac Sim 6.0.1 + lunarsim core Python deps"

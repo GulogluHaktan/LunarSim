@@ -1,0 +1,17 @@
+terrain:
+  mode: blend              # coarse | fine | blend
+  size_m: 1000
+  res_m: 0.5
+  coarse_res_m: 4.0
+  seed: 42
+  split_m: 20.0
+  coarse_source: dem       # dem (real LOLA/LRO raster) | procedural (synthetic fBm, RL-only)
+  dem_path: /path/to/lola_or_nac_dem.tif   # see lunarsim/core/terrain/dem.py for sources
+  site_lat_deg: -84.5      # selenographic latitude of the tile center
+  site_lon_deg: 31.2       # selenographic longitude (positive east)
+  hills:      {amplitude_m: [0.5, 8], wavelength_m: [50, 300], hurst: [0.6, 0.85]}
+  craters:    {count_scale: [0.5, 2.0], d_min_m: 0.5, d_max_m: 120, b: [2.0, 3.0],
+               depth_ratio: [0.05, 0.2], age: [0, 1]}
+  rocks:      {density_scale: [0, 2], d_max_m: 2.0}
+  roi:        {sigma_m: 200, centers: random_16}
+  curvature:  true

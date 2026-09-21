@@ -1,0 +1,43 @@
+# Bundled default realism profiles (see LUNARSIM_PLAN.md section 9).
+# All four profiles expose the same keys so switching profile never breaks
+# calling code; only the values (and therefore fidelity/cost) change.
+profiles:
+  fast:
+    render:   {mode: raster, samples: 1, shadow_quality: low, ao: false}
+    sun:      {angular_diameter_deg: 0.53, penumbra_samples: 4}
+    material: {brdf: albedo, albedo: 0.10}
+    camera:   {noise: none, auto_exposure: false}
+    lidar:    {mode: raycast, noise: none}
+    terrain:  {res_m: 1.0, render_mesh_lod: 0}
+    rocks:    {max_count: 100, collision: convex_simple}
+    dust:     {mode: off}
+
+  balanced:
+    render:   {mode: rtx_realtime, samples: 4, shadow_quality: medium, ao: true}
+    sun:      {angular_diameter_deg: 0.53, penumbra_samples: 16}
+    material: {brdf: lommel_seeliger, albedo: 0.10}
+    camera:   {noise: shot_read, auto_exposure: false}
+    lidar:    {mode: rtx_sparse, noise: none}
+    terrain:  {res_m: 0.5, render_mesh_lod: 1}
+    rocks:    {max_count: 500, collision: convex_simple}
+    dust:     {mode: visual}
+
+  high:
+    render:   {mode: pathtrace, samples: 32, shadow_quality: high, ao: true}
+    sun:      {angular_diameter_deg: 0.53, penumbra_samples: 32}
+    material: {brdf: hapke_approx, albedo: 0.10}
+    camera:   {noise: shot_read_lens, auto_exposure: false}
+    lidar:    {mode: rtx_full, noise: none}
+    terrain:  {res_m: 0.25, render_mesh_lod: 2}
+    rocks:    {max_count: 2000, collision: convex}
+    dust:     {mode: visual_physics}
+
+  reference:
+    render:   {mode: pathtrace, samples: 512, denoise: true}
+    sun:      {angular_diameter_deg: 0.53, penumbra_samples: 64}
+    material: {brdf: hapke, albedo: 0.10, opposition_surge: true}
+    camera:   {noise: full, lens_model: true, auto_exposure: false}
+    lidar:    {mode: rtx, noise: full, dropout: true}
+    terrain:  {res_m: 0.1, render_mesh_lod: 3}
+    rocks:    {max_count: 5000, collision: convex}
+    dust:     {mode: particles, roi_only: true}

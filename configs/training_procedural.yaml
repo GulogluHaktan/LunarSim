@@ -1,0 +1,17 @@
+# Synthetic-only tile config for RL training (plan section 10: "Eğitim için
+# tile havuzu"). No real DEM is loaded here -- the exact region on the Moon
+# doesn't matter for policy training, only realistic local statistics
+# (slope/crater/rock distributions) do. Never use this config's output as a
+# stand-in for a real site; use coarse_source: dem for that (see example.yaml).
+terrain:
+  mode: fine                # local tile only, no need for global hybrid blend
+  size_m: 200
+  res_m: 0.25
+  seed: 0                   # overridden per-tile from the training tile pool
+  coarse_source: procedural
+  hills:      {amplitude_m: [0.3, 3.0], wavelength_m: [30, 150], hurst: [0.6, 0.85]}
+  craters:    {count_scale: [0.5, 2.0], d_min_m: 0.3, d_max_m: 40, b: [2.0, 3.0],
+               depth_ratio: [0.05, 0.2], age: [0, 1]}
+  rocks:      {density_scale: 0, d_max_m: 0.0}   # start rockless, per plan section 10
+  roi:        {sigma_m: 100, centers: null}
+  curvature:  false          # tile is small enough that curvature is negligible

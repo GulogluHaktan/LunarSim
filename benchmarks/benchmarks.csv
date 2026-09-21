@@ -1,0 +1,5 @@
+profile,size_m,res_m,grid_n,terrain_gen_s,n_craters,n_rocks,step_s,fps,vram_mb
+fast,200.0,1.0,200,0.068,20,800,,,
+balanced,200.0,0.5,400,0.1898,20,800,,,
+high,200.0,0.25,800,0.6004,20,800,,,
+reference,200.0,0.1,2000,4.1158,20,800,,,

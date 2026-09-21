@@ -1,0 +1,25 @@
+# Mare (basaltic plain): gently rolling, low crater density, low rock density.
+# Example region: Mare Serenitatis-ish flat plain. Point dem_path at a real
+# LOLA/LRO raster crop before use -- these lat/lon/dem_path values are
+# placeholders you must fill in for your actual site.
+terrain:
+  mode: blend
+  size_m: 1000
+  res_m: 0.5
+  coarse_res_m: 4.0
+  seed: 100
+  split_m: 20.0
+  coarse_source: dem
+  dem_path: /path/to/mare_site_dem.tif
+  site_lat_deg: 20.0
+  site_lon_deg: 18.0
+  hills:      {amplitude_m: [0.3, 2.0], wavelength_m: [80, 400], hurst: [0.65, 0.8]}
+  craters:    {count_scale: [0.3, 1.0], d_min_m: 0.5, d_max_m: 100, b: [2.0, 2.5],
+               depth_ratio: [0.08, 0.15], age: [0.3, 1.0]}
+  rocks:      {density_scale: [0.2, 1.0], d_max_m: 1.5}
+  roi:        {sigma_m: 200, centers: random_16}
+  curvature:  true
+
+quality:
+  profile: fast
+  overrides: {}

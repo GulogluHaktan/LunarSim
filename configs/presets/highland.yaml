@@ -1,0 +1,23 @@
+# Highland: rugged, high crater density (heavily cratered ancient crust),
+# more rocks/ejecta than mare. Fill in dem_path/lat/lon for your real site.
+terrain:
+  mode: blend
+  size_m: 1000
+  res_m: 0.5
+  coarse_res_m: 4.0
+  seed: 200
+  split_m: 20.0
+  coarse_source: dem
+  dem_path: /path/to/highland_site_dem.tif
+  site_lat_deg: -10.0
+  site_lon_deg: 5.0
+  hills:      {amplitude_m: [2.0, 10.0], wavelength_m: [40, 250], hurst: [0.7, 0.9]}
+  craters:    {count_scale: [1.5, 3.0], d_min_m: 0.5, d_max_m: 150, b: [2.5, 3.0],
+               depth_ratio: [0.1, 0.2], age: [0, 0.7]}
+  rocks:      {density_scale: [1.0, 3.0], d_max_m: 3.0}
+  roi:        {sigma_m: 200, centers: random_16}
+  curvature:  true
+
+quality:
+  profile: fast
+  overrides: {}
