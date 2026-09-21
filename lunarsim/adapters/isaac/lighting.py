@@ -26,16 +26,18 @@ def create_sun_light(stage, prim_path: str, sun_pos: SunPosition, angular_diamet
     light.CreateIntensityAttr(SOLAR_CONSTANT_W_M2)
     light.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 0.98))  # unfiltered solar color, mildly warm
 
-    # elevation/azimuth (selenographic ENU) -> a look-at rotation for a light
-    # whose local -Z points toward the ground by USD convention.
+    # elevation/azimuth (selenographic ENU: +x east, +y north, +z up) -> the
+    # direction the light shines, i.e. FROM the sun TOWARD the ground, which
+    # is what a DistantLight's local -Z axis must point along.
     el = np.deg2rad(sun_pos.elevation_deg)
     az = np.deg2rad(sun_pos.azimuth_deg)
     direction_to_sun = np.array([np.cos(el) * np.sin(az), np.cos(el) * np.cos(az), np.sin(el)])
+    shine_dir = -direction_to_sun
 
     xform = UsdGeom.Xformable(light.GetPrim())
     xform.ClearXformOpOrder()
-    rotate_op = xform.AddRotateXYZOp()
-    rotate_op.Set(_rotation_from_direction(-direction_to_sun))
+    orient_op = xform.AddOrientOp()
+    orient_op.Set(_orient_quat_for_shine_direction(shine_dir))
 
     return light
 
@@ -51,11 +53,21 @@ def disable_ambient(stage, dome_light_prim_path: str | None = None):
         UsdLux.DomeLight(prim).CreateIntensityAttr(0.0)
 
 
-def _rotation_from_direction(direction: np.ndarray):
-    """Euler XYZ (degrees) such that local -Z aligns with `direction` (unit vector)."""
+def _orient_quat_for_shine_direction(shine_dir: np.ndarray):
+    """Quaternion such that the local -Z axis maps to world-space `shine_dir`
+    (unit vector) after rotation.
+
+    Built via `Gf.Rotation`'s direct from-vector-to-vector constructor
+    instead of hand-derived Euler angles -- a prior Euler-angle version of
+    this function was verified (via `scripts/isaac_test_sun_rotation.py`,
+    checking the light's actual local-to-world transform) to point the light
+    in the wrong direction for every non-trivial case tested; this
+    from/to-vector construction is unambiguous and was verified correct
+    (dot product to the intended direction > 0.999) for zenith, horizon at
+    multiple azimuths, a 45 deg case, and a low south-pole-like elevation.
+    """
     from pxr import Gf
 
-    d = direction / np.linalg.norm(direction)
-    pitch = np.rad2deg(np.arcsin(-d[2]))
-    yaw = np.rad2deg(np.arctan2(d[0], d[1]))
-    return Gf.Vec3f(float(pitch), 0.0, float(yaw))
+    d = shine_dir / np.linalg.norm(shine_dir)
+    rotation = Gf.Rotation(Gf.Vec3d(0.0, 0.0, -1.0), Gf.Vec3d(*d.tolist()))
+    return Gf.Quatf(rotation.GetQuat())

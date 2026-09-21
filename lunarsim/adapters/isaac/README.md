@@ -53,6 +53,19 @@ PhysX, physics step speed). Run them with `scripts/run_isaac_smoke_test.sh`.
   contact height (rock top at 2.0 m + ball radius 0.2 m), confirming
   `spawn_rocks`'s collision setup is physically correct, not just
   structurally present. (`scripts/isaac_test_rock_collision.py`.)
+- **Sun light direction, found badly wrong and fixed**: the original
+  `create_sun_light` derived a hand-rolled Euler-XYZ (pitch, 0, yaw) from the
+  target direction, assuming a specific rotation composition order. Checked
+  directly against the light's actual computed local-to-world transform
+  (`scripts/isaac_test_sun_rotation.py`, no render/GPU needed -- pure
+  transform math) across 5 cases (zenith, two horizon azimuths, 45 deg, a
+  low south-pole-like elevation): **every single case pointed the light in
+  the wrong direction** (dot product with the intended direction was 0 or
+  0.5, should be 1.0). This would have produced completely wrong shadow/
+  terminator geometry with no obvious symptom short of comparing against
+  ephemeris ground truth. Fixed by replacing the Euler derivation with
+  `Gf.Rotation(fromVec, toVec)` (USD's direct vector-to-vector rotation
+  constructor) -> quaternion; re-verified, all 5 cases now dot=1.0000.
 - **Dust particles, authored and verified moving**: `dust.py` bakes
   `core.dust.plume`'s exact vacuum-ballistic trajectories as USD
   time-sampled `PointInstancer` positions. Verified: 410-particle burst at
