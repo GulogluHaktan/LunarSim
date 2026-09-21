@@ -9,6 +9,7 @@ dependencies = [
     "pyyaml",
     "rasterio",
     "skyfield",
+    "gymnasium",
 ]
 
 [project.optional-dependencies]

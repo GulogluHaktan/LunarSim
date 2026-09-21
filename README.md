@@ -94,6 +94,48 @@ from lunarsim.core.terrain import check_tile
 report = check_tile(tile)  # NaN, aşırı eğim, imkansız krater derinliği vb. yakalar
 ```
 
+## Toz (hareket eden)
+
+Ay'da atmosfer yok → sürtünme (drag) yok → fırlatılan toz tam bir balistik
+parabol izler (gerçek Apollo iniş tozu gözlemlerinin nedeni tam olarak bu:
+hava direnci olmadığı için toz çok uzun ve alçak yaylar çizer).
+`lunarsim/core/dust/plume.py` bunu tam kinematikle (uydurma bir parçacık
+efekti değil) hesaplar; `adapters/isaac/dust.py` bunu gerçek Isaac Sim'de
+zaman-örneklenmiş `PointInstancer` pozisyonları olarak authoring eder.
+Gerçek Isaac Sim'de doğrulandı: 410 parçacıklı bir patlama 265 zaman
+örneği üretti, düşük açılı ~12.6 m/s parçacıklar 89 m'ye kadar gitti (1.62
+m/s² yerçekimi altında beklenen menzil).
+
+```python
+from lunarsim.adapters.isaac.dust import dust_event_from_disturbance, spawn_dust_burst
+
+event = dust_event_from_disturbance(origin_m=np.array([0, 0, 0.1]), intensity=0.8)
+spawn_dust_burst(stage, "/World/Dust", event, prototype_path, tile.height, tile.res_m)
+```
+
+## RL (herhangi bir model/algoritma takılabilir)
+
+`lunarsim/rl/analytic_lander_env.py` — standart bir `gymnasium.Env`
+(2 eksenli gimbal'lı motor, gerçek TVC dinamiği: gimbal önce gövdeyi
+döndürür, gövde eğimi de itki yönünü değiştirir). Isaac'e bağımlı değil
+(hızlı, CPU-only iterasyon için), aynı gerçek `core.terrain` heightmap'i
+kullanır. Gerçek bir Stable-Baselines3 PPO ile uçtan uca test edildi:
+4 paralel env, **~3200 step/s** (CPU).
+
+```python
+from lunarsim.rl import AnalyticLanderEnv, LanderParams
+from stable_baselines3 import PPO
+
+env = AnalyticLanderEnv(tile, params=LanderParams())
+model = PPO("MlpPolicy", env).learn(total_timesteps=100_000)
+```
+
+Kendi reward fonksiyonunu geçirebilirsin (`reward_fn=...`); varsayılan
+`default_reward_fn` sadece bir başlangıç noktası. Isaac üzerinde tam
+fiziksel simülasyon (gerçek temas dinamiği, toz, kamera/LiDAR) isteyen bir
+RL görevi için `adapters/isaac/` üzerine bir Isaac Lab `DirectRLEnv` inşa
+edilebilir (bkz. `lunarsim/adapters/isaac/README.md`daki Isaac Lab notları).
+
 ## Test
 
 ```bash
@@ -114,21 +156,27 @@ scripts/run_isaac_smoke_test.sh scripts/isaac_validation_suite.py  # davranışs
 - Heightfield collision + ince render mesh + physics/visual materyal + güneş ışığı + kaya instancing + kamera/LiDAR prim'leri: 13/13 authoring adımı gerçek sahnede hatasız çalışıyor.
 - LiDAR ground truth (`raycast_lidar`) gerçek PhysX raycast ile **0.37 mm** ortalama sapmayla eşleşiyor.
 - Fizik step hızı: tek env, sadece fizik (render kapalı), **~1900-2100 step/s** (RTX 5060, 8GB VRAM).
-- Bu süreçte gerçek bir hata bulundu ve düzeltildi: kaya prim'leri açık `Xform` tipiyle authoring edilirse referans edilen asset'in gerçek tipini (görünürlük/collision'ı) gölgeliyordu — artık tip belirtilmeden authoring ediliyor.
-- Bilinen eksik: headless docker'da RGB kamera render pipeline'ı `isaacsim.core.api.World` ile hiç ilerlemiyor (frame sayacı 0'da kalıyor); LunarRocket'taki tek çalışan kamera render örneği gerçek bir Isaac Lab `SimulationContext` üzerinden geliyor, bare `World` üzerinden değil. Detay: `lunarsim/adapters/isaac/README.md`.
+- **Kaya collision fiziksel olarak doğrulandı**: 2m'lik gerçek bir kayanın üstüne 10m'den bırakılan top, tam beklenen temas yüksekliğinde (z=2.200m) durdu.
+- **Toz parçacıkları gerçekten hareket ediyor**: 410 parçacıklı patlama, gerçek balistik yörüngeyle 265 zaman örneği, 89m'ye varan menzil (drag yok, tam vakum kinematiği).
+- **RL arayüzü uçtan uca çalışıyor**: gerçek bir SB3 PPO, `AnalyticLanderEnv` üzerinde 4 paralel env ile ~3200 step/s eğitim yapıyor.
+- Bu süreçte gerçek hatalar bulundu ve düzeltildi: kaya prim'leri açık `Xform` tipiyle authoring edilirse referans edilen asset'in gerçek tipini gölgeliyordu; `PointInstancer.CreateAttribute` diye bir şey yok (`GetPrim().CreateAttribute` gerekiyor); çift physics scene LiDAR sonuçlarını bozuyordu.
+- Bilinen eksik / devam eden iş: headless docker'da RGB kamera render pipeline'ı bare `isaacsim.core.api.World` ile ilerlemiyor (frame sayacı 0'da kalıyor) — gerçek bir Isaac Lab `SimulationContext` + `isaaclab.sensors.camera.Camera` ile çözülmeye çalışılıyor (`docker/Dockerfile.isaaclab` build ediliyor). Detay: `lunarsim/adapters/isaac/README.md`.
 
 ## Depo yapısı
 
 ```
 lunarsim/
   core/              # Isaac'e bağımlı DEĞİL
-    terrain/         # fBm, DEM ingestion, krater, kaya, blend, eğrilik
+    terrain/         # fBm, DEM ingestion, krater, kaya, blend, eğrilik, gerçekçilik kontrolü
     lighting/         # güneş (ephemeris), horizon map, regolith BRDF, kamera gürültüsü
     metadata/         # LiDAR analitik raycast + ground truth kıyası
     quality/         # profil yükleyici
-  adapters/isaac/    # USD/heightfield export, materyal, ışık, sensör (yapısal, Isaac gerektirir)
+    dust/            # balistik toz kinematiği (Isaac'e bağımlı değil)
+  adapters/isaac/    # USD/heightfield export, materyal, ışık, sensör, toz (gerçek Isaac Sim'de doğrulandı)
+  rl/                # gymnasium ortamı (analitik, Isaac'e bağımlı değil, SB3 ile test edildi)
 configs/             # YAML preset'ler (mare, highland, güney kutbu)
-tests/               # seed tekrarlanabilirliği, istatistik testleri, DEM/LiDAR/ışık testleri
+docker/              # sıfırdan Isaac Sim / Isaac Lab image build dosyaları
+tests/               # seed tekrarlanabilirliği, istatistik testleri, DEM/LiDAR/ışık/toz/RL testleri
 benchmarks/          # profil başına üretim süresi ölçümü
 ```
 

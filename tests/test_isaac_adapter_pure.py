@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from lunarsim.adapters.isaac.dust import dust_event_from_disturbance
 from lunarsim.adapters.isaac.rocks import cap_rock_count
 from lunarsim.core.terrain.rocks import RockField
 
@@ -35,3 +36,16 @@ def test_cap_rock_count_noop_when_under_limit():
     tile = _FakeTile(rocks)
     capped = cap_rock_count(tile, max_count=10, rng=rng)
     assert capped is tile
+
+
+def test_dust_event_from_disturbance_scales_with_intensity():
+    low = dust_event_from_disturbance(np.array([0.0, 0.0, 0.0]), intensity=0.0)
+    high = dust_event_from_disturbance(np.array([0.0, 0.0, 0.0]), intensity=1.0)
+    assert low.n_particles < high.n_particles
+    assert low.speed_range_m_s[1] < high.speed_range_m_s[1]
+
+
+def test_dust_event_from_disturbance_clips_out_of_range_intensity():
+    event = dust_event_from_disturbance(np.array([0.0, 0.0, 0.0]), intensity=5.0)
+    event_clipped = dust_event_from_disturbance(np.array([0.0, 0.0, 0.0]), intensity=1.0)
+    assert event.n_particles == event_clipped.n_particles

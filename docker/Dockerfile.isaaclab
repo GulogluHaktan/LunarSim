@@ -1,0 +1,36 @@
+# LunarSim + Isaac Lab image: adds a real Isaac Lab checkout (pinned ref,
+# matching the version LunarRocket's proven working camera-render pipeline
+# used) on top of lunarsim-isaacsim:6.0.1, so isaaclab.sim.SimulationContext
+# / isaaclab.sensors.camera.Camera are actually importable and the install
+# survives container restarts (an earlier attempt ran isaaclab.sh --install
+# inside a plain `docker run --rm` container -- everything it pip-installed
+# was destroyed the moment that container exited, since nothing was baked
+# into an image layer or a persistent volume).
+#
+# Build: docker build -f docker/Dockerfile.isaaclab -t lunarsim-isaaclab:6.0.1 docker/
+# (takes a while: this pulls torch+cu128, several GB)
+FROM lunarsim-isaacsim:6.0.1
+
+ARG ISAACLAB_REPO=https://github.com/isaac-sim/IsaacLab.git
+ARG ISAACLAB_REF=v3.0.0-beta2.patch1
+
+USER root
+ENV TERM=xterm
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch ${ISAACLAB_REF} ${ISAACLAB_REPO} /workspace/IsaacLab \
+    && ln -sfn /isaac-sim /workspace/IsaacLab/_isaac_sim
+
+WORKDIR /workspace/IsaacLab
+RUN ./isaaclab.sh --install none
+
+ENV PYTHONPATH=/workspace/IsaacLab/source/isaaclab:/workspace/IsaacLab/source/isaaclab_assets:/workspace/IsaacLab/source/isaaclab_tasks:/workspace/IsaacLab/source/isaaclab_rl
+
+LABEL org.opencontainers.image.title="lunarsim-isaaclab"
+LABEL org.opencontainers.image.description="Isaac Sim 6.0.1 + Isaac Lab (pinned) + lunarsim core Python deps"

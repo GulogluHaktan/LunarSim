@@ -46,6 +46,45 @@ PhysX, physics step speed). Run them with `scripts/run_isaac_smoke_test.sh`.
   at once measurably corrupted PhysX raycast results (all 384/384 rays
   suddenly "hit" and showed a large systematic range bias) until fixed by
   passing `physics_prim_path="/World/PhysicsScene"` to `World()`.
+- **Rock collision, physically confirmed**: dropped a 0.2 m rigid ball from
+  10 m above a 2 m rock (real external `.usd` prototype asset, real
+  `convexHull` collision) under lunar gravity and stepped real PhysX to
+  settle. It came to rest at z=2.200 m -- exactly the analytically predicted
+  contact height (rock top at 2.0 m + ball radius 0.2 m), confirming
+  `spawn_rocks`'s collision setup is physically correct, not just
+  structurally present. (`scripts/isaac_test_rock_collision.py`.)
+- **Dust particles, authored and verified moving**: `dust.py` bakes
+  `core.dust.plume`'s exact vacuum-ballistic trajectories as USD
+  time-sampled `PointInstancer` positions. Verified: 410-particle burst at
+  0.8 intensity produced 265 time samples, particles reached up to ~89 m
+  horizontal range (physically correct for the no-drag low-angle-ejecta
+  model at ~12.6 m/s peak speed under 1.62 m/s² gravity -- this is the real
+  reason lunar dust famously travels in such long, low arcs), and
+  per-instance scale shrinks as each particle settles. One bug found+fixed
+  along the way: `UsdGeom.PointInstancer` is a schema wrapper, not a
+  `Usd.Prim` -- `instancer.CreateAttribute(...)` doesn't exist, needed
+  `instancer.GetPrim().CreateAttribute(...)`; also switched the settling-fade
+  signal from a nonstandard custom `"widths"` attribute to
+  `PointInstancer.GetScalesAttr()`, which is the actual USD-standard
+  per-instance size control (the custom attribute also tripped a harmless
+  but pointless Fabric/Hydra warning). (`scripts/isaac_test_dust.py`.)
+
+## Status update: chasing the camera gap via a real Isaac Lab install
+
+The gap below was diagnosed by comparing against LunarRocket's one working
+rendered-video pipeline, which goes through `isaaclab.sim.SimulationContext`
++ `isaaclab.sensors.camera.Camera` (see IsaacLab's own
+`scripts/tutorials/04_sensors/run_usd_camera.py` for the reference pattern:
+`AppLauncher` with `--enable_cameras`, then `sim.step()` +
+`camera.update(dt=sim.get_physics_dt())` each tick, reading
+`camera.data.output["rgb"]`). A `lunarsim-isaaclab:6.0.1` image
+(`docker/Dockerfile.isaaclab`, IsaacLab pinned at `v3.0.0-beta2.patch1`) is
+being built to test this properly. Note for next time: an earlier attempt at
+this ran `isaaclab.sh --install` inside a plain `docker run --rm` container
+-- torch and isaaclab installed successfully, then were destroyed the
+instant that ephemeral container exited, since nothing was baked into an
+image layer or a persistent volume. Always bake a multi-GB toolchain install
+like this into a Dockerfile `RUN` step, never a throwaway `--rm` container.
 
 ## Known gap: RGB camera rendering in headless docker
 
@@ -96,3 +135,7 @@ Anyone picking this up: try driving the camera through a minimal
 - `sensors.py` — `isaacsim.sensors.camera.Camera` wrapper (authors/creates
   correctly; frame capture blocked by the gap above) and the RTX LiDAR
   placeholder.
+- `dust.py` — bakes `core.dust.plume` ballistic trajectories as a
+  time-sampled `PointInstancer` (verified, see above); `dust_event_from_disturbance`
+  is a convenience constructor scaling particle count/speed from a single
+  0-1 "intensity" (plume throttle, wheel slip, footstep force, etc).

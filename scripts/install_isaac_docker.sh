@@ -62,3 +62,12 @@ mkdir -p "$CACHE_ROOT"/cache/{ov,pip,glcache,kit} "$CACHE_ROOT"/{data,documents}
 
 log "Done. Image: $IMAGE"
 log "Try it: LUNARSIM_ISAAC_IMAGE=$IMAGE ./scripts/run_isaac_smoke_test.sh scripts/isaac_smoke_test.py"
+
+if [[ "${LUNARSIM_SKIP_ISAACLAB:-0}" != "1" ]]; then
+  ISAACLAB_IMAGE="${LUNARSIM_ISAACLAB_IMAGE:-lunarsim-isaaclab:6.0.1}"
+  log "optional: building $ISAACLAB_IMAGE (adds a real Isaac Lab checkout, needed for" \
+      "isaaclab.sim.SimulationContext-backed camera rendering -- this pulls torch+cu128" \
+      "and can take 10-20+ minutes on the first build). Skip with LUNARSIM_SKIP_ISAACLAB=1."
+  docker build -f "$PROJECT_ROOT/docker/Dockerfile.isaaclab" -t "$ISAACLAB_IMAGE" "$PROJECT_ROOT/docker"
+  log "Done. Isaac Lab image: $ISAACLAB_IMAGE"
+fi
