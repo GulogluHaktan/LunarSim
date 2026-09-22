@@ -115,5 +115,11 @@ merged = LidarPointCloud(
 export_point_cloud(merged, args.out)
 print(f"wrote {args.out}")
 
-simulation_app.close()
-sys.exit(0 if all_hit_count > 0 else 1)
+# Skip simulation_app.close(): its carb tasking teardown has a known
+# benign race ("Destroying busy TaskGroup" assertion -> Aborted) in this
+# environment, always AFTER our output is already written. All work is
+# done, so exit immediately instead of running that teardown.
+import os
+
+sys.stdout.flush()
+os._exit(0 if all_hit_count > 0 else 1)

@@ -170,6 +170,36 @@ Kalan her yer coarse kaynağa (gerçek DEM ya da procedural) düşer. Eski
 `roi.centers: random_16` / tek `sigma_m` biçimi de hâlâ çalışıyor (tüm ROI'ler
 aynı yarıçap/güç).
 
+![Gaussian ROI ile bölgesel detay](assets/plots/roi_differential_detail.png)
+
+Solda tek bir ROI merkezinde (ağırlık 1.0) ince detay tam açık, uzaklaştıkça
+Gaussian ile sıfıra düşüyor; sağda fark haritası aynı etkiyi gösteriyor.
+
+## Tekerlek izi / zemin deformasyonu
+
+Bekker basınç-batma modeliyle (`core.terrain.deformation`) her tekerlek
+teması, zeminin height-field'ına gerçek bir çöküntü + kenarlarda kabaran
+berm olarak işleniyor (OmniLRS'in de yaptığı gibi, tam FEM/soft-body çözümü
+değil, doğrudan height-field damgalama):
+
+```python
+from lunarsim.core.terrain import BekkerSoilParams, bekker_sinkage_m, wheel_footprint_stamp
+
+sinkage_m = bekker_sinkage_m(load_n=300*1.62/4, wheel_width_m=0.15)  # tek tekerlek yükü
+wheel_footprint_stamp(tile.height, tile.res_m, contact_x_m, contact_y_m,
+                       heading_rad, wheel_width_m=0.15, contact_length_m=0.2,
+                       sinkage_m=sinkage_m)
+```
+
+![Tekerlek izi demosu](assets/plots/wheel_tracks_cpu_demo.png)
+
+**Bu görsel CPU'da, Isaac Sim'siz, saf NumPy ile üretilmiş bir mekanizma
+demosudur** (300 kg'lık bir rover için ~1mm/tekerlek batma, kavisli 4
+tekerlekli bir yol boyunca 240 damga) — modelin doğruluğunu/şeklini
+göstermek için, gerçek bir Isaac sahnesi/GPU sonucu değil. Gerçek Isaac
+sahnesine (height-field mesh + collision'ı canlı güncelleyerek) bağlama işi
+henüz yapılmadı; GPU'lu makinede test edilecek.
+
 ## Arazi gerçekçilik kontrolü
 
 ```python
@@ -271,6 +301,7 @@ scripts/run_isaaclab_speed_test.sh 16 64 256
 - **Kaya collision fiziksel olarak doğrulandı**: 2m'lik gerçek bir kayanın üstüne 10m'den bırakılan top, tam beklenen temas yüksekliğinde (z=2.200m) durdu.
 - **Toz parçacıkları gerçekten hareket ediyor**: 410 parçacıklı patlama, gerçek balistik yörüngeyle 265 zaman örneği, 89m'ye varan menzil (drag yok, tam vakum kinematiği).
 - **RL arayüzü uçtan uca çalışıyor**: gerçek bir SB3 PPO, `AnalyticLanderEnv` üzerinde 4 paralel env ile ~3200 step/s eğitim yapıyor.
+- **LiDAR point cloud'u tamamen canlı simülasyondan**: `scripts/isaac_crater_lidar_scan.py`, 10 sensör pozisyonundan atılan 67.590 ışının tamamı gerçek `omni.physx` `raycast_closest()` ile canlı collision mesh'e karşı atılıyor (offline/numpy hesap yok) — 49.670 gerçek hit, `.ply` olarak export edildi. (Kapanışta görülen `carb::tasking` "Destroying busy TaskGroup" hatası, veriler zaten yazıldıktan sonraki zararsız bir teardown race'iydi — script artık `simulation_app.close()` yerine anında `os._exit()` ile çıkıyor, bu hatayı hiç görmeyecek.)
 - Bu süreçte gerçek hatalar bulundu ve düzeltildi: kaya prim'leri açık `Xform` tipiyle authoring edilirse referans edilen asset'in gerçek tipini gölgeliyordu; `PointInstancer.CreateAttribute` diye bir şey yok (`GetPrim().CreateAttribute` gerekiyor); çift physics scene LiDAR sonuçlarını bozuyordu.
 - **Kamera render çözüldü**: bare `isaacsim.core.api.World` ile RGB frame hiç ilerlemiyordu; gerçek Isaac Lab `SimulationContext` + `isaaclab.sensors.camera.Camera` ile (`docker/Dockerfile.isaaclab`, `scripts/isaaclab_test_camera.py`) çözüldü. Gerçek 240×320 RGB görüntü üretildi ve güneş açısıyla sinyal **fiziksel olarak doğru şekilde** arttı (12-bit DN ortalaması: 2°→516, 15°→1003, 45°→1735, 80°→1964) — düşük güneş açısında sensöre gerçekten az ışık ulaşıyor (güney kutbu gibi zor aydınlatma koşullarının gerçek fiziksel karşılığı, render hatası değil).
 
