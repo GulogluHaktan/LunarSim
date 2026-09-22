@@ -22,6 +22,11 @@ parser.add_argument("--out", type=str, default="/workspace/LunarSim/out/rover_li
 parser.add_argument("--sensor-height-m", type=float, default=1.6)
 parser.add_argument("--n-channels", type=int, default=128)
 parser.add_argument("--horizontal-res-deg", type=float, default=0.12)
+parser.add_argument("--terrain-size-m", type=float, default=80.0)
+parser.add_argument("--terrain-res-m", type=float, default=0.15,
+                     help="collision mesh resolution -- lower = more geometric detail but "
+                          "more PhysX triangles to cook (VRAM/time cost); 0.06-0.08 is a "
+                          "reasonable high-detail ceiling on an 8GB card for an 80m tile.")
 args, _ = parser.parse_known_args()
 
 from isaacsim import SimulationApp
@@ -49,7 +54,7 @@ ps.CreateGravityDirectionAttr(Gf.Vec3f(0, 0, -1))
 ps.CreateGravityMagnitudeAttr(1.62)
 
 cfg = TerrainConfig(
-    mode="fine", size_m=80.0, res_m=0.15, seed=42,
+    mode="fine", size_m=args.terrain_size_m, res_m=args.terrain_res_m, seed=42,
     coarse_source="procedural",
     hills={"amplitude_m": 0.6, "wavelength_m": 25.0, "hurst": 0.75},
     craters={"count_scale": 1.2, "d_min_m": 1.0, "d_max_m": 30.0, "b": 1.9,
@@ -58,7 +63,9 @@ cfg = TerrainConfig(
     roi={"centers": None},
     curvature=False,
 )
-print("generating real terrain tile (rover-scale, cratered)...")
+n_grid = int(round(args.terrain_size_m / args.terrain_res_m))
+print(f"generating real terrain tile ({n_grid}x{n_grid} = {n_grid*n_grid:,} verts, "
+      f"~{2*(n_grid-1)**2:,} collision triangles)...")
 tile = generate_tile(cfg)
 add_heightfield_collision(stage, "/World/Terrain/Collision", tile, hide_from_render=False)
 print(f"terrain height range: {tile.height.min():.2f} to {tile.height.max():.2f} m")
