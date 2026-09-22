@@ -14,6 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "matplotlib"]
+viz = ["open3d"]
 
 [build-system]
 requires = ["setuptools>=61"]
