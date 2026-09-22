@@ -26,10 +26,38 @@ if [[ -z "${DISPLAY:-}" ]]; then
   exit 1
 fi
 
-echo "[LunarSim] DISPLAY=$DISPLAY"
+echo "[LunarSim] DISPLAY=$DISPLAY (session type: ${XDG_SESSION_TYPE:-unknown})"
 if ! xhost +local:docker; then
   echo "[LunarSim] 'xhost +local:docker' failed -- the container will likely not be able to" \
        "open the display. Install 'xhost' (x11-xserver-utils / xorg-xhost package) and retry." >&2
+fi
+
+# A stray isaac_sim process/container from a previous run that never
+# actually opened a window (killed with Ctrl-C, terminal closed, etc.)
+# can sit holding the GPU/display, so a new launch looks "stuck" at high
+# GPU util with no window ever appearing -- clear those first.
+STALE=$(pgrep -f isaac_sim || true)
+if [[ -n "$STALE" ]]; then
+  echo "[LunarSim] killing stale isaac_sim process(es): $STALE"
+  pkill -9 -f isaac_sim || true
+  sleep 1
+fi
+STALE_CTR=$(docker ps -q --filter "ancestor=$IMAGE")
+if [[ -n "$STALE_CTR" ]]; then
+  echo "[LunarSim] removing stale container(s) from image $IMAGE: $STALE_CTR"
+  docker rm -f $STALE_CTR || true
+fi
+rm -f /dev/shm/carb-* /dev/shm/omni-* 2>/dev/null || true
+
+# XAUTHORITY forwarding is more reliable than xhost alone on some setups
+# (notably GNOME/Wayland via XWayland) -- mount the real cookie file too.
+XAUTH_FILE="${XAUTHORITY:-$HOME/.Xauthority}"
+XAUTH_MOUNT=()
+if [[ -f "$XAUTH_FILE" ]]; then
+  XAUTH_MOUNT=(-e XAUTHORITY=/root/.Xauthority -v "$XAUTH_FILE":/root/.Xauthority:ro)
+else
+  echo "[LunarSim] warning: no Xauthority file found at $XAUTH_FILE -- if the window still" \
+       "doesn't appear, run 'xauth list' on the host to check it exists." >&2
 fi
 
 docker run --rm \
@@ -43,6 +71,9 @@ docker run --rm \
   -e DISPLAY="$DISPLAY" \
   -e NVIDIA_DRIVER_CAPABILITIES=all \
   -e NVIDIA_VISIBLE_DEVICES=all \
+  -e __GLX_VENDOR_LIBRARY_NAME=nvidia \
+  -e __NV_PRIME_RENDER_OFFLOAD=1 \
+  "${XAUTH_MOUNT[@]}" \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
   -v "$PROJECT_ROOT":/workspace/LunarSim \
   -v "$CACHE_ROOT/cache/ov":/root/.cache/ov \

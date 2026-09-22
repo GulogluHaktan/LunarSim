@@ -14,7 +14,13 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--lunarsim-root", type=str, default="/workspace/LunarSim")
-parser.add_argument("--path-tracing", action="store_true", default=True)
+# REAL BUG FIXED: this used to default to path tracing (spp=256), which
+# re-accumulates all 256 samples on every camera move -- for an
+# interactive viewport that means it never looks "done" while orbiting,
+# pins the GPU near 100%, and can look indistinguishable from a hang.
+# Real-time raster is the right default for live interaction; pass
+# --path-tracing explicitly if you want a single still frame's quality.
+parser.add_argument("--path-tracing", dest="path_tracing", action="store_true", default=False)
 parser.add_argument("--no-path-tracing", dest="path_tracing", action="store_false")
 parser.add_argument("--spp", type=int, default=256)
 parser.add_argument("--mesh-lod", type=int, default=2)
