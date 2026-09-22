@@ -42,15 +42,85 @@ def create_sun_light(stage, prim_path: str, sun_pos: SunPosition, angular_diamet
     return light
 
 
-def disable_ambient(stage, dome_light_prim_path: str | None = None):
-    """Ensure no skylight/ambient contributes -- delete or zero-intensity any dome light."""
-    if dome_light_prim_path is None:
-        return
-    prim = stage.GetPrimAtPath(dome_light_prim_path)
-    if prim.IsValid():
-        from pxr import UsdLux
+def set_no_ambient_render_settings(dlss_quality: bool = True, ambient_occlusion: bool = True):
+    """Fix render-level settings that inject light/detail our own scene
+    doesn't author -- these are NOT USD prims, so `disable_ambient` (which
+    only scans for `UsdLux.DomeLight` prims) can't see or fix them:
 
-        UsdLux.DomeLight(prim).CreateIntensityAttr(0.0)
+    - `/rtx/sceneDb/ambientLightIntensity` defaults to **1.0** in Isaac
+      Sim's own shipped rendering-mode presets (both "quality" and
+      "performance" .kit configs) -- a flat renderer-level ambient fill
+      that directly contradicts the plan's "no ambient, shadows go to
+      black" requirement and was the real cause of an early render looking
+      washed-out/glossy rather than looking like unlit vacuum shadow. Set
+      to 0.0 here.
+    - `/rtx/post/dlss/execMode` defaults to 0 ("Performance", the most
+      aggressive/lowest-quality upscale mode) in the headless app config
+      used to run these scripts. At the camera resolutions used here (a
+      few hundred px), Performance-mode DLSS reconstruction produces a
+      visible checkerboard/dither artifact at shadow boundaries -- set to
+      2 ("Quality") to avoid it. Pass `dlss_quality=False` to skip (e.g.
+      if you deliberately want the cheaper mode for a fast preview).
+
+    Call this once after the sim/renderer is up, before capturing frames
+    you care about the look of.
+    """
+    import carb.settings
+
+    settings = carb.settings.get_settings()
+    settings.set("/rtx/sceneDb/ambientLightIntensity", 0.0)
+    if dlss_quality:
+        settings.set("/rtx/post/dlss/execMode", 2)
+    if ambient_occlusion:
+        settings.set("/rtx/ambientOcclusion/enabled", True)
+
+
+def enable_path_tracing(spp: int = 256):
+    """Switch the renderer from real-time raster ("RaytracedLighting", the
+    Isaac Sim default) to path tracing.
+
+    The real-time mode's screen-space shadow/AO/upscale approximations
+    (soft shadows via a shadow map, DLSS reconstruction, etc.) produced
+    visible checkerboard/dither artifacts at shadow boundaries and a
+    lingering specular sheen in early lunarsim orbit-demo renders that
+    survived multiple targeted real-time-specific fixes (ambient/DLSS
+    settings, material specular workflow). Path tracing computes shadows
+    and shading from actual traced rays instead of those approximations,
+    which is the more direct fix when the real-time pipeline's
+    approximations themselves are the problem. Expect meaningfully slower
+    renders in exchange.
+    """
+    import carb.settings
+
+    settings = carb.settings.get_settings()
+    settings.set("/rtx/rendermode", "PathTracing")
+    settings.set("/rtx/pathtracing/spp", spp)
+    settings.set("/rtx/pathtracing/totalSpp", spp)
+    settings.set("/rtx/pathtracing/maxSamplesPerLaunch", 1_000_000)
+
+
+def disable_ambient(stage, dome_light_prim_path: str | None = None):
+    """Ensure no skylight/ambient contributes -- zero-intensity any dome light.
+
+    With an explicit `dome_light_prim_path`, only that prim is touched. With
+    `None` (the common case -- Kit/Isaac Sim sometimes seeds a new stage with
+    a default dome light we never authored and don't have a path for), the
+    whole stage is scanned for `UsdLux.DomeLight` prims and all of them are
+    zeroed; this is the call to make right before capturing a frame if
+    unexplained specular/ambient brightness shows up despite `create_sun_light`
+    being the only light explicitly authored.
+    """
+    from pxr import UsdLux
+
+    if dome_light_prim_path is not None:
+        prim = stage.GetPrimAtPath(dome_light_prim_path)
+        if prim.IsValid():
+            UsdLux.DomeLight(prim).CreateIntensityAttr(0.0)
+        return
+
+    for prim in stage.Traverse():
+        if prim.IsA(UsdLux.DomeLight):
+            UsdLux.DomeLight(prim).CreateIntensityAttr(0.0)
 
 
 def _orient_quat_for_shine_direction(shine_dir: np.ndarray):

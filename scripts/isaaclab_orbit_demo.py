@@ -24,6 +24,8 @@ parser.add_argument("--width", type=int, default=1280)
 parser.add_argument("--height", type=int, default=960)
 parser.add_argument("--mesh-lod", type=int, default=2)
 parser.add_argument("--settle-steps", type=int, default=12)
+parser.add_argument("--path-tracing", action="store_true", default=False)
+parser.add_argument("--spp", type=int, default=256)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
 
@@ -68,12 +70,30 @@ cfg = TerrainConfig(
 )
 tile = generate_tile(cfg)
 add_heightfield_collision(stage, "/World/Terrain/Collision", tile)
-render_mesh = build_render_mesh(stage, "/World/Terrain/Render", tile, lod=args_cli.mesh_lod)
-material = create_regolith_material(stage, "/World/Looks/Regolith", albedo=0.11, brdf="albedo")
+render_mesh = build_render_mesh(stage, "/World/Terrain/Render", tile, lod=args_cli.mesh_lod, uv_tile_size_m=2.0)
+
+from lunarsim.core.lighting.regolith_texture import bake_regolith_normal_map
+import imageio.v2 as _imageio_nm
+
+normal_map_path = "/tmp/lunarsim_regolith_normal.png"
+normal_map = bake_regolith_normal_map(resolution=1024, physical_size_m=2.0, seed=cfg.seed)
+_imageio_nm.imwrite(normal_map_path, normal_map)
+print(f"baked regolith micro-bump normal map -> {normal_map_path}")
+
+material = create_regolith_material(
+    stage, "/World/Looks/Regolith", albedo=0.11, brdf="albedo", normal_map_path=normal_map_path
+)
 UsdShade.MaterialBindingAPI.Apply(render_mesh.GetPrim()).Bind(material)
 
 sun_pos = SunPosition(elevation_deg=35.0, azimuth_deg=120.0)
 create_sun_light(stage, "/World/Sun", sun_pos, angular_diameter_deg=0.53)
+
+from lunarsim.adapters.isaac.lighting import disable_ambient, enable_path_tracing, set_no_ambient_render_settings
+
+disable_ambient(stage)  # kill any Kit-seeded default dome light we didn't author
+set_no_ambient_render_settings()  # zero the renderer-level ambient fill + use quality-mode DLSS
+if args_cli.path_tracing:
+    enable_path_tracing(spp=args_cli.spp)
 
 camera_cfg = CameraCfg(
     prim_path="/World/OrbitCamera",
@@ -86,6 +106,10 @@ camera_cfg = CameraCfg(
 camera = Camera(cfg=camera_cfg)
 
 sim.reset()
+disable_ambient(stage)  # re-check: some Kit extensions seed a default dome light on reset
+set_no_ambient_render_settings()
+if args_cli.path_tracing:
+    enable_path_tracing(spp=args_cli.spp)
 
 print("warming up renderer...")
 for _ in range(60):

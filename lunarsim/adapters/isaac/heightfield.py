@@ -20,8 +20,8 @@ import numpy as np
 from lunarsim.core.terrain.generate import Tile
 
 
-def _mesh_from_heightfield(stage, prim_path: str, height: np.ndarray, res_m: float):
-    from pxr import UsdGeom
+def _mesh_from_heightfield(stage, prim_path: str, height: np.ndarray, res_m: float, uv_tile_size_m: float | None = None):
+    from pxr import Sdf, UsdGeom
 
     n = height.shape[0]
     ax = (np.arange(n) - (n - 1) / 2) * res_m
@@ -43,24 +43,53 @@ def _mesh_from_heightfield(stage, prim_path: str, height: np.ndarray, res_m: flo
     mesh.CreatePointsAttr(points.tolist())
     mesh.CreateFaceVertexCountsAttr(face_counts)
     mesh.CreateFaceVertexIndicesAttr(face_indices)
+
+    if uv_tile_size_m is not None:
+        # world-space planar UVs, tiled every `uv_tile_size_m` meters so a
+        # small micro-bump texture (see core.lighting.regolith_texture)
+        # repeats at a consistent real-world scale regardless of tile size --
+        # sampled with wrap="repeat" on the texture reader in materials.py.
+        uv = np.stack([xx / uv_tile_size_m, yy / uv_tile_size_m], axis=-1).reshape(-1, 2)
+        primvars_api = UsdGeom.PrimvarsAPI(mesh.GetPrim())
+        st_attr = primvars_api.CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.vertex)
+        st_attr.Set(uv.tolist())
+
     return mesh
 
 
-def add_heightfield_collision(stage, prim_path: str, tile: Tile):
+def add_heightfield_collision(stage, prim_path: str, tile: Tile, hide_from_render: bool = True):
     """Author an exact-triangle-mesh PhysX collider from `tile.height`.
 
     Uses the tile's native resolution directly (no extra decimation) --
     callers that want a cheaper collision mesh should downsample `tile`
     before calling this, since the collider intentionally matches whatever
     grid was passed in.
+
+    REAL BUG FIXED HERE: this collider mesh and `build_render_mesh`'s output
+    occupy nearly the same 3D space (same macro heightfield, different
+    resolutions) -- when both were left visible, the renderer sees two
+    overlapping, non-identical surfaces, which self-shadow/z-fight against
+    each other and produced a persistent grid-aligned checkerboard/dither
+    artifact in shadow transition zones. Reproduced identically under both
+    real-time raster and path tracing, and unaffected by the render mesh's
+    upsampling order (bilinear vs. cubic) -- ruling out a renderer-setting
+    or geometry-smoothness cause and pointing at the two-overlapping-meshes
+    setup itself. Fixed by hiding the collision mesh from the renderer
+    (`UsdGeom.Imageable.MakeInvisible()`) by default -- it was only ever
+    meant to be a physics collider, per plan section 3 ("Collision =
+    heightfield, render mesh ayrı ve daha ince"). Pass `hide_from_render=False`
+    only for debugging (e.g. to visually inspect the collider itself).
     """
-    from pxr import Sdf, UsdPhysics
+    from pxr import Sdf, UsdGeom, UsdPhysics
 
     mesh = _mesh_from_heightfield(stage, prim_path, tile.height, tile.res_m)
 
     UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
     mesh.GetPrim().CreateAttribute("physxCollision:approximation", Sdf.ValueTypeNames.Token).Set("none")
     mesh.GetPrim().CreateAttribute("physxCollision:collisionEnabled", Sdf.ValueTypeNames.Bool).Set(True)
+
+    if hide_from_render:
+        UsdGeom.Imageable(mesh.GetPrim()).MakeInvisible()
 
     return mesh
 
@@ -81,17 +110,33 @@ def apply_regolith_physics_material(stage, prim_path: str, static_friction: floa
     return material
 
 
-def build_render_mesh(stage, prim_path: str, tile: Tile, lod: int = 0):
+def build_render_mesh(stage, prim_path: str, tile: Tile, lod: int = 0, uv_tile_size_m: float | None = 2.0):
     """Build a non-colliding `UsdGeom.Mesh` render surface from `tile.height`,
-    at `res_m / (2**lod)` effective density via bilinear upsampling (finer
+    at `res_m / (2**lod)` effective density via cubic upsampling (finer
     than the collision mesh -- see module docstring).
+
+    REAL BUG FIXED HERE: this used to upsample with `order=1` (bilinear).
+    Bilinear upsampling of a heightfield produces a *piecewise-bilinear*
+    surface -- locally near-planar micro-facets aligned to the original
+    coarse grid. At grazing sun angles that surface self-shadows across
+    those facet boundaries, producing a visible grid-aligned checkerboard/
+    dither pattern in the shadow transition zones -- confirmed to be a
+    geometry problem, not a renderer setting, by reproducing it identically
+    under both real-time raster AND path tracing. `order=3` (cubic) keeps
+    the surface curvature-continuous across the original grid, removing the
+    facet boundaries that caused it.
+
+    `uv_tile_size_m` (default 2 m) sets world-space planar UV tiling so a
+    micro-bump normal map (see `core.lighting.regolith_texture` +
+    `materials.create_regolith_material(..., normal_map_path=...)`) repeats
+    at a consistent real-world scale; pass `None` to skip UV authoring.
     """
     height = tile.height
     res_m = tile.res_m
     if lod > 0:
         from scipy.ndimage import zoom
 
-        height = zoom(height, 2**lod, order=1)
+        height = zoom(height, 2**lod, order=3)
         res_m = tile.res_m / (2**lod)
 
-    return _mesh_from_heightfield(stage, prim_path, height, res_m)
+    return _mesh_from_heightfield(stage, prim_path, height, res_m, uv_tile_size_m=uv_tile_size_m)
