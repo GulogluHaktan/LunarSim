@@ -26,7 +26,11 @@ if [[ -z "${DISPLAY:-}" ]]; then
   exit 1
 fi
 
-xhost +local:docker >/dev/null 2>&1 || echo "[LunarSim] warning: 'xhost +local:docker' failed -- the container may not be able to open the display."
+echo "[LunarSim] DISPLAY=$DISPLAY"
+if ! xhost +local:docker; then
+  echo "[LunarSim] 'xhost +local:docker' failed -- the container will likely not be able to" \
+       "open the display. Install 'xhost' (x11-xserver-utils / xorg-xhost package) and retry." >&2
+fi
 
 docker run --rm \
   --gpus all \
@@ -37,6 +41,8 @@ docker run --rm \
   -e ACCEPT_EULA=Y \
   -e PRIVACY_CONSENT=Y \
   -e DISPLAY="$DISPLAY" \
+  -e NVIDIA_DRIVER_CAPABILITIES=all \
+  -e NVIDIA_VISIBLE_DEVICES=all \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
   -v "$PROJECT_ROOT":/workspace/LunarSim \
   -v "$CACHE_ROOT/cache/ov":/root/.cache/ov \
