@@ -26,6 +26,10 @@ parser.add_argument("--mesh-lod", type=int, default=2)
 parser.add_argument("--settle-steps", type=int, default=12)
 parser.add_argument("--path-tracing", action="store_true", default=False)
 parser.add_argument("--spp", type=int, default=256)
+parser.add_argument("--center-detail-radius-m", type=float, default=45.0,
+                     help="ROI falloff radius (sigma_m) for full fine detail at world "
+                          "origin (0,0), where the camera orbits -- tapers to coarse "
+                          "detail further out.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
 
@@ -59,13 +63,18 @@ sim.set_camera_view([0.0, -args_cli.radius_m, args_cli.height_m], [0.0, 0.0, 0.0
 stage = omni.usd.get_context().get_stage()
 
 cfg = TerrainConfig(
-    mode="blend", size_m=150.0, res_m=0.5, coarse_res_m=2.0, seed=21,
+    mode="blend", size_m=150.0, res_m=0.25, coarse_res_m=2.0, seed=21,
     coarse_source="procedural",
     hills={"amplitude_m": 3.0, "wavelength_m": 40.0, "hurst": 0.75},
     craters={"count_scale": 1.5, "d_min_m": 1.0, "d_max_m": 30.0, "b": 2.4,
              "depth_ratio": 0.12, "age": 0.2},
     rocks={"density_scale": 1.0, "d_max_m": 1.0},
-    roi={"sigma_m": 40.0, "centers": None},
+    # REAL BUG FIXED: {"sigma_m": 40.0, "centers": None} actually meant "one
+    # RANDOM center" (see generate.py's `centers is None` branch), not "the
+    # tile center" -- explicit regions at world (0,0), where the camera
+    # actually orbits, is what guarantees max detail is where it's seen.
+    roi={"regions": [{"x_m": 0.0, "y_m": 0.0,
+                       "sigma_m": args_cli.center_detail_radius_m, "weight": 1.0}]},
     curvature=False,
 )
 tile = generate_tile(cfg)
