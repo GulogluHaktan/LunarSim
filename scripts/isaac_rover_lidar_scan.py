@@ -32,6 +32,19 @@ parser.add_argument("--max-range-m", type=float, default=22.0,
                           "close-range footprint (not a wide 60m+ survey) is what actually "
                           "looks dense up close -- a fixed point count over a bigger area "
                           "just looks sparse again once you frame in on any one part of it.")
+parser.add_argument("--n-frames", type=int, default=6,
+                     help="a single static spin always shows discrete concentric rings "
+                          "with real gaps between channels/azimuth steps -- that's correct "
+                          "single-frame LiDAR physics, not a bug (see the reference image "
+                          "of a single automotive spinning LiDAR sweep). A dense, near-"
+                          "photographic-looking cloud like a real mapping product is built "
+                          "by merging MANY frames as the platform drifts/re-levels slightly "
+                          "between spins, which interlaces each frame's rings into the "
+                          "previous frames' gaps. This does that for real: N real PhysX "
+                          "sweeps from N slightly jittered sensor poses, merged.")
+parser.add_argument("--jitter-m", type=float, default=0.06,
+                     help="max random XY sensor-position offset between frames (m)")
+parser.add_argument("--seed", type=int, default=0)
 args, _ = parser.parse_known_args()
 
 from isaacsim import SimulationApp
@@ -90,30 +103,47 @@ ground_z = ground_hit["position"][2] if ground_hit["hit"] else 0.0
 sensor_pos = np.array([0.0, 0.0, ground_z + args.sensor_height_m])
 print(f"sensor position: {sensor_pos.tolist()} (ground z={ground_z:.3f})")
 
-pattern = LidarScanPattern.spinning(
-    n_channels=args.n_channels, vertical_fov_deg=(-55.0, 10.0),
-    horizontal_res_deg=args.horizontal_res_deg, horizontal_fov_deg=(0.0, 360.0),
-)
-dirs = pattern.ray_directions()
-print(f"casting {len(dirs)} real rays from a single stationary 360-deg sweep "
-      f"(max range {args.max_range_m}m -> close-range, dense)...")
-
+rng = np.random.default_rng(args.seed)
 max_range = args.max_range_m
 all_points = []
 hit_count = 0
-for k, d in enumerate(dirs):
-    origin = Gf.Vec3f(*sensor_pos.tolist())
-    direction = Gf.Vec3f(*d.tolist())
-    hit_info = physx_query.raycast_closest(origin, direction, max_range)
-    if hit_info["hit"]:
-        all_points.append([hit_info["position"][0], hit_info["position"][1], hit_info["position"][2]])
-        hit_count += 1
-    if (k + 1) % 20000 == 0:
-        print(f"  {k+1}/{len(dirs)} rays cast, {hit_count} hits so far")
+ray_count = 0
+
+for frame in range(args.n_frames):
+    # Small per-frame jitter (position + azimuth/elevation start offset)
+    # is what interlaces this frame's rings into the gaps left by the
+    # previous frames' rings -- a real effect of the platform never
+    # holding EXACTLY the same pose between spins, not synthetic noise.
+    dx, dy = rng.uniform(-args.jitter_m, args.jitter_m, size=2)
+    frame_pos = sensor_pos + np.array([dx, dy, 0.0])
+    az_offset_deg = rng.uniform(0.0, args.horizontal_res_deg)
+    el_offset_deg = rng.uniform(-0.15, 0.15)
+
+    pattern = LidarScanPattern.spinning(
+        n_channels=args.n_channels,
+        vertical_fov_deg=(-55.0 + el_offset_deg, 10.0 + el_offset_deg),
+        horizontal_res_deg=args.horizontal_res_deg,
+        horizontal_fov_deg=(az_offset_deg, 360.0 + az_offset_deg),
+    )
+    dirs = pattern.ray_directions()
+    ray_count += len(dirs)
+
+    frame_hits = 0
+    for d in dirs:
+        origin = Gf.Vec3f(*frame_pos.tolist())
+        direction = Gf.Vec3f(*d.tolist())
+        hit_info = physx_query.raycast_closest(origin, direction, max_range)
+        if hit_info["hit"]:
+            all_points.append([hit_info["position"][0], hit_info["position"][1], hit_info["position"][2]])
+            frame_hits += 1
+    hit_count += frame_hits
+    print(f"  frame {frame+1}/{args.n_frames} (jitter dx={dx:+.3f} dy={dy:+.3f}m): "
+          f"{frame_hits} hits, {hit_count} cumulative")
 
 pts = np.array(all_points)
-print(f"\nTOTAL: {hit_count} real PhysX raycast hits out of {len(dirs)} rays, "
-      f"from ONE stationary sensor position, all against the live simulation's collision mesh.")
+print(f"\nTOTAL: {hit_count} real PhysX raycast hits out of {ray_count} rays, "
+      f"from {args.n_frames} slightly-jittered sensor poses (max range {args.max_range_m}m), "
+      f"all against the live simulation's collision mesh.")
 
 merged = LidarPointCloud(
     points_m=pts, range_m=np.zeros(len(pts)), intensity=np.zeros(len(pts)),
