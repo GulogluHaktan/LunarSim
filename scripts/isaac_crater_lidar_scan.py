@@ -68,12 +68,23 @@ timeline.pause()
 physx_query = omni.physx.get_physx_scene_query_interface()
 
 # ---------------------------------------------------------------------------
-# Multi-position survey scan, real PhysX raycasts only
+# Multi-position survey scan, real PhysX raycasts only.
+#
+# REAL DENSITY FIX: the first version of this scan (10 positions, 90
+# channels, 1.2 deg horizontal res) put only ~1.5 pts/m^2 over the full
+# 180x180m tile -- visually it looked like thin scattered lines/rings, not
+# a dense point-cloud "surface", because the ray budget was spread across
+# too much ground. A close-range descent/landing-site survey (like the
+# reference scan this is meant to resemble) covers a much smaller footprint
+# at much higher angular density. Tightened the orbit radius/altitude and
+# raised channel count + angular resolution so the same real-PhysX-raycast
+# approach now lands on a ~70m-wide patch around the crater at roughly two
+# orders of magnitude higher point density.
 # ---------------------------------------------------------------------------
-n_positions = 10
-radius = 70.0
-altitude = 45.0
-max_range = 180.0
+n_positions = 16
+radius = 35.0
+altitude = 22.0
+max_range = 120.0
 
 all_points = []
 all_hit_count = 0
@@ -86,7 +97,7 @@ for i in range(n_positions):
     yaw_deg = np.degrees(np.arctan2(to_center[1], to_center[0]))
 
     pattern = LidarScanPattern.spinning(
-        n_channels=90, vertical_fov_deg=(-75, 5), horizontal_res_deg=1.2,
+        n_channels=128, vertical_fov_deg=(-70, 15), horizontal_res_deg=0.25,
         horizontal_fov_deg=(yaw_deg - 45, yaw_deg + 45),
     )
     dirs = pattern.ray_directions()
