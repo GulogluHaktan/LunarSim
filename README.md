@@ -303,6 +303,7 @@ Kalan/eksik:
 | `scripts/run_isaaclab_camera_test.sh` | Gerçek RGB kamera render doğrulaması (güneş açısı ↔ parlaklık) | Evet (Isaac **Lab**) |
 | `scripts/run_isaaclab_speed_test.sh [n ...]` | Çoklu-env fizik hız testi (paylaşılan gerçek terrain) | Evet (Isaac **Lab**) |
 | `scripts/run_isaaclab_orbit_demo.sh` | Kamera yörünge demosu → mp4 | Evet (Isaac **Lab**) |
+| `scripts/run_isaaclab_live_view.sh` | **Canlı/interaktif** Isaac Sim penceresi (kendi farenle gez) | Evet (Isaac **Lab**), gerçek ekran/DISPLAY gerekir |
 | `scripts/isaaclab_test_rtx_lidar.py` | RTX LiDAR (Isaac Lab `SimulationContext` üzerinden) | Evet (Isaac **Lab**) |
 
 `run_isaac_smoke_test.sh` ile başlayanlar hafif `lunarsim-isaacsim` imajını (sadece Isaac
