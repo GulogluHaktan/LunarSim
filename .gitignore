@@ -5,3 +5,6 @@ __pycache__/
 /out/
 .cache/
 *.bsp
+*.tf
+*.bpc
+*.tpc
