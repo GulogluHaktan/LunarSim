@@ -119,14 +119,40 @@ start) for everything that doesn't need camera pixels -- collision, LiDAR
 ground truth, dust, physics speed were all validated on it. Only reach for
 the Isaac Lab image when you actually need rendered images.
 
+## Attempted and NOT working: RTX LiDAR (`sensors.py::create_rtx_lidar`)
+
+This is now a real implementation against the actual API (not a placeholder):
+`isaacsim.sensors.experimental.rtx.Lidar.create(path, config="OS0", ...)` +
+`LidarSensor(lidar, annotators=["generic-model-output"])`, matching NVIDIA's
+own test suite (`isaacsim.sensors.experimental.rtx/.../tests/test_lidar.py`,
+`test_lidar_sensor.py`) and using a real hardware sensor profile (Ouster OS0;
+also available: OS1/OS2/VLS-128, Hesai XT32, several SICK units -- see
+`SUPPORTED_LIDAR_CONFIGS` in that extension). Two bring-up paths were tried
+and **both failed** (`scripts/isaac_test_rtx_lidar.py`,
+`scripts/isaaclab_test_rtx_lidar.py`):
+
+- Bare `isaacsim.core.api.World` (with or without `enable_cameras=True`,
+  60 step attempts): the annotator never returns valid data --
+  `parse_generic_model_output_data` logs "Invalid magic number" on every
+  single attempt, meaning the render pipeline hands back an uninitialized/
+  garbage buffer instead of a real GenericModelOutput frame.
+- `isaaclab.sim.SimulationContext` (the path that *does* work for the
+  camera, see below): the process **segfaults** (exit 139) during startup/
+  sensor creation, before any of our own code's print statements even run.
+
+This extension is explicitly namespaced `experimental` by NVIDIA, and both
+failure modes point at real instability in this specific Isaac Sim 6.0.1 /
+Isaac Lab `v3.0.0-beta2.patch1` combination in a headless container, not an
+obvious usage mistake (the calls match the vendor's own tests verbatim).
+**Use `core.metadata.lidar.raycast_lidar` instead** -- it's cross-validated
+to 0.37mm mean error against live PhysX raycasts (see above) and has no
+such instability. If GPU-raytraced RTX LiDAR is specifically required for a
+future need, the next things to try: a non-experimental/older RTX LiDAR
+namespace if the installed Isaac version has one, a newer/older Isaac Sim
+patch release, or running with a real display instead of fully headless.
+
 ## Other unverified pieces (documented, not yet exercised against a live scene)
 
-- **RTX LiDAR** (`sensors.py::create_rtx_lidar`): still a structural
-  placeholder, same as before -- no reference implementation was found even
-  in the prior LunarRocket integration (it never implemented RTX LiDAR
-  either, only the analytic path). Prefer `core.metadata.lidar.raycast_lidar`
-  (now cross-validated, see above) unless GPU-accelerated RTX LiDAR is
-  specifically required.
 - **Hapke MDL material**: `materials.py` still falls back to a flat
   `UsdPreviewSurface` approximation for `hapke`/`hapke_approx`; no custom MDL
   shader is bundled.

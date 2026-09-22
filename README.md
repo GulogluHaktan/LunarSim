@@ -8,10 +8,57 @@ Detaylı tasarım kararları için `LUNARSIM_PLAN.md`'ye bakın (Downloads'ta).
 
 ## Kurulum
 
+**1) Core (Isaac gerekmez, arazi/ışık/LiDAR/toz/RL üretimi ve testleri için yeterli):**
+
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m pytest tests/ -v   # 59 test, hepsi geçmeli
 ```
+
+**2) Isaac Sim / Isaac Lab (gerçek fizik/render doğrulaması ve `scripts/isaac*`/`scripts/isaaclab*` için gerekli):**
+
+```bash
+./scripts/install_isaac_docker.sh
+```
+
+Bu script sırayla: docker + NVIDIA Container Toolkit'i kontrol eder/kurar (gerekirse
+`sudo` ister), `nvcr.io/nvidia/isaac-sim:6.0.1`'i çeker (~10 GB), üstüne
+`lunarsim-isaacsim:6.0.1`'i (core Python bağımlılıkları eklenmiş) build eder,
+ardından opsiyonel olarak `lunarsim-isaaclab:6.0.1`'i (gerçek Isaac Lab checkout +
+torch/cu128, ~10-15 GB daha, kamera render ve çoklu-env hız testleri için gerekli)
+build eder. Sadece core+Isaac Sim istiyorsan `LUNARSIM_SKIP_ISAACLAB=1` ile
+Isaac Lab aşamasını atlayabilirsin.
+
+**Farklı bir cihazda / diskte kurmak istiyorsan** (ör. ana disk yerine
+`/media/DISK02` gibi harici bir diske indirmek), iki ayrı yer var:
+
+1. **Bizim runtime cache'imiz** (shader/GL cache, pip cache, Isaac'in kendi
+   ayarları — görece küçük, birkaç GB'a kadar çıkabilir): `LUNARSIM_ISAAC_CACHE`
+   env değişkeniyle kontrol edilir, varsayılan `~/docker/isaac-sim`.
+   ```bash
+   export LUNARSIM_ISAAC_CACHE=/media/DISK02/lunarsim-isaac-cache
+   ./scripts/install_isaac_docker.sh
+   # sonraki her çalıştırmada da aynı env değişkenini ver (veya ~/.bashrc'ye ekle)
+   ```
+2. **Asıl büyük veri — docker image'ların kendisi** (~20-25 GB toplam:
+   base Isaac Sim image + torch/Isaac Lab layer'ı): bunlar `LUNARSIM_ISAAC_CACHE`'den
+   BAĞIMSIZ olarak Docker'ın kendi veri dizinine (`/var/lib/docker`, varsayılan
+   olarak her zaman ana diskte) yazılır. Bunları da DISK02'ye almak için Docker'ın
+   `data-root`'unu taşımak gerekiyor (tek seferlik, sistem geneli bir ayar):
+   ```bash
+   sudo systemctl stop docker
+   sudo mkdir -p /media/DISK02/docker-data
+   # varsa mevcut docker verisini taşı (opsiyonel, temiz kurulumda gerek yok):
+   sudo rsync -axP /var/lib/docker/ /media/DISK02/docker-data/
+   sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+   { "data-root": "/media/DISK02/docker-data" }
+   EOF
+   sudo systemctl start docker
+   docker info | grep "Docker Root Dir"   # /media/DISK02/docker-data göstermeli
+   ```
+   Bundan sonra `./scripts/install_isaac_docker.sh` normal şekilde çalışır, tüm
+   image'lar DISK02'ye iner. `/media/DISK02` yolunu kendi disk adına göre değiştir.
 
 ## Gerçek Ay verisi (önemli)
 
@@ -218,14 +265,47 @@ karşı doğrulandı**; kamera authoring doğru ama render pipeline'ı çalışm
 bkz. yukarısı), 10 (preset'ler).
 
 Kalan/eksik:
-- Headless docker'da RGB kamera render'ı: authoring doğru, ama gerçek piksel
-  üretmiyor — gerçek bir Isaac Lab `SimulationContext` gerektiriyor (bare
-  `isaacsim.core.api.World` yetmiyor). Detay: `lunarsim/adapters/isaac/README.md`.
-- RTX LiDAR (GPU-hızlandırmalı) hiç implemente edilmedi/doğrulanmadı; analitik
-  `raycast_lidar` (CPU, gerçek PhysX'e karşı doğrulandı) onun yerine kullanılabilir.
+- **RTX LiDAR denendi, çalışmadı**: gerçek API'ye karşı implemente edildi
+  (`isaacsim.sensors.experimental.rtx`, NVIDIA'nın kendi test suite'iyle birebir
+  aynı kalıp, gerçek Ouster OS0 donanım profili) ama iki bring-up yolu da (bare
+  `World` → hep "Invalid magic number"/geçersiz veri; Isaac Lab `SimulationContext`
+  → segfault) başarısız oldu — bu ortamdaki Isaac Sim 6.0.1'in "experimental"
+  RTX LiDAR extension'ında gerçek bir kararsızlık. Analitik `raycast_lidar`
+  (CPU, gerçek PhysX'e karşı 0.37mm doğrulukla test edildi) kullanılmalı.
+  Detay: `lunarsim/adapters/isaac/README.md`.
 - Hapke BRDF için özel MDL shader yazılmadı (sadece UsdPreviewSurface yaklaşığı var).
-- Çoklu-env (512-1024) fizik hızı ölçülmedi — sadece tek env, ~1900-2100 step/s.
-- Toz/plume, orbital katman, ikinci adapter (MuJoCo/Gazebo), RL entegrasyonu.
+- Isaac'te bazı açılarda görülen küçük speküler parlama artefaktı ayarlanmadı
+  (bkz. `scripts/isaaclab_orbit_demo.py` commit notu) — kozmetik, fonksiyonel değil.
+- Toz/plume görsel efekti var (`core/dust`, Isaac'te doğrulandı) ama plume/wheel
+  olaylarına otomatik bağlanmadı (elle `spawn_dust_burst` çağırman gerekiyor);
+  orbital katman, ikinci adapter (MuJoCo/Gazebo), gerçek Isaac Lab `DirectRLEnv` entegrasyonu yok.
 - Gerçek DEM dosyaları bu ortama indirilmedi; testler sentetik ama gerçekçi
   georeferanslı bir GeoTIFF fixture'ı ile `dem.py`'ı doğruluyor
   (`tests/conftest.py::synthetic_lunar_dem`).
+
+## Script indeksi (hepsi bunlar, başka bir cihazda test için)
+
+| Script | Ne yapar | Isaac gerekir mi |
+|---|---|---|
+| `.venv/bin/python -m pytest tests/ -v` | Tüm birim testleri (59 test) | Hayır |
+| `benchmarks/benchmark_terrain.py` | Profil başına arazi üretim hızı | Hayır |
+| `scripts/train_ppo_analytic.py` | SB3 PPO ile analitik lander eğitimi | Hayır |
+| `scripts/benchmark_analytic_env_speed.py` | Analitik RL env hız testi (çoklu-env) | Hayır |
+| `scripts/install_isaac_docker.sh` | Docker + Isaac Sim/Lab image'larını sıfırdan kurar | — (kurulum) |
+| `scripts/run_isaac_smoke_test.sh <script.py>` | Herhangi bir `isaac_*.py` script'ini `lunarsim-isaacsim` imajıyla çalıştırır | Evet (Isaac Sim) |
+| `scripts/run_all_isaac_validations.sh` | Yapısal+fizik+LiDAR+toz+ışık doğrulamalarının hepsi, tek komut | Evet (Isaac Sim) |
+| `scripts/isaac_smoke_test.py` | Her authoring fonksiyonunun gerçek sahnede hatasız çalıştığını doğrular | Evet (Isaac Sim) |
+| `scripts/isaac_validation_suite.py` | LiDAR-vs-PhysX + fizik hızı + kamera denemesi | Evet (Isaac Sim) |
+| `scripts/isaac_test_rock_collision.py` | Gerçek top düşürme ile kaya collision doğrulaması | Evet (Isaac Sim) |
+| `scripts/isaac_test_dust.py` | Toz parçacık yörüngelerinin authoring'i | Evet (Isaac Sim) |
+| `scripts/isaac_test_sun_rotation.py` | Güneş ışığı yön matematiği (render gerekmez) | Evet (Isaac Sim) |
+| `scripts/isaac_test_rtx_lidar.py` | RTX LiDAR (bare World, deneysel) | Evet (Isaac Sim) |
+| `scripts/run_isaaclab_camera_test.sh` | Gerçek RGB kamera render doğrulaması (güneş açısı ↔ parlaklık) | Evet (Isaac **Lab**) |
+| `scripts/run_isaaclab_speed_test.sh [n ...]` | Çoklu-env fizik hız testi (paylaşılan gerçek terrain) | Evet (Isaac **Lab**) |
+| `scripts/run_isaaclab_orbit_demo.sh` | Kamera yörünge demosu → mp4 | Evet (Isaac **Lab**) |
+| `scripts/isaaclab_test_rtx_lidar.py` | RTX LiDAR (Isaac Lab `SimulationContext` üzerinden) | Evet (Isaac **Lab**) |
+
+`run_isaac_smoke_test.sh` ile başlayanlar hafif `lunarsim-isaacsim` imajını (sadece Isaac
+Sim), `run_isaaclab_*` / `isaaclab_*` ile başlayanlar ağır `lunarsim-isaaclab` imajını
+(Isaac Lab + torch, kamera piksel yakalama ve `InteractiveScene` gerektiren her şey için
+zorunlu — bkz. "RGB kamera render'ı çözüldü" notu) kullanır.

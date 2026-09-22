@@ -9,16 +9,23 @@ more reliable than raw USD authoring. Auto-exposure is always left off
 (every bundled profile has `camera.auto_exposure: false` -- lunar dynamic
 range makes auto-exposure behave badly); `core.lighting.camera` applies the
 actual exposure/noise model downstream of the raw rendered frame instead of
-relying on an in-renderer auto-exposure pass.
+relying on an in-renderer auto-exposure pass. NOTE: for actual pixel capture
+in headless docker, bare `isaacsim.core.api.World` never advances the render
+product -- drive the camera through `isaaclab.sim.SimulationContext` +
+`isaaclab.sensors.camera.Camera` instead (see adapters/isaac/README.md's
+"RESOLVED" section; `create_camera` here still works fine for authoring/
+non-headless use, just not for headless-docker pixel capture on its own).
 
 LiDAR: `lidar.mode` selects between the analytic `raycast` path (see
-`core.metadata.lidar.raycast_lidar`, no Isaac needed at all) and Isaac's RTX
-LiDAR (`rtx_sparse` / `rtx_full` / `rtx`). Unlike the camera path, this has
-NOT been validated against a working prior integration -- the one available
-reference project never implemented RTX LiDAR either. Treat
-`create_rtx_lidar` below as an unverified starting point only.
+`core.metadata.lidar.raycast_lidar`, no Isaac needed at all, cross-validated
+against live PhysX raycasts) and Isaac's real RTX LiDAR
+(`isaacsim.sensors.experimental.rtx`), verified here against a set of real
+hardware sensor profiles Isaac Sim ships (Ouster OS0/OS1/OS2/VLS-128, Hesai
+XT32, SICK units, etc. -- see `SUPPORTED_LIDAR_CONFIGS` in that extension).
 """
 from __future__ import annotations
+
+import numpy as np
 
 
 def create_camera(prim_path: str, resolution: tuple[int, int] = (1280, 720), focal_length_mm: float = 18.0):
@@ -42,59 +49,45 @@ def create_camera(prim_path: str, resolution: tuple[int, int] = (1280, 720), foc
     return camera
 
 
-def create_rtx_lidar(
-    stage,
-    prim_path: str,
-    mode: str,
-    n_channels: int,
-    horizontal_fov_deg: float = 360.0,
-    vertical_fov_deg: tuple[float, float] = (-15.0, 15.0),
-    max_range_m: float = 100.0,
-):
-    """Author an RTX LiDAR sensor prim.
+def create_rtx_lidar(prim_path: str, config: str = "OS0", tick_rate: float = 10.0):
+    """Author + wire up a real RTX LiDAR sensor at `prim_path`, using one of
+    Isaac Sim's built-in real hardware profiles (default "OS0" -- an Ouster
+    OS0, a common short/mid-range rover-analog LiDAR; other options include
+    "OS1", "OS2", "VLS_128", "XT32_SD10", the SICK units, etc. -- see
+    `isaacsim.sensors.experimental.rtx.rtx_lidar_configs.SUPPORTED_LIDAR_CONFIGS`
+    for the full list).
 
-    UNVERIFIED (see module docstring). ISAAC-VERSION-CHECK: RTX LiDAR
-    authoring moved from `omni.isaac.sensor.LidarRtx` (pre-4.5) to
-    `isaacsim.sensors.rtx` (4.5+), and the config-profile mechanism (a
-    JSON/YAML sensor profile referenced by name, e.g. "Example_Rotary") is
-    the actual source of channel/FOV/range truth in recent Isaac versions
-    rather than USD attributes set directly -- the attributes set below are
-    a structural placeholder; check the installed version's sensor creation
-    API (`isaacsim.sensors.rtx.LidarRtx` docs) before relying on them, or
-    prefer `core.metadata.lidar.raycast_lidar` (verified, Isaac-independent)
-    for anything that doesn't specifically need RTX's GPU-accelerated path.
+    Returns a `LidarSensor` with a `"generic-model-output"` annotator already
+    attached; after stepping the sim, call `get_point_cloud(sensor)` to read
+    the current frame's hit points.
     """
-    from pxr import UsdGeom
+    from isaacsim.sensors.experimental.rtx import Lidar, LidarSensor
 
-    lidar = UsdGeom.Camera.Define(stage, prim_path)  # placeholder prim type
-    prim = lidar.GetPrim()
-    prim.CreateAttribute("lunarsim:lidar_mode", _sdf_string()).Set(mode)
-    prim.CreateAttribute("lunarsim:n_channels", _sdf_int()).Set(n_channels)
-    prim.CreateAttribute("lunarsim:horizontal_fov_deg", _sdf_double()).Set(horizontal_fov_deg)
-    prim.CreateAttribute("lunarsim:vertical_fov_deg", _sdf_double2()).Set(vertical_fov_deg)
-    prim.CreateAttribute("lunarsim:max_range_m", _sdf_double()).Set(max_range_m)
-    return lidar
+    lidar = Lidar.create(prim_path, config=config, tick_rate=tick_rate)
+    sensor = LidarSensor(lidar, annotators=["generic-model-output"])
+    return sensor
 
 
-def _sdf_double():
-    from pxr import Sdf
+def get_point_cloud(sensor) -> dict[str, np.ndarray]:
+    """Read the current frame's point cloud from an RTX `LidarSensor`.
 
-    return Sdf.ValueTypeNames.Double
+    Returns a dict with `x_m`/`y_m`/`z_m` (hit points, in the sensor's
+    configured frame of reference -- world by default) and `intensity`
+    (the GenericModelOutput "scalar" field, reflectivity-like), all
+    length-`n_hits` numpy arrays. Empty arrays if no data is available yet
+    (e.g. called before the first render tick after creation).
+    """
+    from isaacsim.sensors.experimental.rtx import parse_generic_model_output_data
 
+    data, _info = sensor.get_data("generic-model-output")
+    if data is None:
+        return {"x_m": np.empty(0), "y_m": np.empty(0), "z_m": np.empty(0), "intensity": np.empty(0)}
 
-def _sdf_double2():
-    from pxr import Sdf
-
-    return Sdf.ValueTypeNames.Double2
-
-
-def _sdf_int():
-    from pxr import Sdf
-
-    return Sdf.ValueTypeNames.Int
-
-
-def _sdf_string():
-    from pxr import Sdf
-
-    return Sdf.ValueTypeNames.String
+    gmo = parse_generic_model_output_data(data)
+    n = gmo.numElements
+    return {
+        "x_m": np.array(gmo.x[:n]),
+        "y_m": np.array(gmo.y[:n]),
+        "z_m": np.array(gmo.z[:n]),
+        "intensity": np.array(gmo.scalar[:n]) if n > 0 else np.empty(0),
+    }
