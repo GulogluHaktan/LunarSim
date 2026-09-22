@@ -22,11 +22,16 @@ parser.add_argument("--out", type=str, default="/workspace/LunarSim/out/rover_li
 parser.add_argument("--sensor-height-m", type=float, default=1.6)
 parser.add_argument("--n-channels", type=int, default=128)
 parser.add_argument("--horizontal-res-deg", type=float, default=0.12)
-parser.add_argument("--terrain-size-m", type=float, default=80.0)
+parser.add_argument("--terrain-size-m", type=float, default=40.0)
 parser.add_argument("--terrain-res-m", type=float, default=0.15,
                      help="collision mesh resolution -- lower = more geometric detail but "
                           "more PhysX triangles to cook (VRAM/time cost); 0.06-0.08 is a "
                           "reasonable high-detail ceiling on an 8GB card for an 80m tile.")
+parser.add_argument("--max-range-m", type=float, default=22.0,
+                     help="REAL FIX: the same ray/point budget spread over a smaller "
+                          "close-range footprint (not a wide 60m+ survey) is what actually "
+                          "looks dense up close -- a fixed point count over a bigger area "
+                          "just looks sparse again once you frame in on any one part of it.")
 args, _ = parser.parse_known_args()
 
 from isaacsim import SimulationApp
@@ -86,13 +91,14 @@ sensor_pos = np.array([0.0, 0.0, ground_z + args.sensor_height_m])
 print(f"sensor position: {sensor_pos.tolist()} (ground z={ground_z:.3f})")
 
 pattern = LidarScanPattern.spinning(
-    n_channels=args.n_channels, vertical_fov_deg=(-25.0, 5.0),
+    n_channels=args.n_channels, vertical_fov_deg=(-55.0, 10.0),
     horizontal_res_deg=args.horizontal_res_deg, horizontal_fov_deg=(0.0, 360.0),
 )
 dirs = pattern.ray_directions()
-print(f"casting {len(dirs)} real rays from a single stationary 360-deg sweep...")
+print(f"casting {len(dirs)} real rays from a single stationary 360-deg sweep "
+      f"(max range {args.max_range_m}m -> close-range, dense)...")
 
-max_range = 60.0
+max_range = args.max_range_m
 all_points = []
 hit_count = 0
 for k, d in enumerate(dirs):

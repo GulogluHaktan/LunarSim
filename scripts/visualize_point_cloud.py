@@ -20,8 +20,16 @@ parser.add_argument("--width", type=int, default=1920)
 parser.add_argument("--height", type=int, default=1440)
 parser.add_argument("--front", type=float, nargs=3, default=(0.35, -0.8, 0.5),
                      help="camera view direction (oblique elevated by default)")
-parser.add_argument("--zoom", type=float, default=0.6)
+parser.add_argument("--zoom", type=float, default=0.35,
+                     help="lower = closer/more zoomed-in (Open3D convention)")
 parser.add_argument("--cmap", default="turbo")
+parser.add_argument("--radius-m", type=float, default=None,
+                     help="crop to points within this XY radius of the cloud's centroid "
+                          "before rendering -- use this to frame in on a small dense patch "
+                          "instead of the whole scan (a fixed point budget always looks "
+                          "sparse again once you zoom into a small part of a wide scan).")
+parser.add_argument("--center", type=float, nargs=2, default=None,
+                     help="XY center for --radius-m crop (default: cloud centroid)")
 args = parser.parse_args()
 
 with open(args.ply_path) as f:
@@ -29,6 +37,15 @@ with open(args.ply_path) as f:
 hdr_end = lines.index("end_header\n") + 1
 data = np.array([[float(v) for v in l.split()] for l in lines[hdr_end:]])
 pts = data[:, :3]
+
+if args.radius_m is not None:
+    cx, cy = args.center if args.center else (pts[:, 0].mean(), pts[:, 1].mean())
+    d = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy)
+    kept = d <= args.radius_m
+    print(f"cropping to radius {args.radius_m}m around ({cx:.1f}, {cy:.1f}): "
+          f"{kept.sum()}/{len(pts)} points kept")
+    pts = pts[kept]
+
 z = pts[:, 2]
 area = (pts[:, 0].max() - pts[:, 0].min()) * (pts[:, 1].max() - pts[:, 1].min())
 print(f"{len(pts)} points, ~{area:.0f} m^2 -> {len(pts)/max(area,1e-6):.2f} pts/m^2")
