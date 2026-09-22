@@ -136,6 +136,22 @@ fiziksel simülasyon (gerçek temas dinamiği, toz, kamera/LiDAR) isteyen bir
 RL görevi için `adapters/isaac/` üzerine bir Isaac Lab `DirectRLEnv` inşa
 edilebilir (bkz. `lunarsim/adapters/isaac/README.md`daki Isaac Lab notları).
 
+**Ölçekli eğitim mimarisi (LunarRocket'ın eski koduna bakılarak):** Bulk RL
+eğitimi için **her env'e ayrı gerçek DEM/USD terrain mesh'i basmaya gerek
+yok**. LunarRocket'ın kendi kodunda `legacy_terrain_usd_max_envs = 16` diye
+bir sabit var — gerçek DEM mesh'i sadece 16 env'e kadar spawn ediliyordu,
+512 env'lik asıl eğitimde ise `app/terrain_pool.py`'daki **tamamen
+parametrik** (sinüs yükseklik fonksiyonu + parametrik krater/kaya, GPU'da
+torch tensor, hiç fizik mesh'i yok) bir "terrain pool" kullanılıyordu; gerçek
+mesh+temas sadece pretraining sonrası küçük ölçekli fine-tuning/eval için
+ayrılmıştı. `AnalyticLanderEnv` zaten bu mimariyle birebir aynı prensipte
+(height-lookup, mesh yok) — bu yüzden 256+ paralel env'e sorunsuz ölçekleniyor
+(yukarıdaki hız tablosuna bak). Isaac/PhysX tarafında da artık ölçtük: paylaşılan
+**tek** gerçek terrain + çoklu rigid body de mükemmel ölçekleniyor (256 env'de
+289k step/s). Öneri: bulk eğitim için analitik backend ya da paylaşılan-terrain
+Isaac yaklaşımı; gerçek-temas doğrulaması/fine-tuning için küçük (≤16) env
+sayısıyla benzersiz gerçek DEM mesh'i — LunarRocket'ın kanıtlanmış deseni bu.
+
 ## Test
 
 ```bash
@@ -158,12 +174,17 @@ scripts/run_isaac_smoke_test.sh scripts/isaac_test_dust.py           # toz parç
 scripts/run_isaac_smoke_test.sh scripts/isaac_test_sun_rotation.py   # güneş ışığı yön matematiği
 # kamera (Isaac Lab imajı gerekir, ./scripts/install_isaac_docker.sh ile build edilir):
 scripts/run_isaaclab_camera_test.sh
+# çoklu-env hız testi (paylaşılan gerçek terrain, Isaac Lab InteractiveScene):
+scripts/run_isaaclab_speed_test.sh 16 64 256
+# analitik backend hız testi (Isaac gerekmez):
+.venv/bin/python scripts/benchmark_analytic_env_speed.py
 ```
 
 **Doğrulanan sonuçlar:**
 - Heightfield collision + ince render mesh + physics/visual materyal + güneş ışığı + kaya instancing + kamera/LiDAR prim'leri: 13/13 authoring adımı gerçek sahnede hatasız çalışıyor.
 - LiDAR ground truth (`raycast_lidar`) gerçek PhysX raycast ile **0.37 mm** ortalama sapmayla eşleşiyor.
 - Fizik step hızı: tek env, sadece fizik (render kapalı), **~1900-2100 step/s** (RTX 5060, 8GB VRAM).
+- **Çoklu-env hız testi** (paylaşılan tek gerçek terrain + N klonlanmış rigid body, Isaac Lab `InteractiveScene`): 16 env → 23.098 env-step/s, 64 env → 53.740 env-step/s, **256 env → 288.832 env-step/s**. Analitik (Isaac'siz) `AnalyticLanderEnv` backend'i subprocess paralelliğiyle 16 env'de 39.317, 64 env'de 47.105 env-step/s'ye ulaşıyor.
 - **Kaya collision fiziksel olarak doğrulandı**: 2m'lik gerçek bir kayanın üstüne 10m'den bırakılan top, tam beklenen temas yüksekliğinde (z=2.200m) durdu.
 - **Toz parçacıkları gerçekten hareket ediyor**: 410 parçacıklı patlama, gerçek balistik yörüngeyle 265 zaman örneği, 89m'ye varan menzil (drag yok, tam vakum kinematiği).
 - **RL arayüzü uçtan uca çalışıyor**: gerçek bir SB3 PPO, `AnalyticLanderEnv` üzerinde 4 paralel env ile ~3200 step/s eğitim yapıyor.
