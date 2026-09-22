@@ -170,6 +170,63 @@ def generate_tile(cfg: TerrainConfig) -> Tile:
     )
 
 
+@dataclass
+class HiresPatch:
+    height: np.ndarray  # (n, n) meters, world-aligned to the parent tile
+    res_m: float
+    center_x_m: float
+    center_y_m: float
+    size_m: float
+
+
+def generate_hires_patch(
+    tile: Tile,
+    center_x_m: float = 0.0,
+    center_y_m: float = 0.0,
+    size_m: float = 40.0,
+    res_m: float = 0.025,
+    micro_amplitude_m: float = 0.03,
+    micro_wavelength_m: float = 1.2,
+    seed_offset: int = 9001,
+) -> HiresPatch:
+    """A small, OmniLRS-resolution-class (down to ~2.5 cm/px) render-only
+    patch around one point of interest -- e.g. where a rover sits or a
+    camera orbits -- instead of the whole tile, which is the only way to
+    reach that resolution without an intractable grid (a 150 m tile at
+    2.5 cm/px would be 6000x6000; a 40 m patch is a manageable 1600x1600).
+
+    The patch's low-frequency shape comes from bicubic-resampling the
+    parent tile's own (coarse+fine, already-generated) heightfield, so it
+    stays continuous with the surrounding terrain -- then a genuinely new,
+    even-finer fBm layer is added on top (`micro_amplitude_m`/
+    `micro_wavelength_m`), injecting real sub-25cm surface texture that
+    was never present at the parent tile's native resolution at all.
+    """
+    from scipy.ndimage import map_coordinates
+
+    n = int(round(size_m / res_m))
+    ax = (np.arange(n) - (n - 1) / 2) * res_m
+    xs = center_x_m + ax
+    ys = center_y_m + ax
+    xx, yy = np.meshgrid(xs, ys, indexing="ij")
+
+    n_parent = tile.height.shape[0]
+    px = xx / tile.res_m + (n_parent - 1) / 2
+    py = yy / tile.res_m + (n_parent - 1) / 2
+    base = map_coordinates(tile.height, [px, py], order=3, mode="nearest")
+
+    rng = np.random.default_rng(tile.seed + seed_offset)
+    micro = fbm_heightfield(
+        n, amplitude_m=micro_amplitude_m, wavelength_m=micro_wavelength_m,
+        res_m=res_m, hurst=0.8, rng=rng,
+    )
+
+    return HiresPatch(
+        height=base + micro, res_m=res_m,
+        center_x_m=center_x_m, center_y_m=center_y_m, size_m=size_m,
+    )
+
+
 def save_tile(tile: Tile, out_dir: str) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)

@@ -20,13 +20,14 @@ import numpy as np
 from lunarsim.core.terrain.generate import Tile
 
 
-def _mesh_from_heightfield(stage, prim_path: str, height: np.ndarray, res_m: float, uv_tile_size_m: float | None = None):
+def _mesh_from_heightfield(stage, prim_path: str, height: np.ndarray, res_m: float, uv_tile_size_m: float | None = None,
+                            center_x_m: float = 0.0, center_y_m: float = 0.0, z_offset_m: float = 0.0):
     from pxr import Sdf, UsdGeom
 
     n = height.shape[0]
     ax = (np.arange(n) - (n - 1) / 2) * res_m
-    xx, yy = np.meshgrid(ax, ax, indexing="ij")
-    points = np.stack([xx, yy, height], axis=-1).reshape(-1, 3)
+    xx, yy = np.meshgrid(center_x_m + ax, center_y_m + ax, indexing="ij")
+    points = np.stack([xx, yy, height + z_offset_m], axis=-1).reshape(-1, 3)
 
     face_counts = []
     face_indices = []
@@ -140,3 +141,22 @@ def build_render_mesh(stage, prim_path: str, tile: Tile, lod: int = 0, uv_tile_s
         res_m = tile.res_m / (2**lod)
 
     return _mesh_from_heightfield(stage, prim_path, height, res_m, uv_tile_size_m=uv_tile_size_m)
+
+
+def build_hires_patch_mesh(stage, prim_path: str, patch, uv_tile_size_m: float | None = 2.0, z_offset_m: float = 0.003):
+    """Build a render-only mesh from a `core.terrain.generate_hires_patch`
+    result (down to ~2.5 cm/px around one point of interest -- see that
+    function's docstring for why this is a separate small patch rather
+    than the whole tile at that resolution).
+
+    `z_offset_m` lifts the patch a few mm above the coarser parent render
+    mesh underneath it -- the patch's low-frequency shape is resampled
+    from that same parent surface so the two are almost, but not exactly,
+    coincident (bicubic resampling vs. the parent's own vertices); a tiny
+    lift avoids z-fighting between the two without being visible at any
+    normal viewing distance.
+    """
+    return _mesh_from_heightfield(
+        stage, prim_path, patch.height, patch.res_m, uv_tile_size_m=uv_tile_size_m,
+        center_x_m=patch.center_x_m, center_y_m=patch.center_y_m, z_offset_m=z_offset_m,
+    )

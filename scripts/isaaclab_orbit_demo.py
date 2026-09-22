@@ -30,6 +30,11 @@ parser.add_argument("--center-detail-radius-m", type=float, default=45.0,
                      help="ROI falloff radius (sigma_m) for full fine detail at world "
                           "origin (0,0), where the camera orbits -- tapers to coarse "
                           "detail further out.")
+parser.add_argument("--hires-patch-size-m", type=float, default=40.0,
+                     help="OmniLRS-resolution-class (down to hires-patch-res-m) render "
+                          "patch centered at world (0,0), on top of the coarser tile mesh "
+                          "-- see core.terrain.generate_hires_patch. 0 disables it.")
+parser.add_argument("--hires-patch-res-m", type=float, default=0.025)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
 
@@ -47,12 +52,12 @@ from pxr import UsdShade
 
 sys.path.insert(0, args_cli.lunarsim_root)
 
-from lunarsim.adapters.isaac.heightfield import add_heightfield_collision, build_render_mesh
+from lunarsim.adapters.isaac.heightfield import add_heightfield_collision, build_hires_patch_mesh, build_render_mesh
 from lunarsim.adapters.isaac.lighting import create_sun_light
 from lunarsim.adapters.isaac.materials import create_regolith_material
 from lunarsim.core.lighting.sun import SunPosition
 from lunarsim.core.terrain.config import TerrainConfig
-from lunarsim.core.terrain.generate import generate_tile
+from lunarsim.core.terrain.generate import generate_hires_patch, generate_tile
 
 os.makedirs(args_cli.out_dir, exist_ok=True)
 
@@ -93,6 +98,16 @@ material = create_regolith_material(
     stage, "/World/Looks/Regolith", albedo=0.11, brdf="albedo", normal_map_path=normal_map_path
 )
 UsdShade.MaterialBindingAPI.Apply(render_mesh.GetPrim()).Bind(material)
+
+if args_cli.hires_patch_size_m > 0:
+    print(f"generating hires patch ({args_cli.hires_patch_res_m*100:.1f} cm/px, "
+          f"{args_cli.hires_patch_size_m}m wide) at the orbit center...")
+    patch = generate_hires_patch(
+        tile, center_x_m=0.0, center_y_m=0.0,
+        size_m=args_cli.hires_patch_size_m, res_m=args_cli.hires_patch_res_m,
+    )
+    patch_mesh = build_hires_patch_mesh(stage, "/World/Terrain/HiresPatch", patch, uv_tile_size_m=2.0)
+    UsdShade.MaterialBindingAPI.Apply(patch_mesh.GetPrim()).Bind(material)
 
 sun_pos = SunPosition(elevation_deg=35.0, azimuth_deg=120.0)
 create_sun_light(stage, "/World/Sun", sun_pos, angular_diameter_deg=0.53)

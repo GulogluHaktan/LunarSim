@@ -175,6 +175,34 @@ aynı yarıçap/güç).
 Solda tek bir ROI merkezinde (ağırlık 1.0) ince detay tam açık, uzaklaştıkça
 Gaussian ile sıfıra düşüyor; sağda fark haritası aynı etkiyi gösteriyor.
 
+## Yerel yüksek-çözünürlük yama (OmniLRS seviyesi detay)
+
+OmniLRS DEM'i ~2.5 cm/piksel'e kadar inceltiyor — ama bunu **tüm tile** için
+yapmak pratik değil (150m'lik bir tile'ı 2.5cm çözünürlükte tutmak
+6000×6000'lik bir grid ister). Aynı OmniLRS'in yaptığı gibi biz de bunu
+sadece ilgi alanına (rover'ın bulunduğu yer, kameranın odaklandığı nokta)
+uyguluyoruz — geniş tile normal çözünürlükte kalır, üstüne küçük ve gerçekten
+2.5cm/piksel'e inen ayrı bir render yaması eklenir:
+
+```python
+from lunarsim.core.terrain import generate_hires_patch
+
+patch = generate_hires_patch(tile, center_x_m=0.0, center_y_m=0.0,
+                              size_m=40.0, res_m=0.025)  # 2.5 cm/piksel
+```
+
+Yamanın kaba şekli, ana tile'ın kendi (coarse+fine) yüzeyinden bikübik
+örneklenir (çevreyle sürekliliği korur), üstüne ana grid'de hiç var
+olmayan gerçekten daha ince bir fBm katmanı eklenir (`micro_amplitude_m`,
+`micro_wavelength_m`) — yani gerçek ek detay, sadece yumuşatılmış bir
+upsample değil. Isaac Sim'de `adapters.isaac.heightfield.build_hires_patch_mesh()`
+ile render mesh'e çevrilip ana yüzeyin birkaç mm üstüne yerleştirilir
+(z-fighting önlemek için).
+
+`scripts/isaaclab_orbit_demo.py` artık varsayılan olarak bunu kamera
+merkezinde kullanıyor (`--hires-patch-size-m 40 --hires-patch-res-m 0.025`,
+`--hires-patch-size-m 0` ile kapatılabilir).
+
 ## Tekerlek izi / zemin deformasyonu
 
 Bekker basınç-batma modeliyle (`core.terrain.deformation`) her tekerlek
