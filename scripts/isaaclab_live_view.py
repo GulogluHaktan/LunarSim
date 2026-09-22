@@ -1,12 +1,25 @@
 """Interactive live view: builds the real lunarsim scene (real terrain,
-regolith material + micro-bump normal map, fixed sun light, no ambient) in
-a non-headless Isaac Sim window and just idles -- fly/orbit the viewport
-yourself with the mouse (standard Isaac Sim navigation: left-drag orbit,
-middle-drag pan, scroll zoom, or WASD+right-drag for fly mode).
+regolith material + micro-bump normal map, fixed sun light, no ambient) and
+just idles so you can fly/orbit around it yourself (standard Isaac Sim
+navigation: left-drag orbit, middle-drag pan, scroll zoom, or WASD+right-
+drag for fly mode).
 
-Needs a display (X11) on the host -- see scripts/run_isaaclab_live_view.sh,
-which sets up the X11 forwarding into the container. Won't work over a pure
-SSH-without-X session; use the orbit-demo video path for that instead.
+Two ways to view it, both via IsaacLab's built-in `--livestream` flag:
+
+  --livestream 0 (default): a native X11 window on THIS machine's display
+  (see scripts/run_isaaclab_live_view.sh). Needs a real display; on this
+  project's dev machine this got stuck inside AppLauncher() itself with
+  ~4% GPU util and no window ever appearing -- a real, unresolved issue
+  with GLX/window-surface creation from inside the container against this
+  host's NVIDIA driver, not something our own code controls.
+
+  --livestream 2 (RECOMMENDED, WebRTC): runs fully headless -- no X11/GLX
+  window is created at all, sidestepping that failure mode entirely -- and
+  streams frames out over WebRTC. Connect with the NVIDIA "Isaac Sim
+  WebRTC Streaming Client" app, or a browser pointed at this machine's
+  streaming port (see scripts/run_isaaclab_livestream_view.sh for the
+  exact URL/port and a client-app download link). Works even over a pure
+  SSH-without-X session since no local display is touched.
 """
 import argparse
 
@@ -29,9 +42,12 @@ parser.add_argument("--center-detail-radius-m", type=float, default=40.0,
                      help="ROI falloff radius (sigma_m) for full fine detail at world "
                           "origin (0,0) -- where the camera starts -- tapering to coarse "
                           "detail further out.")
-AppLauncher.add_app_launcher_args(parser)
+AppLauncher.add_app_launcher_args(parser)  # adds --livestream {0,1,2}, --headless, --device, ...
 args_cli, _ = parser.parse_known_args()
-args_cli.headless = False  # this script is specifically for the interactive window
+# livestream mode renders fully headless (no local X11/GLX window at all --
+# that's the whole point, see module docstring); only fall back to a real
+# window when streaming is off.
+args_cli.headless = args_cli.livestream in (1, 2)
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -104,8 +120,12 @@ set_no_ambient_render_settings()
 if args_cli.path_tracing:
     enable_path_tracing(spp=args_cli.spp)
 
-print("scene ready -- use the Isaac Sim window to fly/orbit around (left-drag: orbit, "
-      "middle-drag: pan, scroll: zoom). Close the window or Ctrl+C here to exit.")
+if args_cli.livestream in (1, 2):
+    print("scene ready -- connect the Isaac Sim WebRTC Streaming Client (or a browser, see "
+          "scripts/run_isaaclab_livestream_view.sh) to this machine now. Ctrl+C here to exit.")
+else:
+    print("scene ready -- use the Isaac Sim window to fly/orbit around (left-drag: orbit, "
+          "middle-drag: pan, scroll: zoom). Close the window or Ctrl+C here to exit.")
 while simulation_app.is_running():
     sim.step(render=True)
 
