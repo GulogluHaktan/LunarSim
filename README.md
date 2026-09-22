@@ -116,14 +116,18 @@ değiştirilir, kod hiçbir yerde donanıma bakmaz (bkz. `lunarsim/core/quality/
 from datetime import datetime, timezone
 from lunarsim.core.lighting import SunEphemeris, horizon_profile, sun_visible
 
-eph = SunEphemeris()  # ilk çağrıda DE421 kernelini .cache/ altına indirir
+eph = SunEphemeris()  # ilk çağrıda DE421 + gerçek Moon PA/frame kernellerini .cache/ altına indirir
 pos = eph.sun_position(datetime(2026, 9, 21, 12, tzinfo=timezone.utc), lat_deg=-89.0, lon_deg=0.0)
 ```
 
-Gerçek JPL ephemeris'i (Skyfield + DE421) ile Ay'ın IAU rotasyon modelini
-birleştirerek gerçek tarih/site için güneş elevation/azimuth verir.
-`horizon_profile` heightmap'ten bağımsız bir ufuk haritası hesaplayarak
-render gölgelerini doğrulamak için kullanılabilir.
+Gerçek JPL ephemeris'i (Skyfield + DE421) ile Ay'ın gerçek yönelim kernellerini
+(`moon_080317.tf`, `pck00008.tpc`, `moon_pa_de421_1900-2050.bpc` — NAIF'in
+resmi genel kernelleri) birleştirerek `skyfield.PlanetaryConstants` üzerinden
+gerçek tarih/site için güneş elevation/azimuth verir — elle yazılmış bir IAU
+rotasyon formülü değil, skyfield'ın kendi test edilmiş mekanizması (aynı
+kernel üçlüsünü bir rakip Ay-robotik simülatörü, OmniLRS, da aynı amaçla
+kullanıyor). `horizon_profile` heightmap'ten bağımsız bir ufuk haritası
+hesaplayarak render gölgelerini doğrulamak için kullanılabilir.
 
 ## LiDAR ground truth
 
