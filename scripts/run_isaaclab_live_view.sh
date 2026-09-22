@@ -84,6 +84,7 @@ docker run --rm \
   --ulimit stack=67108864 \
   -e ACCEPT_EULA=Y \
   -e PRIVACY_CONSENT=Y \
+  -e PYTHONUNBUFFERED=1 \
   -e DISPLAY="$DISPLAY" \
   -e NVIDIA_DRIVER_CAPABILITIES=all \
   -e NVIDIA_VISIBLE_DEVICES=all \

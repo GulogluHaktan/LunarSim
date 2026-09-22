@@ -38,6 +38,7 @@ for n in "${ENV_COUNTS[@]}"; do
     --ulimit stack=67108864 \
     -e ACCEPT_EULA=Y \
     -e PRIVACY_CONSENT=Y \
+    -e PYTHONUNBUFFERED=1 \
     -v "$PROJECT_ROOT":/workspace/LunarSim \
     -v "$CACHE_ROOT/cache/ov":/root/.cache/ov \
     -v "$CACHE_ROOT/cache/pip":/root/.cache/pip \

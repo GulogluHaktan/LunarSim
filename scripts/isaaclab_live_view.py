@@ -16,10 +16,22 @@ Two ways to view it, both via IsaacLab's built-in `--livestream` flag:
   --livestream 2 (RECOMMENDED, WebRTC): runs fully headless -- no X11/GLX
   window is created at all, sidestepping that failure mode entirely -- and
   streams frames out over WebRTC. Connect with the NVIDIA "Isaac Sim
-  WebRTC Streaming Client" app, or a browser pointed at this machine's
-  streaming port (see scripts/run_isaaclab_livestream_view.sh for the
-  exact URL/port and a client-app download link). Works even over a pure
-  SSH-without-X session since no local display is touched.
+  WebRTC Streaming Client" app at this machine's IP, signaling port 49100
+  (confirmed via the omni.kit.livestream.app extension's own config and a
+  real `ss -tlnp` showing it LISTENING -- NOT port 8211, which was wrong,
+  leftover guesswork from an older Isaac Sim version's docs; there is no
+  browser/HTTP page served here, only the raw signaling socket the
+  streaming client app speaks). Works even over a pure SSH-without-X
+  session since no local display is touched.
+
+  Also note: this process's stdout is fully buffered (not line-buffered)
+  when it isn't attached to a real terminal, e.g. piped to a log file from
+  a background docker run -- prints like "scene ready" below can sit
+  unflushed for a long time even once the code has actually reached and
+  passed them, making a perfectly running process look hung in the log.
+  scripts/run_isaaclab_livestream_view.sh sets PYTHONUNBUFFERED=1 to avoid
+  this; a py-spy stack dump (real fix used to diagnose this live) is the
+  reliable way to tell the two apart if in doubt.
 """
 import argparse
 
@@ -128,8 +140,8 @@ if args_cli.path_tracing:
     enable_path_tracing(spp=args_cli.spp)
 
 if livestream_mode in (1, 2):
-    print("scene ready -- connect the Isaac Sim WebRTC Streaming Client (or a browser, see "
-          "scripts/run_isaaclab_livestream_view.sh) to this machine now. Ctrl+C here to exit.")
+    print("scene ready -- connect the Isaac Sim WebRTC Streaming Client to this machine's "
+          "IP, signaling port 49100, now. Ctrl+C here to exit.", flush=True)
 else:
     print("scene ready -- use the Isaac Sim window to fly/orbit around (left-drag: orbit, "
           "middle-drag: pan, scroll: zoom). Close the window or Ctrl+C here to exit.")

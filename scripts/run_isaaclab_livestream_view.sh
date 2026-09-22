@@ -8,15 +8,17 @@
 # pure SSH session.
 #
 # To view it once this prints "scene ready":
-#   1. Preferred: download the "Isaac Sim WebRTC Streaming Client" from
-#      NVIDIA (search "Isaac Sim WebRTC Streaming Client download" on
-#      NVIDIA's developer site / Isaac Sim release page), point it at
-#      this machine's IP (or 127.0.0.1 if running the client on the same
-#      machine), default signaling port 8211.
-#   2. Or try a browser at http://<this-machine-ip>:8211/streaming/webrtc-demo/
-#      (the exact path can vary by Isaac Sim version -- if that 404s, check
-#      the container's startup log for the actual URL it prints, or fall
-#      back to the streaming client app above).
+#   Download the "Isaac Sim WebRTC Streaming Client" from NVIDIA (search
+#   "Isaac Sim WebRTC Streaming Client download" on NVIDIA's developer
+#   site / Isaac Sim release page) and point it at this machine's IP,
+#   signaling port 49100 (TCP; media itself flows over UDP 47998) -- NOT
+#   port 8211, which was wrong (leftover from an older Isaac Sim version's
+#   docs). Confirmed by reading the actual extension config on this image:
+#   omni.kit.livestream.app's extension.toml sets signalPort=49100,
+#   streamPort=47998, and `ss -tlnp` on the host showed 49100 genuinely
+#   LISTENING while the app was running -- there is no browser/HTTP demo
+#   page served by this extension, only the raw signaling socket the
+#   streaming client app speaks to.
 #
 # Usage: ./scripts/run_isaaclab_livestream_view.sh [--mesh-lod 2] [--size-m 150] [--center-detail-radius-m 40]
 set -euo pipefail
@@ -45,20 +47,28 @@ fi
 rm -f /dev/shm/carb-* /dev/shm/omni-* 2>/dev/null || true
 find "$CACHE_ROOT" -iname "*hub-root*" -delete 2>/dev/null || true
 
-HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-echo "[LunarSim] starting WebRTC livestream -- once you see 'scene ready', connect to:"
-echo "[LunarSim]   this machine's IP: ${HOST_IP:-<check with 'hostname -I'>}, port 8211"
+# REAL BUG FIXED: `hostname -I` is a GNU/inetutils extension -- on a
+# machine whose `hostname` doesn't support it (confirmed: "invalid option
+# -- 'I'", exit 64), `set -e` killed this WHOLE script silently with zero
+# output, before any of the log lines below ever printed. `ip addr` is
+# the portable way to get this; `|| true` guarantees it can never abort
+# the script even if IP detection itself fails for some other reason.
+HOST_IP=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1) || true
+echo "[LunarSim] starting WebRTC livestream -- once you see 'scene ready', connect the"
+echo "[LunarSim] Isaac Sim WebRTC Streaming Client to: ${HOST_IP:-<check with 'ip addr'>}, signaling port 49100"
 
 docker run --rm \
   --gpus all \
   --network=host \
   --ipc=host \
+  --cap-add=SYS_PTRACE \
   --ulimit memlock=-1 \
   --ulimit stack=67108864 \
   -e ACCEPT_EULA=Y \
   -e PRIVACY_CONSENT=Y \
   -e NVIDIA_DRIVER_CAPABILITIES=all \
   -e NVIDIA_VISIBLE_DEVICES=all \
+  -e PYTHONUNBUFFERED=1 \
   -v "$PROJECT_ROOT":/workspace/LunarSim \
   -v "$CACHE_ROOT/cache/ov":/root/.cache/ov \
   -v "$CACHE_ROOT/cache/pip":/root/.cache/pip \
