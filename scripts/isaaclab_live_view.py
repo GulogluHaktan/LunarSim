@@ -44,10 +44,17 @@ parser.add_argument("--center-detail-radius-m", type=float, default=40.0,
                           "detail further out.")
 AppLauncher.add_app_launcher_args(parser)  # adds --livestream {0,1,2}, --headless, --device, ...
 args_cli, _ = parser.parse_known_args()
+# REAL BUG FIXED: AppLauncher's constructor consumes/removes its own args
+# (including `livestream`) from args_cli as it processes them -- reading
+# args_cli.livestream again AFTER constructing AppLauncher raises
+# AttributeError (confirmed live: got past "Simulation App Startup
+# Complete" and into terrain generation, then crashed there). Capture it
+# in a plain local variable up front instead.
+livestream_mode = args_cli.livestream
 # livestream mode renders fully headless (no local X11/GLX window at all --
 # that's the whole point, see module docstring); only fall back to a real
 # window when streaming is off.
-args_cli.headless = args_cli.livestream in (1, 2)
+args_cli.headless = livestream_mode in (1, 2)
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -120,7 +127,7 @@ set_no_ambient_render_settings()
 if args_cli.path_tracing:
     enable_path_tracing(spp=args_cli.spp)
 
-if args_cli.livestream in (1, 2):
+if livestream_mode in (1, 2):
     print("scene ready -- connect the Isaac Sim WebRTC Streaming Client (or a browser, see "
           "scripts/run_isaaclab_livestream_view.sh) to this machine now. Ctrl+C here to exit.")
 else:
