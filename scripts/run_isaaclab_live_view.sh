@@ -49,6 +49,21 @@ if [[ -n "$STALE_CTR" ]]; then
 fi
 rm -f /dev/shm/carb-* /dev/shm/omni-* 2>/dev/null || true
 
+# The repeated "OmniHub ... Hub failed to launch: child exited with exit
+# status: 1 without writing file ..." retries seen on this machine point
+# at a stale/corrupt Hub state in the PERSISTENT mounted cache (it's the
+# only thing carried over between runs) -- clear it so a bad leftover
+# lock/config can't be the reason startup later stalls silently.
+find "$CACHE_ROOT" -iname "*hub-root*" -delete 2>/dev/null || true
+
+echo "[LunarSim] If this hangs again with no more log output after" \
+     "'AppLauncher initialization complete', open a SECOND terminal and run:" \
+     "  pgrep -af 'kit|isaac-sim' | head -20" \
+     "then 'sudo strace -p <pid> -f -tt 2>&1 | tail -50' on whichever PID is the" \
+     "actual simulation process (not this docker/python.sh wrapper) -- that will" \
+     "show the exact syscall it's blocked on, which we need to diagnose this" \
+     "further. (--pid=host below makes the real process visible from the host.)"
+
 # XAUTHORITY forwarding is more reliable than xhost alone on some setups
 # (notably GNOME/Wayland via XWayland) -- mount the real cookie file too.
 XAUTH_FILE="${XAUTHORITY:-$HOME/.Xauthority}"
@@ -63,6 +78,7 @@ fi
 docker run --rm \
   --gpus all \
   --network=host \
+  --pid=host \
   --ipc=host \
   --ulimit memlock=-1 \
   --ulimit stack=67108864 \

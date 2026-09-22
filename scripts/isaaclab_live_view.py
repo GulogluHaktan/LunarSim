@@ -25,6 +25,10 @@ parser.add_argument("--no-path-tracing", dest="path_tracing", action="store_fals
 parser.add_argument("--spp", type=int, default=256)
 parser.add_argument("--mesh-lod", type=int, default=2)
 parser.add_argument("--size-m", type=float, default=150.0)
+parser.add_argument("--center-detail-radius-m", type=float, default=40.0,
+                     help="ROI falloff radius (sigma_m) for full fine detail at world "
+                          "origin (0,0) -- where the camera starts -- tapering to coarse "
+                          "detail further out.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
 args_cli.headless = False  # this script is specifically for the interactive window
@@ -67,7 +71,12 @@ cfg = TerrainConfig(
     craters={"count_scale": 1.5, "d_min_m": 1.0, "d_max_m": 30.0, "b": 2.4,
              "depth_ratio": 0.12, "age": 0.2},
     rocks={"density_scale": 1.0, "d_max_m": 1.0},
-    roi={"sigma_m": 40.0, "centers": None},
+    # REAL BUG FIXED: {"centers": None} actually meant "one RANDOM center"
+    # (see generate.py's `centers is None` branch), not "the tile center" --
+    # explicit regions at world (0,0) is what actually guarantees max detail
+    # right where the camera starts, tapering out over center-detail-radius-m.
+    roi={"regions": [{"x_m": 0.0, "y_m": 0.0,
+                       "sigma_m": args_cli.center_detail_radius_m, "weight": 1.0}]},
     curvature=False,
 )
 print("generating real terrain tile...")
