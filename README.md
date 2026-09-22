@@ -191,14 +191,8 @@ wheel_footprint_stamp(tile.height, tile.res_m, contact_x_m, contact_y_m,
                        sinkage_m=sinkage_m)
 ```
 
-![Tekerlek izi demosu](assets/plots/wheel_tracks_cpu_demo.png)
-
-**Bu görsel CPU'da, Isaac Sim'siz, saf NumPy ile üretilmiş bir mekanizma
-demosudur** (300 kg'lık bir rover için ~1mm/tekerlek batma, kavisli 4
-tekerlekli bir yol boyunca 240 damga) — modelin doğruluğunu/şeklini
-göstermek için, gerçek bir Isaac sahnesi/GPU sonucu değil. Gerçek Isaac
-sahnesine (height-field mesh + collision'ı canlı güncelleyerek) bağlama işi
-henüz yapılmadı; GPU'lu makinede test edilecek.
+Gerçek Isaac sahnesine (height-field mesh + collision'ı canlı güncelleyerek)
+bağlama işi henüz yapılmadı; GPU'lu makinede test edilecek.
 
 ## Arazi gerçekçilik kontrolü
 
