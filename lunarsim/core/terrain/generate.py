@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from lunarsim import __version__
-from lunarsim.core.terrain.blend import blend, roi_weight
+from lunarsim.core.terrain.blend import RoiSpec, blend, roi_weight
 from lunarsim.core.terrain.config import SampledParams, TerrainConfig, sample_params
 from lunarsim.core.terrain.craters import CraterField, rasterize_craters, sample_crater_field
 from lunarsim.core.terrain.curvature import add_curvature
@@ -114,16 +114,34 @@ def generate_tile(cfg: TerrainConfig) -> Tile:
         fine_h, field = _add_craters(fine_h, cfg.res_m, cfg.size_m, params, rng)
 
         roi = params.roi
-        centers = roi.get("centers", None)
-        if centers == "random_16" or centers is None:
-            n_centers = 16 if centers == "random_16" else 1
-            cy = rng.uniform(0, n_fine, n_centers)
-            cx = rng.uniform(0, n_fine, n_centers)
-            centers_px = list(zip(cy, cx))
+        regions = roi.get("regions", None)
+        if regions:
+            # explicit per-region detail control: world-meter (x_m, y_m) center,
+            # each region's own sigma_m (falloff radius) and weight (peak detail
+            # strength, 1.0 = full fine detail) -- this is how to make one area
+            # noticeably more detailed than the rest of the tile, or give several
+            # areas different detail levels from each other in the same tile.
+            px_center = (n_fine - 1) / 2
+            roi_specs = [
+                RoiSpec(
+                    center_px=(r["y_m"] / cfg.res_m + px_center, r["x_m"] / cfg.res_m + px_center),
+                    sigma_m=r.get("sigma_m", 50.0),
+                    weight=r.get("weight", 1.0),
+                )
+                for r in regions
+            ]
+            w = roi_weight(n_fine, cfg.res_m, roi_specs)
         else:
-            centers_px = [(n_fine / 2, n_fine / 2)]
+            centers = roi.get("centers", None)
+            if centers == "random_16" or centers is None:
+                n_centers = 16 if centers == "random_16" else 1
+                cy = rng.uniform(0, n_fine, n_centers)
+                cx = rng.uniform(0, n_fine, n_centers)
+                centers_px = list(zip(cy, cx))
+            else:
+                centers_px = [(n_fine / 2, n_fine / 2)]
 
-        w = roi_weight(n_fine, cfg.res_m, centers_px, roi.get("sigma_m", 200.0))
+            w = roi_weight(n_fine, cfg.res_m, centers_px, roi.get("sigma_m", 200.0))
         height = blend(coarse_h, fine_h, cfg.res_m, cfg.split_m, weight=w)
 
     else:

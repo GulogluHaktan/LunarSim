@@ -91,3 +91,25 @@ def get_point_cloud(sensor) -> dict[str, np.ndarray]:
         "z_m": np.array(gmo.z[:n]),
         "intensity": np.array(gmo.scalar[:n]) if n > 0 else np.empty(0),
     }
+
+
+def export_rtx_point_cloud(pc: dict, path: str, fmt: str | None = None) -> str:
+    """Write an RTX LiDAR point cloud (the dict `get_point_cloud` returns) to
+    disk in the same formats as `core.metadata.lidar.export_point_cloud`
+    (`.ply` / `.npy` / `.csv`) -- separate from that function since this
+    dict has no `hit_mask` (the RTX sensor already only reports actual hits).
+    """
+    from lunarsim.core.metadata.lidar import LidarPointCloud, export_point_cloud
+
+    n = pc["x_m"].size
+    points_m = np.stack([pc["x_m"], pc["y_m"], pc["z_m"]], axis=-1) if n > 0 else np.empty((0, 3))
+    wrapped = LidarPointCloud(
+        points_m=points_m,
+        # only meaningful as a true sensor range if the points are in the
+        # sensor's local frame; not used by export_point_cloud anyway (it
+        # only writes points_m + intensity), kept just to satisfy the dataclass.
+        range_m=np.linalg.norm(points_m, axis=-1) if n > 0 else np.empty(0),
+        intensity=pc["intensity"],
+        hit_mask=np.ones(n, dtype=bool),
+    )
+    return export_point_cloud(wrapped, path, fmt=fmt)

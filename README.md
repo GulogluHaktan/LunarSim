@@ -134,6 +134,38 @@ doğrulandı: 384 ışından 341'i her iki yöntemde de aynı, ortalama sapma
 **0.37 mm**, RMSE 1.58 m (birkaç sınır-açılı ışından kaynaklanıyor) — bkz.
 "Isaac Sim doğrulaması" altında.
 
+Point cloud'u dosyaya yazmak için `export_point_cloud` (`.ply`/`.npy`/`.csv`):
+
+```python
+from lunarsim.core.metadata.lidar import LidarScanPattern, raycast_lidar, export_point_cloud
+
+pattern = LidarScanPattern.spinning(n_channels=32, vertical_fov_deg=(-70, -5), horizontal_res_deg=1.0)
+pc = raycast_lidar(tile.height, tile.res_m, sensor_pos, pattern.ray_directions(), max_range_m=60.0)
+export_point_cloud(pc, "out/scan.ply")   # CloudCompare/MeshLab/Blender'da direkt açılır
+```
+
+Gerçek RTX LiDAR çıktısı için aynı formatlarda `adapters.isaac.sensors.export_rtx_point_cloud`
+kullanılabilir (bu ortamda RTX LiDAR çöktüğü için doğrulanamadı, bkz. `lunarsim/adapters/isaac/README.md`).
+
+## Alan bazlı detay kontrolü (Gaussian ROI)
+
+Bir bölgenin detay seviyesini diğerlerine göre artırmak (plan bölüm 5) —
+`terrain.roi.regions` ile her bölgeye kendi merkezini (dünya metre cinsinden),
+yarıçapını (`sigma_m`) ve gücünü (`weight`, 1.0=tam ince detay) ver:
+
+```yaml
+terrain:
+  mode: blend
+  roi:
+    regions:
+      - {x_m: 90,  y_m: 60,  sigma_m: 25, weight: 1.0}   # dar, tam detay
+      - {x_m: -80, y_m: -50, sigma_m: 60, weight: 0.6}   # geniş, orta detay
+```
+
+Kalan her yer coarse kaynağa (gerçek DEM ya da procedural) düşer. Eski
+`roi.centers: random_16` / tek `sigma_m` biçimi de hâlâ çalışıyor (tüm ROI'ler
+aynı yarıçap/güç).
+
 ## Arazi gerçekçilik kontrolü
 
 ```python

@@ -163,6 +163,44 @@ def _sample_normal(normals: np.ndarray, res_m: float, x: np.ndarray, y: np.ndarr
     return normals[row, col]
 
 
+def export_point_cloud(pc: LidarPointCloud, path: str, fmt: str | None = None) -> str:
+    """Write hit points (NaN/miss rays dropped) to disk.
+
+    `fmt` is inferred from `path`'s extension if not given: `.ply` (ASCII,
+    xyz + intensity, opens directly in CloudCompare/MeshLab/Blender/rviz),
+    `.npy` (a structured numpy array, round-trips exactly via
+    `numpy.load(..., allow_pickle=False)`), or `.csv` (x_m,y_m,z_m,intensity
+    header, human-readable/Excel-friendly). Returns the path written.
+    """
+    fmt = fmt or path.rsplit(".", 1)[-1].lower()
+    hits = pc.hit_mask
+    pts = pc.points_m[hits]
+    intensity = pc.intensity[hits]
+
+    if fmt == "ply":
+        with open(path, "w") as f:
+            f.write("ply\nformat ascii 1.0\n")
+            f.write(f"element vertex {len(pts)}\n")
+            f.write("property float x\nproperty float y\nproperty float z\n")
+            f.write("property float intensity\nend_header\n")
+            for (x, y, z), i in zip(pts, intensity):
+                f.write(f"{x:.4f} {y:.4f} {z:.4f} {i:.4f}\n")
+    elif fmt == "npy":
+        structured = np.zeros(len(pts), dtype=[("x", "f4"), ("y", "f4"), ("z", "f4"), ("intensity", "f4")])
+        structured["x"], structured["y"], structured["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
+        structured["intensity"] = intensity
+        np.save(path, structured)
+    elif fmt == "csv":
+        with open(path, "w") as f:
+            f.write("x_m,y_m,z_m,intensity\n")
+            for (x, y, z), i in zip(pts, intensity):
+                f.write(f"{x:.4f},{y:.4f},{z:.4f},{i:.4f}\n")
+    else:
+        raise ValueError(f"unknown point cloud format: {fmt!r} (expected 'ply', 'npy', or 'csv')")
+
+    return path
+
+
 def compare_point_clouds(ground_truth: LidarPointCloud, other: LidarPointCloud) -> dict:
     """Basic per-ray range error stats between the analytic ground truth and
     an external (e.g. Isaac RTX LiDAR) point cloud sharing the same ray order
