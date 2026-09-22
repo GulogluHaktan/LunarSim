@@ -53,5 +53,5 @@ if [[ "$n_frames" -eq 0 ]]; then
 fi
 
 echo "[LunarSim] encoding $n_frames frames -> $OUT_MP4"
-ffmpeg -y -framerate 24 -i "$FRAMES_DIR/frame_%04d.png" -c:v libx264 -pix_fmt yuv420p "$OUT_MP4"
+ffmpeg -y -framerate 24 -i "$FRAMES_DIR/frame_%04d.png" -c:v libx264 -crf 16 -preset slow -pix_fmt yuv420p "$OUT_MP4"
 echo "[LunarSim] wrote $OUT_MP4"

@@ -20,6 +20,10 @@ parser.add_argument("--n-frames", type=int, default=90)
 parser.add_argument("--radius-m", type=float, default=55.0)
 parser.add_argument("--height-m", type=float, default=35.0)
 parser.add_argument("--n-orbits", type=float, default=1.0)
+parser.add_argument("--width", type=int, default=1280)
+parser.add_argument("--height", type=int, default=960)
+parser.add_argument("--mesh-lod", type=int, default=2)
+parser.add_argument("--settle-steps", type=int, default=12)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
 
@@ -64,7 +68,7 @@ cfg = TerrainConfig(
 )
 tile = generate_tile(cfg)
 add_heightfield_collision(stage, "/World/Terrain/Collision", tile)
-render_mesh = build_render_mesh(stage, "/World/Terrain/Render", tile, lod=1)
+render_mesh = build_render_mesh(stage, "/World/Terrain/Render", tile, lod=args_cli.mesh_lod)
 material = create_regolith_material(stage, "/World/Looks/Regolith", albedo=0.11, brdf="albedo")
 UsdShade.MaterialBindingAPI.Apply(render_mesh.GetPrim()).Bind(material)
 
@@ -74,8 +78,8 @@ create_sun_light(stage, "/World/Sun", sun_pos, angular_diameter_deg=0.53)
 camera_cfg = CameraCfg(
     prim_path="/World/OrbitCamera",
     update_period=0,
-    height=480,
-    width=640,
+    height=args_cli.height,
+    width=args_cli.width,
     data_types=["rgb"],
     spawn=sim_utils.PinholeCameraCfg(focal_length=18.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)),
 )
@@ -84,7 +88,7 @@ camera = Camera(cfg=camera_cfg)
 sim.reset()
 
 print("warming up renderer...")
-for _ in range(45):
+for _ in range(60):
     sim.step(render=True)
     camera.update(dt=sim.get_physics_dt())
 
@@ -101,7 +105,7 @@ for i in range(args_cli.n_frames):
     target = torch.tensor([[0.0, 0.0, 0.0]], device=sim.device, dtype=torch.float32)
     camera.set_world_poses_from_view(cam_pos, target)
 
-    for _ in range(3):
+    for _ in range(args_cli.settle_steps):
         sim.step(render=True)
         camera.update(dt=sim.get_physics_dt())
 
