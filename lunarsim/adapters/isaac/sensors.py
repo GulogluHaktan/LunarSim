@@ -49,6 +49,32 @@ def create_camera(prim_path: str, resolution: tuple[int, int] = (1280, 720), foc
     return camera
 
 
+def enable_isaac_extension(*extension_names: str) -> None:
+    """Force-enable one or more Kit extensions via `omni.kit.app` directly.
+
+    REAL BUG FOUND (twice, via a local non-docker run and then again
+    against the docker image itself): several `isaacsim.*` packages that
+    import fine under a bare `isaacsim.SimulationApp` raise
+    `ModuleNotFoundError` under `isaaclab.app.AppLauncher` -- the
+    corresponding Kit extension just isn't enabled by IsaacLab's base app
+    profile (confirmed for `isaacsim.sensors.experimental.rtx` and
+    `isaacsim.core.prims`; likely others too). Enabling explicitly here
+    fixes both paths (a no-op if something else already enabled it).
+
+    Goes through `omni.kit.app` directly rather than the
+    `isaacsim.core.utils.extensions` wrapper some Isaac Sim docs point to --
+    that wrapper PACKAGE is itself unavailable under IsaacLab's app profile
+    for the same reason (`ModuleNotFoundError: No module named
+    'isaacsim.core.utils'`), while `omni.kit.app` (what the wrapper calls
+    internally) is always present, under any Kit app profile.
+    """
+    import omni.kit.app
+
+    ext_mgr = omni.kit.app.get_app().get_extension_manager()
+    for name in extension_names:
+        ext_mgr.set_extension_enabled_immediate(name, True)
+
+
 def create_rtx_lidar(prim_path: str, config: str = "OS0", tick_rate: float = 10.0):
     """Author + wire up a real RTX LiDAR sensor at `prim_path`, using one of
     Isaac Sim's built-in real hardware profiles (default "OS0" -- an Ouster
@@ -60,7 +86,11 @@ def create_rtx_lidar(prim_path: str, config: str = "OS0", tick_rate: float = 10.
     Returns a `LidarSensor` with a `"generic-model-output"` annotator already
     attached; after stepping the sim, call `get_point_cloud(sensor)` to read
     the current frame's hit points.
+
+    See `enable_isaac_extension`'s docstring for why this needs to force-
+    enable its own extensions under `isaaclab.app.AppLauncher`.
     """
+    enable_isaac_extension("omni.usd.schema.omni_sensors", "isaacsim.sensors.experimental.rtx")
     from isaacsim.sensors.experimental.rtx import Lidar, LidarSensor
 
     lidar = Lidar.create(prim_path, config=config, tick_rate=tick_rate)

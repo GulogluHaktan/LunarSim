@@ -41,9 +41,28 @@ def sample_rock_field(
 
 
 def sample_height_at(height: np.ndarray, res_m: float, x_m: np.ndarray, y_m: np.ndarray) -> np.ndarray:
-    """Bilinear-free nearest-sample lookup of heightfield value under each (x, y)."""
+    """Bilinear-free nearest-sample lookup of heightfield value under each (x, y).
+
+    REAL BUG FOUND (via a real Isaac Sim controller capture landing on real
+    terrain ~0.89m away from where this function said the ground was): this
+    had `height[i, j]` with `i` derived from `y_m` and `j` from `x_m` -- but
+    every producer of a `height` array in this codebase (`_mesh_from_heightfield`
+    in `lunarsim/adapters/isaac/heightfield.py`, which builds BOTH the actual
+    PhysX collision mesh and the render mesh; `add_curvature`; the hi-res
+    patch resampling in `generate.py`) places `height[i, j]` at world
+    `(x = ax[i], y = ax[j])` -- i.e. row index <-> x, column index <-> y.
+    This function alone had it backwards (row <-> y, column <-> x), an x/y
+    transpose that's invisible on statistically-isotropic gentle terrain
+    (nearby transposed cells have similar heights) but real and sometimes
+    large (~1m, confirmed) wherever the terrain is locally anisotropic --
+    crater rims, slopes -- exactly where a drifting descent is likely to
+    touch down. This function is called from both RL training environments
+    (`analytic_lander_env.py`, `isaac_lander_env.py`/`isaac_lander_vec_env.py`)
+    and every eval/render script, so every touchdown/altitude check in the
+    whole project was reading a transposed ground height until this fix.
+    """
     n = height.shape[0]
     center = (n - 1) / 2
-    j = np.clip(np.round(x_m / res_m + center).astype(int), 0, n - 1)
-    i = np.clip(np.round(y_m / res_m + center).astype(int), 0, n - 1)
+    i = np.clip(np.round(x_m / res_m + center).astype(int), 0, n - 1)
+    j = np.clip(np.round(y_m / res_m + center).astype(int), 0, n - 1)
     return height[i, j]
