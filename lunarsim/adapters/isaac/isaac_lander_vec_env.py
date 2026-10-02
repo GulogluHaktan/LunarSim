@@ -53,7 +53,10 @@ from lunarsim.core.terrain.rocks import sample_height_at
 from lunarsim.core.vehicle.apollo_lm import ApolloLMSpecs, G0, leg_force_bounds_n, moment_of_inertia
 from lunarsim.rl.analytic_lander_env import LanderParams, _euler_to_quat
 from lunarsim.rl.obs_norm import normalize_obs
-from lunarsim.adapters.isaac.isaac_lander_env import _quat_to_euler, _REPO_ROOT
+from lunarsim.adapters.isaac.isaac_lander_env import (
+    TOUCHDOWN_CONTACT_EPS_M, _quat_to_euler, _REPO_ROOT, collision_mesh_height_at,
+    contact_clearance_m, out_of_tile,
+)
 
 TileFn = Callable[[np.random.Generator], Tile]
 RewardFn = Callable[[object, dict], float]
@@ -210,9 +213,23 @@ class IsaacLanderVecEnv(VecEnv):
                     self._regolith_physics_mat, materialPurpose="physics")
 
     def _ground_z(self, i: int, x_world: float, y_world: float) -> float:
+        # the REAL collision surface, not the nearest heightfield sample --
+        # see `isaac_lander_env.collision_mesh_height_at` for the measured
+        # (up to 0.054 m) discrepancy that cost this project every soft
+        # touchdown it ever flew.
         ox, oy, _ = self.env_origins[i]
         tile = self._tiles[i]
-        return float(sample_height_at(tile.height, tile.res_m, np.array([x_world - ox]), np.array([y_world - oy]))[0])
+        return float(collision_mesh_height_at(
+            tile.height, tile.res_m, np.array([x_world - ox]), np.array([y_world - oy]))[0])
+
+    def _contact(self, i: int) -> tuple[float, float]:
+        """`(clearance_m, ground_z)` for env `i` -- see
+        `isaac_lander_env.contact_clearance_m`."""
+        ox, oy, _ = self.env_origins[i]
+        s, tile = self.state, self._tiles[i]
+        return contact_clearance_m(
+            tile.height, tile.res_m, s["x"][i] - ox, s["y"][i] - oy, s["z"][i],
+            s["tilt_x"][i], s["tilt_y"][i], self._half_height_m, self._specs.footpad_span_m / 2.0)
 
     def _footpad_height_diff_m(self, i: int, x_world: float, y_world: float) -> float:
         radius = self._specs.footpad_span_m / 2.0
@@ -278,11 +295,13 @@ class IsaacLanderVecEnv(VecEnv):
     def _obs_one(self, i: int) -> np.ndarray:
         p = self.params
         s = self.state
-        ground_z = self._ground_z(i, s["x"][i], s["y"][i])
+        # same clearance definition the termination test and
+        # info["altitude_m"] use, so "altitude" means one thing everywhere.
+        clearance_m, _ = self._contact(i)
         qw, qx, qy, qz = _euler_to_quat(s["tilt_x"][i], s["tilt_y"][i], s["yaw"][i])
         obs = [
             s["x"][i] - (self.env_origins[i][0] + p.target_x), s["y"][i] - (self.env_origins[i][1] + p.target_y),
-            (s["z"][i] - self._half_height_m) - ground_z,
+            clearance_m,
             s["vx"][i], s["vy"][i], s["vz"][i],
             qw, qx, qy, qz,
             s["wx"][i], s["wy"][i], s["wz"][i],
@@ -371,13 +390,19 @@ class IsaacLanderVecEnv(VecEnv):
         infos: list[dict] = [dict() for _ in range(n)]
 
         for i in range(n):
-            ground_z = self._ground_z(i, s["x"][i], s["y"][i])
-            belly_z = s["z"][i] - self._half_height_m
-            touched_down = bool(belly_z <= ground_z + 1e-3)
+            # whole tilted collider against the ground under its whole
+            # footprint, not the belly centre against the ground under the
+            # body origin -- see `isaac_lander_env.contact_clearance_m` for
+            # the real landed-but-logged-as-a-timeout capture this fixes.
+            clearance_m, ground_z = self._contact(i)
+            touched_down = bool(clearance_m <= TOUCHDOWN_CONTACT_EPS_M)
             lost_control = bool(np.hypot(s["tilt_x"][i], s["tilt_y"][i]) > p.loss_of_control_tilt_rad)
             timed_out = bool(self._t[i] >= p.max_episode_s)
+            ox, oy, _ = self.env_origins[i]
+            left_tile = out_of_tile(self._tiles[i], s["x"][i] - ox, s["y"][i] - oy,
+                                     self._specs.footpad_span_m / 2.0)
             terminated = touched_down or lost_control
-            truncated = bool(timed_out and not terminated)
+            truncated = bool((timed_out or left_tile) and not terminated)
 
             landed_safely = False
             landing_margins: dict = {}
@@ -408,8 +433,11 @@ class IsaacLanderVecEnv(VecEnv):
             info = {
                 "terminated": terminated, "truncated": truncated,
                 "landed_safely": landed_safely, "lost_control": lost_control,
+                "left_tile": left_tile,
                 "landing_margins": landing_margins,
-                "altitude_m": belly_z - ground_z,
+                # real clearance of the collider's lowest point above the
+                # ground it can rest on; reaches 0 exactly at touchdown.
+                "altitude_m": clearance_m,
                 "fuel_kg": s["fuel_kg"][i], "rcs_fuel_kg": s["rcs_fuel_kg"][i],
                 "mass_kg": mass_kg_all[i], "leg_force_n": leg_force_n, "leg_force_max_n": leg_force_max_n,
                 "t_s": self._t[i],

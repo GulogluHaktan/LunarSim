@@ -114,7 +114,11 @@ from lunarsim.adapters.isaac.lighting import (
 )
 from lunarsim.adapters.isaac.materials import create_regolith_material
 from lunarsim.core.terrain.deformation import BekkerSoilParams, bekker_sinkage_m
-from lunarsim.adapters.isaac.sensors import create_rtx_lidar, export_rtx_point_cloud, get_point_cloud
+from lunarsim.core.metadata.lidar import euler_to_rotation_matrix
+from lunarsim.adapters.isaac.sensors import (
+    LIDAR_MOUNT_TILT_DEG, create_rtx_lidar, descent_sensor_mount_z_m,
+    export_rtx_point_cloud, get_point_cloud, lidar_mount_pose,
+)
 from lunarsim.core.lighting.regolith_texture import bake_regolith_normal_map
 from lunarsim.core.lighting.sun import SunPosition
 from lunarsim.core.terrain.config import TerrainConfig
@@ -139,6 +143,19 @@ stage = omni.usd.get_context().get_stage()
 # ~33 m/s tunneling this fixes) only actually engages if the PHYSICS SCENE
 # also has CCD turned on; SimulationCfg's default scene doesn't.
 from pxr import PhysxSchema
+
+
+def _lidar_pose_columns(pc):
+    """Sensor world pose columns for one `lidar_index.csv` row, blank if the
+    sensor reported world-frame points directly (then there was no pose to
+    apply)."""
+    pos = pc.get("sensor_pos_m")
+    rot = pc.get("sensor_rotation")
+    if pos is None or rot is None:
+        return [""] * 12
+    return ([round(float(v), 5) for v in pos]
+            + [round(float(rot[i][j]), 7) for i in range(3) for j in range(3)])
+
 
 physx_scene = PhysxSchema.PhysxSceneAPI.Apply(stage.GetPrimAtPath(sim_cfg.physics_prim_path))
 physx_scene.CreateEnableCCDAttr(True)
@@ -315,7 +332,20 @@ nav_cam_cfg = CameraCfg(
         # useful view -- widened the clearance so it still reads as a
         # hazard-cam shot of the landing site once resting, not a macro
         # shot of the regolith directly underneath.
-        pos=(0.0, 0.0, -specs.height_m * 0.5 - 1.2),
+        # REAL BUG, caught by watching the end of a landing video: the
+        # clearance above was widened in the WRONG DIRECTION. Moving the
+        # camera further DOWN moves it TOWARD the ground, not away from
+        # it -- at -1.2 m it sits 1.2 m below the collision cylinder's
+        # bottom face, i.e. underground from the moment the vehicle gets
+        # within 1.2 m of the surface. Measured on the successful
+        # landing capture: the nav feed is solid black (mean pixel 0.0,
+        # std 0.0) from t=45 s to the end, 20.4 s of the 63 s run,
+        # covering the entire final approach and touchdown. Mounted just
+        # ABOVE the contact plane instead: clear of the descent stage's
+        # own underside (which starts ~1.0 m higher), clear of the
+        # ground even at the ~23 deg tilts this descent actually reaches,
+        # and still looking straight down at the landing site.
+        pos=(0.0, 0.0, -specs.height_m * 0.5 + 0.5),
         # identity rotation in the "opengl" convention (forward = -Z by
         # convention definition) points the camera along the parent's own
         # local -Z with no hand-derived quaternion needed -- simpler and
@@ -364,9 +394,9 @@ print(f"creating RTX LiDAR ({args_cli.lidar_config} profile) on the vehicle...")
 lidar_sensor = create_rtx_lidar(f"/World/LM/Sensors/Lidar", config=args_cli.lidar_config, tick_rate=10.0)
 lidar_xf = UsdGeom.Xformable(stage.GetPrimAtPath("/World/LM/Sensors/Lidar"))
 lidar_xf.ClearXformOpOrder()
-lidar_local_z = -specs.height_m * 0.3
+lidar_local_z = descent_sensor_mount_z_m(specs)
 lidar_xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, lidar_local_z))
-lidar_xf.AddRotateYOp().Set(60.0)  # tilt the scan cone's reference direction down toward the ground
+lidar_xf.AddRotateYOp().Set(LIDAR_MOUNT_TILT_DEG)  # tilt the scan cone down toward the ground
 
 # -- IMU: the vehicle root itself is the rigid body it measures --
 imu_cfg = ImuCfg(prim_path="/World/LM")
@@ -485,7 +515,16 @@ with open(telemetry_path, "w", newline="") as tf, \
     frames_writer = csv.writer(ff)
     frames_writer.writerow(["frame_index", "step", "t_s"])
     lidar_writer = csv.writer(lf)
-    lidar_writer.writerow(["scan_index", "filename", "step", "t_s", "hit_count"])
+    # the sensor's own world pose goes in alongside each scan: the points
+    # are exported in the WORLD frame, and a consumer that wants to draw
+    # the sensor, re-derive a ray, or motion-compensate needs the pose the
+    # conversion actually used -- rebuilding it downstream from the vehicle
+    # pose plus the mount constants is both lossy and easy to get wrong.
+    lidar_writer.writerow(
+        ["scan_index", "filename", "step", "t_s", "hit_count"]
+        + ["sensor_x_m", "sensor_y_m", "sensor_z_m"]
+        + [f"sensor_r{i}{j}" for i in range(3) for j in range(3)]
+    )
 
     step = 0
     for step in range(max_steps):
@@ -547,13 +586,15 @@ with open(telemetry_path, "w", newline="") as tf, \
 
         lidar_hit_count = 0
         if step % args_cli.lidar_every_n_frames == 0:
-            pc = get_point_cloud(lidar_sensor)
+            pc = get_point_cloud(lidar_sensor, sensor_pose=lidar_mount_pose(
+                specs, translation, euler_to_rotation_matrix(*euler_rad)))
             lidar_hit_count = int(pc["x_m"].size)
             if lidar_hit_count > 0:
                 scan_filename = f"scan_{lidar_scan_i:04d}.ply"
                 scan_path = os.path.join(lidar_dir, scan_filename)
                 export_rtx_point_cloud(pc, scan_path)
-                lidar_writer.writerow([lidar_scan_i, scan_filename, step, round(t_s, 4), lidar_hit_count])
+                lidar_writer.writerow([lidar_scan_i, scan_filename, step, round(t_s, 4), lidar_hit_count]
+                                      + _lidar_pose_columns(pc))
                 lidar_scan_i += 1
         writer.writerow({
             "frame": step, "t_s": round(t_s, 4),

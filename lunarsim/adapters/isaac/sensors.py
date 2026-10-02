@@ -98,29 +98,174 @@ def create_rtx_lidar(prim_path: str, config: str = "OS0", tick_rate: float = 10.
     return sensor
 
 
-def get_point_cloud(sensor) -> dict[str, np.ndarray]:
+# Vehicle-frame mount height shared by the downward-looking descent sensors
+# (nav camera and LiDAR), and the LiDAR's own down-tilt.
+#
+# REAL BUG THIS ENCODES, found by running a capture after the visual mesh was
+# moved onto its true contact plane: with the LiDAR at z = -height*0.3
+# (-2.11 m) a single scan came back with 88074 hits, EVERY ONE of them
+# between 0.8 and 3.0 m from the sensor -- the vehicle's own descent stage,
+# no terrain at all. The old mount only ever worked because the visual mesh
+# was mis-placed 3.66 m too high, leaving the sensor in open space below it.
+#
+# Where a downward sensor can actually live was then measured off the real
+# mesh, binning all 76209 vertices by (radius, z) in the corrected body
+# frame: the descent stage fills radius 0..4 m from z = -2.4 upward, so
+# anything above that stares into structure. Below -2.4 the only occupied
+# radii are the engine bell (r < ~1.0) and the legs (r > ~3.0). This height
+# sits in that clear band, 0.5 m above the footpad contact plane, and is the
+# same height the nav camera already renders a clean ground view from.
+LIDAR_MOUNT_TILT_DEG = 60.0
+_DESCENT_SENSOR_ABOVE_CONTACT_PLANE_M = 0.5
+
+
+def descent_sensor_mount_z_m(specs) -> float:
+    """Vehicle-frame z of the downward-looking descent sensors."""
+    return -specs.height_m * 0.5 + _DESCENT_SENSOR_ABOVE_CONTACT_PLANE_M
+
+
+def lidar_mount_pose(specs, vehicle_pos_m, vehicle_rotation):
+    """`(sensor_pos_world, sensor_to_world_rotation)` for the descent LiDAR,
+    composed from the vehicle's CURRENT pose and the authored mount.
+
+    Pass the result to `get_point_cloud(..., sensor_pose=...)`. Reading the
+    pose off the USD stage instead does NOT work during a running sim: under
+    Isaac Lab the live pose lives in Fabric/PhysX and the stage keeps the
+    authored spawn transform. Measured in a real capture -- the recorded
+    sensor z stayed at 29.50 m for every scan while the vehicle actually
+    descended from 25.2 m altitude to touchdown.
+    """
+    from lunarsim.core.metadata.lidar import euler_to_rotation_matrix
+
+    offset = np.array([0.0, 0.0, descent_sensor_mount_z_m(specs)])
+    rotation = np.asarray(vehicle_rotation, dtype=float)
+    mount = euler_to_rotation_matrix(0.0, np.deg2rad(LIDAR_MOUNT_TILT_DEG), 0.0)
+    return np.asarray(vehicle_pos_m, dtype=float) + rotation @ offset, rotation @ mount
+
+
+def sensor_world_transform(sensor, prim_path: str | None = None):
+    """`(position, rotation)` of an RTX sensor in the world frame, read from
+    USD -- a (3,) translation and a 3x3 sensor->world rotation matrix in the
+    column-vector convention (`p_world = rotation @ p_sensor + position`).
+
+    Read off the prim's `ComputeLocalToWorldTransform` rather than off the
+    GMO's own `frameStart`/`frameEnd` pose: that pose carries a 4-float
+    `orientation` whose component order (wxyz vs xyzw) is not documented in
+    the extension's type stub, and guessing it wrong silently mirrors the
+    whole point cloud. A USD matrix has no such ambiguity. (USD composes
+    with row vectors -- `v_world = v_local * M` -- so the translation is
+    M's last ROW and the column-convention rotation is M's upper-left 3x3
+    TRANSPOSED.)
+    """
+    import omni.usd
+    from pxr import Usd, UsdGeom
+
+    prim = None
+    if prim_path is not None:
+        prim = omni.usd.get_context().get_stage().GetPrimAtPath(prim_path)
+    else:
+        authored = getattr(sensor, "lidar", None)
+        prims = getattr(authored, "prims", None) if authored is not None else None
+        if prims:
+            prim = prims[0]
+    if prim is None or not prim.IsValid():
+        raise ValueError(
+            "could not resolve the sensor's USD prim; pass prim_path= explicitly"
+        )
+
+    matrix = np.array(
+        UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default()),
+        dtype=float,
+    )
+    return matrix[3, :3].copy(), matrix[:3, :3].T.copy()
+
+
+def get_point_cloud(sensor, prim_path: str | None = None, to_world: bool = True,
+                    sensor_pose: tuple | None = None) -> dict[str, np.ndarray]:
     """Read the current frame's point cloud from an RTX `LidarSensor`.
 
-    Returns a dict with `x_m`/`y_m`/`z_m` (hit points, in the sensor's
-    configured frame of reference -- world by default) and `intensity`
-    (the GenericModelOutput "scalar" field, reflectivity-like), all
-    length-`n_hits` numpy arrays. Empty arrays if no data is available yet
-    (e.g. called before the first render tick after creation).
+    Returns a dict of length-`n_hits` arrays: `x_m`/`y_m`/`z_m` (CARTESIAN
+    hit points, in the world frame when `to_world` and the sensor pose is
+    resolvable, otherwise in the sensor frame) and `intensity` (the
+    GenericModelOutput "scalar" field, reflectivity-like). When the sensor
+    reports spherically it also returns the raw `azimuth_deg`,
+    `elevation_deg` and `range_m`. `sensor_pos_m`/`sensor_rotation` carry
+    the pose the conversion used, and `coords_type`/`frame_of_reference`
+    record what the sensor actually reported. Empty arrays if no data is
+    available yet (e.g. called before the first render tick after creation).
+
+    `sensor_pose` is `(position, 3x3 rotation)` for the sensor in world
+    coordinates; pass it (see `lidar_mount_pose`) whenever a simulation is
+    running. Without it the pose is read off the USD stage, which under
+    Isaac Lab keeps the authored SPAWN transform while the live pose lives
+    in Fabric/PhysX -- a capture built that way recorded the same sensor
+    position for every scan of an entire descent.
+
+    REAL BUG THIS FIXES, found by reading a finished capture's own exports:
+    this used to return `gmo.x/y/z` directly, described as "in the sensor's
+    configured frame of reference -- world by default". Both halves of that
+    were wrong for the Ouster profiles this project uses. `gmo` reports in
+    whatever `gmo.elementsCoordsType` says, and that is SPHERICAL --
+    azimuth deg, elevation deg, range m -- in the SENSOR frame. So every
+    `.ply` written by every capture run so far holds angles-and-a-range
+    under the property names (x, y, z): a 600 m tile's scans had an "x"
+    column spanning exactly -179.9997..179.9998 and a "y" column spanning
+    -11.11..10.79 with 0.176 deg spacing that never moved between scans --
+    a full 360 deg azimuth sweep and the OS2's 22.5 deg vertical FOV over
+    128 channels, not metres. Anything downstream that treated those as a
+    shape in space (the dashboard's LiDAR panel; any CloudCompare/MeshLab
+    open of those files) was looking at an artifact of the mistake.
     """
     from isaacsim.sensors.experimental.rtx import parse_generic_model_output_data
 
+    empty = {
+        "x_m": np.empty(0), "y_m": np.empty(0), "z_m": np.empty(0), "intensity": np.empty(0),
+    }
     data, _info = sensor.get_data("generic-model-output")
     if data is None:
-        return {"x_m": np.empty(0), "y_m": np.empty(0), "z_m": np.empty(0), "intensity": np.empty(0)}
+        return empty
 
     gmo = parse_generic_model_output_data(data)
-    n = gmo.numElements
-    return {
-        "x_m": np.array(gmo.x[:n]),
-        "y_m": np.array(gmo.y[:n]),
-        "z_m": np.array(gmo.z[:n]),
-        "intensity": np.array(gmo.scalar[:n]) if n > 0 else np.empty(0),
-    }
+    n = int(gmo.numElements)
+    if n <= 0:
+        return empty
+
+    coords_type = getattr(gmo.elementsCoordsType, "name", str(gmo.elementsCoordsType))
+    frame_of_reference = getattr(gmo.frameOfReference, "name", str(gmo.frameOfReference))
+    c0 = np.array(gmo.x[:n], dtype=float)
+    c1 = np.array(gmo.y[:n], dtype=float)
+    c2 = np.array(gmo.z[:n], dtype=float)
+    intensity = np.array(gmo.scalar[:n], dtype=float)
+
+    out: dict[str, np.ndarray] = {"intensity": intensity}
+    if coords_type == "SPHERICAL":
+        from lunarsim.core.metadata.lidar import spherical_to_cartesian
+
+        out["azimuth_deg"], out["elevation_deg"], out["range_m"] = c0, c1, c2
+        points = spherical_to_cartesian(c0, c1, c2)
+        points_are_world = False
+    else:
+        points = np.stack([c0, c1, c2], axis=-1)
+        out["range_m"] = np.linalg.norm(points, axis=-1)
+        points_are_world = frame_of_reference == "WORLD"
+
+    if to_world and not points_are_world:
+        from lunarsim.core.metadata.lidar import sensor_to_world
+
+        if sensor_pose is not None:
+            position, rotation = sensor_pose
+            position = np.asarray(position, dtype=float)
+            rotation = np.asarray(rotation, dtype=float)
+        else:
+            position, rotation = sensor_world_transform(sensor, prim_path)
+        points = sensor_to_world(points, position, rotation)
+        out["sensor_pos_m"] = position
+        out["sensor_rotation"] = rotation
+
+    out["x_m"], out["y_m"], out["z_m"] = points[:, 0], points[:, 1], points[:, 2]
+    out["coords_type"] = coords_type
+    out["frame_of_reference"] = frame_of_reference
+    return out
 
 
 def export_rtx_point_cloud(pc: dict, path: str, fmt: str | None = None) -> str:
@@ -135,10 +280,12 @@ def export_rtx_point_cloud(pc: dict, path: str, fmt: str | None = None) -> str:
     points_m = np.stack([pc["x_m"], pc["y_m"], pc["z_m"]], axis=-1) if n > 0 else np.empty((0, 3))
     wrapped = LidarPointCloud(
         points_m=points_m,
-        # only meaningful as a true sensor range if the points are in the
-        # sensor's local frame; not used by export_point_cloud anyway (it
-        # only writes points_m + intensity), kept just to satisfy the dataclass.
-        range_m=np.linalg.norm(points_m, axis=-1) if n > 0 else np.empty(0),
+        # the sensor's own reported range when `get_point_cloud` has it;
+        # the vector norm is only the true range while the points are in
+        # the sensor frame, and they are world-frame by default now. Not
+        # used by `export_point_cloud` either way (it only writes points_m
+        # + intensity), so this just keeps the dataclass honest.
+        range_m=pc.get("range_m", np.linalg.norm(points_m, axis=-1) if n > 0 else np.empty(0)),
         intensity=pc["intensity"],
         hit_mask=np.ones(n, dtype=bool),
     )

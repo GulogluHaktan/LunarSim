@@ -354,14 +354,23 @@ karşı doğrulandı**; kamera authoring doğru ama render pipeline'ı çalışm
 bkz. yukarısı), 10 (preset'ler).
 
 Kalan/eksik:
-- **RTX LiDAR denendi, çalışmadı**: gerçek API'ye karşı implemente edildi
-  (`isaacsim.sensors.experimental.rtx`, NVIDIA'nın kendi test suite'iyle birebir
-  aynı kalıp, gerçek Ouster OS0 donanım profili) ama iki bring-up yolu da (bare
-  `World` → hep "Invalid magic number"/geçersiz veri; Isaac Lab `SimulationContext`
-  → segfault) başarısız oldu — bu ortamdaki Isaac Sim 6.0.1'in "experimental"
-  RTX LiDAR extension'ında gerçek bir kararsızlık. Analitik `raycast_lidar`
-  (CPU, gerçek PhysX'e karşı 0.37mm doğrulukla test edildi) kullanılmalı.
-  Detay: `lunarsim/adapters/isaac/README.md`.
+- ~~RTX LiDAR denendi, çalışmadı~~ — **artık çalışıyor** (2026-10-02).
+  Capture pipeline'ında (AppLauncher + aktif kamera render ürünü, bkz.
+  `scripts/isaaclab_controller_eval_capture.py`) gerçek Ouster OS2 profiliyle
+  çalışıyor ve gerçek donanımda doğrulandı: inen araçtan alınan taramaların
+  dünya-çerçevesi noktaları zemin seviyesine (medyan z ≈ 0 m) düşüyor,
+  medyan menzil irtifayla ölçekleniyor. Bare `isaacsim.core.api.World`
+  yolu hâlâ veri vermiyor — `scripts/isaaclab_test_rtx_lidar.py` bu yüzden
+  hâlâ "no points" diyor; aktif bir render ürünü olmadan RTX sensör tick
+  atmıyor.
+  **Önemli uyarı:** GenericModelOutput bu profillerde `SPHERICAL` raporluyor
+  (azimut°, elevasyon°, menzil m) — kartezyen metre DEĞİL. Dönüşümü
+  `adapters.isaac.sensors.get_point_cloud` yapıyor; ham `gmo.x/y/z`
+  doğrudan kullanılmamalı. Bu hata yüzünden 2026-10-02 öncesi üretilmiş
+  tüm `out/*/lidar_scans/*.ply` dosyaları (x,y,z) adı altında açı/menzil
+  tutuyor — `scripts/compose_capture_video.py --scan-format` bunları
+  okuyabiliyor. Analitik `raycast_lidar` (CPU, gerçek PhysX'e karşı 0.37 mm
+  doğrulukla test edildi) ground truth olarak kullanılmaya devam ediyor.
 - Hapke BRDF için özel MDL shader yazılmadı (sadece UsdPreviewSurface yaklaşığı var).
 - Isaac'te bazı açılarda görülen küçük speküler parlama artefaktı ayarlanmadı
   (bkz. `scripts/isaaclab_orbit_demo.py` commit notu) — kozmetik, fonksiyonel değil.

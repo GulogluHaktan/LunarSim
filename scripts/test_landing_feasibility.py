@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -26,71 +25,21 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lunarsim.control.zemzev_controller import ZemZevController, ZemZevGains  # noqa: E402
-from lunarsim.core.terrain.config import TerrainConfig  # noqa: E402
 from lunarsim.core.terrain.generate import generate_tile  # noqa: E402
-from lunarsim.rl.analytic_lander_env import AnalyticLanderEnv, LanderParams  # noqa: E402
+from lunarsim.rl.analytic_lander_env import AnalyticLanderEnv  # noqa: E402
+from lunarsim.rl.curriculum import STAGES_BY_NAME, Stage, terrain_config  # noqa: E402
 
 
-@dataclass
-class Stage:
-    name: str
-    tile_size_m: float
-    params: LanderParams = field(default_factory=LanderParams)
-    terrain_roughness_scale: float = 1.0
-
-
-# mirrors scripts/train_sac_isaac.py's STAGES exactly, so a pass/fail here is
-# directly comparable to what the RL curriculum was asked to solve.
-STAGES = {
-    "hover_only_easy": Stage(
-        name="hover_only_easy", tile_size_m=40.0, terrain_roughness_scale=0.0,
-        params=LanderParams(
-            spawn_altitude_m=20.0, spawn_xy_radius_m=0.0,
-            spawn_v_z_m_s=-2.0, spawn_horizontal_speed_m_s=(0.0, 0.0),
-            max_episode_s=25.0,
-            safe_landing_v_z_m_s=5.0, safe_landing_v_xy_m_s=5.0,
-            safe_landing_tilt_rad=np.deg2rad(30.0), safe_landing_w_rad_s=2.0,
-        ),
-    ),
-    "hover_only": Stage(
-        name="hover_only", tile_size_m=40.0, terrain_roughness_scale=0.0,
-        params=LanderParams(
-            spawn_altitude_m=20.0, spawn_xy_radius_m=0.0,
-            spawn_v_z_m_s=-2.0, spawn_horizontal_speed_m_s=(0.0, 0.0),
-            max_episode_s=25.0,
-        ),
-    ),
-    "final_approach": Stage(
-        name="final_approach", tile_size_m=60.0,
-        params=LanderParams(
-            spawn_altitude_m=35.0, spawn_xy_radius_m=15.0,
-            spawn_v_z_m_s=-3.0, spawn_horizontal_speed_m_s=(0.0, 3.0),
-            max_episode_s=45.0,
-        ),
-    ),
-    "orbit_descent": Stage(
-        name="orbit_descent", tile_size_m=600.0,
-        params=LanderParams(
-            spawn_altitude_m=200.0, spawn_xy_radius_m=80.0,
-            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(10.0, 30.0),
-            max_episode_s=60.0,
-        ),
-    ),
-}
-
-
-def _terrain_config(stage: Stage, seed: int) -> TerrainConfig:
-    r = stage.terrain_roughness_scale
-    return TerrainConfig(
-        mode="fine", size_m=stage.tile_size_m, res_m=max(0.5, stage.tile_size_m / 80.0), seed=seed,
-        coarse_source="procedural",
-        hills={"amplitude_m": 0.3 * r, "wavelength_m": stage.tile_size_m / 6.0, "hurst": 0.75},
-        craters={"count_scale": 0.1 * r, "d_min_m": 1.0, "d_max_m": stage.tile_size_m / 10.0, "b": 2.5,
-                 "depth_ratio": 0.08, "age": 0.5},
-        rocks={"density_scale": r, "d_max_m": 1.0},
-        roi={"sigma_m": stage.tile_size_m / 4.0, "centers": None},
-        curvature=False,
-    )
+# REAL DRIFT FOUND AND FIXED (this session): this file carried its own
+# hand-copied STAGES table with a comment claiming it "mirrors
+# scripts/train_sac_isaac.py's STAGES exactly, so a pass/fail here is
+# directly comparable to what the RL curriculum was asked to solve". It did
+# not: it still defined hover_only_easy / hover_only / final_approach --
+# three stages DELETED from training earlier in this session -- and had
+# never heard of the four ramp_* stages that replaced them. The whole value
+# of this script is that it certifies the SAME scenario the trainer trains,
+# so it now imports the single shared definition instead of copying it.
+STAGES = STAGES_BY_NAME
 
 
 def _no_reward(env, info):
@@ -98,16 +47,22 @@ def _no_reward(env, info):
 
 
 def run_episode(stage: Stage, seed: int, gains: ZemZevGains) -> dict:
-    tile = generate_tile(_terrain_config(stage, seed))
+    tile = generate_tile(terrain_config(stage, seed))
     env = AnalyticLanderEnv(tile=tile, params=stage.params, reward_fn=_no_reward)
     controller = ZemZevController(stage.params, gains)
 
     obs, _ = env.reset(seed=seed)
     controller.reset()
     info = {}
+    # peak distance from the tile centre: this is the number that exposed
+    # the undersized-tile bug (see lunarsim/rl/curriculum.py's STAGES
+    # comment -- 7-15 of 24 episodes per stage used to fly off the terrain
+    # collider entirely), so it is reported, not just computed.
+    max_radius_m = 0.0
     for _ in range(int(stage.params.max_episode_s / stage.params.dt_s) + 5):
         action = controller.act(env)
         obs, reward, terminated, truncated, info = env.step(action)
+        max_radius_m = max(max_radius_m, float(np.hypot(env.state["x"], env.state["y"])))
         if terminated or truncated:
             break
 
@@ -123,6 +78,7 @@ def run_episode(stage: Stage, seed: int, gains: ZemZevGains) -> dict:
         "vxy": v_xy,
         "tilt_deg": float(np.degrees(tilt)),
         "t_s": info.get("t_s", float("nan")),
+        "max_radius_m": max_radius_m,
         "fuel_frac_left": float(s["fuel_kg"] / stage.params.initial_fuel_kg),
     }
 
@@ -149,6 +105,8 @@ def main():
         vz = np.array([r["vz"] for r in results])
         vxy = np.array([r["vxy"] for r in results])
         tilt = np.array([r["tilt_deg"] for r in results])
+        radius = np.array([r["max_radius_m"] for r in results])
+        half_extent = stage.tile_size_m / 2.0
 
         print(f"\n=== stage: {name} ({n} episodes) ===")
         print(f"landed_safely: {n_safe}/{n} ({100 * n_safe / n:.0f}%)")
@@ -159,6 +117,9 @@ def main():
               f"max={vxy.max():.2f}  (limit {stage.params.safe_landing_v_xy_m_s:.2f})")
         print(f"touchdown tilt  : mean={tilt.mean():.1f}deg  p90={np.percentile(tilt, 90):.1f}deg  "
               f"max={tilt.max():.1f}deg  (limit {np.degrees(stage.params.safe_landing_tilt_rad):.1f})")
+        print(f"ground track    : max radius mean={radius.mean():.0f}m  p90={np.percentile(radius, 90):.0f}m  "
+              f"max={radius.max():.0f}m  (tile half-extent {half_extent:.0f}m, "
+              f"{int((radius > half_extent).sum())}/{n} off the tile)")
 
 
 if __name__ == "__main__":

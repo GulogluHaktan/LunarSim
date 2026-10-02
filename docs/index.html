@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LunarSim</title>
+<meta name="description" content="Apollo Lunar Module landing simulation on real NASA lunar terrain in NVIDIA Isaac Sim — real physics, RTX LiDAR hazard mapping, telemetry.">
+<style>
+:root{
+  --bg:#06070b; --bg-soft:#0c0e15; --card:#111420; --line:#1e2333;
+  --fg:#e8ecf5; --fg-dim:#98a1b8; --fg-faint:#636d85;
+  --accent:#4ea3ff; --good:#3fd97a; --warn:#e8b33f;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --maxw:1120px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font-family:var(--sans); font-size:16px; line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:var(--maxw); margin:0 auto; padding:0 16px}
+
+/* language switching */
+body.lang-tr .en{display:none}
+body.lang-en .tr{display:none}
+
+/* header */
+header{
+  position:sticky; top:0; z-index:50;
+  background:rgba(6,7,11,.86); backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line);
+}
+.hrow{display:flex; align-items:center; gap:16px; height:56px}
+.brand{font-family:var(--mono); font-weight:600; letter-spacing:.02em; font-size:15px}
+.brand span{color:var(--accent)}
+nav{margin-left:auto; display:flex; align-items:center; gap:4px; flex-wrap:wrap}
+nav a{
+  color:var(--fg-dim); text-decoration:none; font-size:13.5px;
+  padding:6px 9px; border-radius:6px;
+}
+nav a:hover{color:var(--fg); background:var(--bg-soft)}
+.langbtn{
+  font-family:var(--mono); font-size:12px; color:var(--fg-dim);
+  background:var(--bg-soft); border:1px solid var(--line);
+  border-radius:6px; padding:5px 10px; cursor:pointer; margin-left:6px;
+}
+.langbtn:hover{color:var(--fg); border-color:var(--accent)}
+/* the section links wrap onto a second row on a phone and get clipped by the
+   sticky header's fixed height -- drop them there and keep the language
+   toggle, which is the only control someone actually needs at that width. */
+@media (max-width:720px){
+  .hrow{height:auto; min-height:52px; padding:8px 0}
+  nav a{display:none}
+}
+
+/* hero */
+.hero{padding:72px 0 44px; border-bottom:1px solid var(--line)}
+.eyebrow{
+  font-family:var(--mono); font-size:12px; letter-spacing:.16em;
+  text-transform:uppercase; color:var(--accent); margin:0 0 14px;
+}
+h1{font-size:clamp(34px,6vw,58px); line-height:1.08; margin:0 0 18px; letter-spacing:-.02em; font-weight:650}
+.lede{font-size:clamp(16px,2.2vw,19px); color:var(--fg-dim); max-width:62ch; margin:0}
+
+/* stats */
+.stats{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:1px; background:var(--line); border:1px solid var(--line);
+  border-radius:10px; overflow:hidden; margin:40px 0 0;
+}
+.stat{background:var(--bg-soft); padding:18px 16px}
+.stat b{display:block; font-family:var(--mono); font-size:clamp(20px,3.2vw,27px); font-weight:600; letter-spacing:-.01em}
+.stat small{display:block; color:var(--fg-faint); font-size:12.5px; margin-top:5px; line-height:1.45}
+
+/* sections */
+section{padding:66px 0; border-bottom:1px solid var(--line)}
+h2{font-size:clamp(24px,3.6vw,33px); margin:0 0 10px; letter-spacing:-.015em; font-weight:650}
+.sub{color:var(--fg-dim); max-width:66ch; margin:0 0 30px}
+h3{font-size:17px; margin:34px 0 10px; font-weight:600}
+p{margin:0 0 14px}
+a{color:var(--accent)}
+
+/* figures */
+figure{margin:0 0 22px}
+video,figure img{
+  width:100%; display:block; border-radius:10px;
+  border:1px solid var(--line); background:#000;
+}
+figcaption{color:var(--fg-faint); font-size:13px; margin-top:9px; line-height:1.5}
+.grid2{display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:22px}
+
+/* table */
+.tbl{width:100%; border-collapse:collapse; font-size:14.5px; margin:8px 0 6px}
+.tbl th,.tbl td{text-align:left; padding:10px 12px; border-bottom:1px solid var(--line)}
+.tbl th{color:var(--fg-faint); font-weight:500; font-size:12.5px; text-transform:uppercase; letter-spacing:.05em}
+.tbl td.n{font-family:var(--mono); text-align:right; white-space:nowrap}
+.ok{color:var(--good)}
+.bad{color:var(--warn)}
+
+/* cards */
+.cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-top:26px}
+.card{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px}
+.card h4{margin:0 0 9px; font-size:15px; font-weight:600}
+.card p{margin:0; color:var(--fg-dim); font-size:14px; line-height:1.6}
+.card .tag{
+  display:inline-block; font-family:var(--mono); font-size:11px; color:var(--accent);
+  letter-spacing:.08em; text-transform:uppercase; margin-bottom:8px;
+}
+
+.note{
+  border-left:2px solid var(--accent); background:var(--bg-soft);
+  padding:14px 18px; border-radius:0 8px 8px 0; color:var(--fg-dim);
+  font-size:14.5px; margin:22px 0;
+}
+.note.warn{border-left-color:var(--warn)}
+.legend{display:flex; flex-wrap:wrap; gap:16px; margin:14px 0 4px; font-size:13.5px; color:var(--fg-dim)}
+.legend i{display:inline-block; width:11px; height:11px; border-radius:3px; margin-right:7px; vertical-align:-1px}
+
+footer{padding:44px 0 64px; color:var(--fg-faint); font-size:14px}
+footer a{color:var(--fg-dim)}
+code{font-family:var(--mono); font-size:.9em; background:var(--bg-soft); padding:1px 5px; border-radius:4px; color:var(--fg)}
+</style>
+</head>
+<body class="lang-tr">
+
+<header>
+  <div class="wrap hrow">
+    <div class="brand">Lunar<span>Sim</span></div>
+    <nav>
+      <a href="#landing"><span class="tr">İniş</span><span class="en">Landing</span></a>
+      <a href="#lidar"><span class="tr">LiDAR haritalama</span><span class="en">LiDAR mapping</span></a>
+      <a href="#freefall"><span class="tr">Serbest düşüş</span><span class="en">Free fall</span></a>
+      <a href="#terrain"><span class="tr">Arazi</span><span class="en">Terrain</span></a>
+      <a href="#methods"><span class="tr">Yöntem</span><span class="en">Methods</span></a>
+      <button class="langbtn" id="langbtn" type="button">EN</button>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="hero">
+    <p class="eyebrow">NVIDIA Isaac Sim · PhysX · RTX LiDAR</p>
+    <h1>
+      <span class="tr">Ay'a iniş, gerçek veriyle<br>ve gerçek fizikle.</span>
+      <span class="en">Landing on the Moon, with real<br>data and real physics.</span>
+    </h1>
+    <p class="lede">
+      <span class="tr">LunarSim, Apollo Ay Modülü'nü gerçek NASA yükseklik verisinden üretilmiş kraterli bir araziye indiren bir simülasyon ortamı. Araç gerçek Apollo itki ve kütle değerleriyle, PhysX çarpışma motoru altında uçuyor; iniş alanını kendi RTX LiDAR'ıyla tarayıp haritalıyor.</span>
+      <span class="en">LunarSim lands an Apollo Lunar Module on cratered terrain built from real NASA elevation data. The vehicle flies on documented Apollo thrust and mass figures under the PhysX collision engine, and surveys its own landing site with an onboard RTX LiDAR.</span>
+    </p>
+
+    <div class="stats">
+      <div class="stat">
+        <b>0.80 <small style="display:inline;font-size:14px;color:var(--fg-faint)">m/s</small></b>
+        <small><span class="tr">temas anındaki dikey hız<br>(limit 1.00)</span><span class="en">vertical speed at touchdown<br>(limit 1.00)</span></small>
+      </div>
+      <div class="stat">
+        <b>3.2°</b>
+        <small><span class="tr">temas anındaki gövde eğimi<br>(limit 15°)</span><span class="en">body tilt at touchdown<br>(limit 15°)</span></small>
+      </div>
+      <div class="stat">
+        <b>463 180 <small style="display:inline;font-size:14px;color:var(--fg-faint)">m²</small></b>
+        <small><span class="tr">iniş boyunca LiDAR ile haritalanan alan</span><span class="en">area mapped by LiDAR during the descent</span></small>
+      </div>
+      <div class="stat">
+        <b><span class="tr">%90.8</span><span class="en">90.8%</span></b>
+        <small><span class="tr">inişten sonra kalan iniş yakıtı</span><span class="en">descent propellant remaining after landing</span></small>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= LANDING ================= -->
+  <section id="landing">
+    <h2><span class="tr">Yörüngesel iniş</span><span class="en">The orbital descent</span></h2>
+    <p class="sub">
+      <span class="tr">Müfredatın <code>orbit_descent</code> aşamasından: 198 metre yükseklik, 18.6 m/s yatay hız. Araç 94.8 saniyede 642 metrelik bir yer izi çizip seçilen iniş noktasının <b>11 metre</b> yanına oturdu. Aşağıdaki pano tek bir gerçek koşunun kaydı — kurgu veya hızlandırma yok.</span>
+      <span class="en">From the curriculum's <code>orbit_descent</code> stage: released at 198 m with 18.6 m/s of horizontal speed. The vehicle flew a 642 m ground track over 94.8 s and came to rest <b>11 m</b> from the selected landing site. The dashboard below is a recording of one real run — nothing staged or sped up.</span>
+    </p>
+
+    <h3><span class="tr">Önce soru şu: nereye inilir?</span><span class="en">The first question: where do you even land?</span></h3>
+    <p>
+      <span class="tr">Aracın kendi iniş ölçütünü — dört ayağın 9.4 metrelik açıklığındaki zemin yükseklik farkı 0.16 metreyi aşmayacak — sahanın tamamına uyguladığımızda, yüzeyin <b>%47'si eleniyor</b>. Oralarda araç, ne kadar iyi uçarsa uçsun, bir ayağı diğerlerinden yüksekte kalacağı için devrilme riskiyle oturur. Yani "bir yere inmek" ile "inilebilir bir yere inmek" aynı şey değil.</span>
+      <span class="en">Apply the vehicle's own landing criterion — the ground height spread across its 9.4 m footpad span must stay within 0.16 m — to the whole site, and <b>47% of the surface is ruled out</b>. There the vehicle would come to rest with one footpad high, however well it was flown. "Landing somewhere" and "landing somewhere landable" are not the same problem.</span>
+    </p>
+    <p>
+      <span class="tr">İkinci mesele: bu kontrolcü yatay hızı sıfırlıyor ama hedefe geri uçmuyor. Ölçtük — 18.6 m/s ile bırakılan iki koşu da nişan alınan noktanın yaklaşık <b>600 metre ötesinde</b> durdu. Buna karşılık sapma rastgele değil: her ikisinde de bırakma yönünde kabaca <em>30 × bırakma hızı</em> kadar yol alındı.</span>
+      <span class="en">Second problem: this controller nulls horizontal velocity but does not fly back to a target. We measured it — two runs released at 18.6 m/s both came to rest about <b>600 m</b> from where they were aimed. The miss is not random, though: both travelled roughly <em>30 × the release speed</em> along the release heading.</span>
+    </p>
+    <p>
+      <span class="tr">Dolayısıyla iniş noktası şöyle seçildi: önce aracın nereye varacağı kestirildi, sonra <em>o varış bölgesinde</em> inilebilir bir yama arandı — yamanın kenarı değil ortası, çünkü gerçek bir dokunuş metrelerce sapar. Seçilen nokta tahmini varışın 11 metre yanında, çevresinde her yöne 12 metre kesintisiz düz zemin var; ayak yükseklik farkı 0.106 m, eğim 0.7°.</span>
+      <span class="en">So the site was chosen like this: first predict where the vehicle will actually arrive, then look for a landable patch <em>there</em> — the middle of one, not its edge, because a real touchdown disperses by metres. The chosen point sits 11 m from the predicted arrival with 12 m of continuously landable ground in every direction; footpad spread 0.106 m, slope 0.7°.</span>
+    </p>
+
+    <figure>
+      <img src="assets/img/site_selection.jpg" alt="Terrain elevation and landability map with the release point and chosen target" loading="lazy">
+      <figcaption>
+        <span class="tr"><b>Saha ve seçim.</b> Solda yükseklik, sağda inilebilirlik — yeşil geçen, kırmızı elenen. Üçgen bırakma noktası, yıldız seçilen hedef, ok aradaki ~620 metre. <b>Not:</b> bu seçim uçuştan önce, arazinin gerçek verisinden yapıldı; araç hedefi kendi LiDAR'ıyla uçarken seçmedi — uçuştaki harita yalnızca aynı ölçütü bağımsız olarak doğruluyor.</span>
+        <span class="en"><b>The site, and the choice.</b> Elevation at left, landability at right — green passes, red is ruled out. The triangle is the release point, the star the chosen target, the arrow the ~620 m between them. <b>Note:</b> this choice was made before the flight, from the terrain's ground truth; the vehicle did not pick the target from its own LiDAR in flight — the in-flight map independently confirms the same criterion.</span>
+      </figcaption>
+    </figure>
+
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th><span class="tr">Güvenli iniş ölçütü</span><span class="en">Safe-landing criterion</span></th>
+          <th class="n"><span class="tr">Sınır</span><span class="en">Limit</span></th>
+          <th class="n"><span class="tr">Ulaşılan</span><span class="en">Achieved</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><span class="tr">Dikey temas hızı</span><span class="en">Vertical touchdown speed</span></td><td class="n">≤ 1.00 m/s</td><td class="n ok">0.80</td></tr>
+        <tr><td><span class="tr">Yatay temas hızı</span><span class="en">Horizontal touchdown speed</span></td><td class="n">≤ 1.20 m/s</td><td class="n ok">0.07</td></tr>
+        <tr><td><span class="tr">Gövde eğimi</span><span class="en">Body tilt</span></td><td class="n">≤ 15°</td><td class="n ok">3.2°</td></tr>
+        <tr><td><span class="tr">Açısal hız</span><span class="en">Angular rate</span></td><td class="n">≤ 0.5 rad/s</td><td class="n ok">0.012</td></tr>
+        <tr><td><span class="tr">Dört ayak arası zemin yükseklik farkı</span><span class="en">Ground height spread under the four footpads</span></td><td class="n">≤ 0.16 m</td><td class="n bad">0.193</td></tr>
+      </tbody>
+    </table>
+    <p style="color:var(--fg-faint);font-size:13.5px;margin-top:2px">
+      <span class="tr">İniş yalnızca beş ölçütün hepsi aynı anda sağlandığında "güvenli" sayılır. Bu koşuda dördü geniş marjla sağlandı, beşincisi %21 aşıldı — yani simülasyon bu inişi <b>başarısız</b> kaydetti. Nedeni aşağıda.</span>
+      <span class="en">A landing counts as safe only when all five hold at once. This run cleared four of them with wide margins and exceeded the fifth by 21% — so the simulator recorded it as a <b>failure</b>. Why, below.</span>
+    </p>
+
+    <h3><span class="tr">11 metre neden yetmedi</span><span class="en">Why 11 m was not close enough</span></h3>
+    <p>
+      <span class="tr">Varış noktasını önceden kestirip hedefi oraya koymak işe yaradı: nişan hatası <b>613 metreden 11 metreye</b> indi — 56 kat. Araç hedefin 11 metre yanına, hızı tamamen sıfırlanmış ve neredeyse dik hâlde oturdu.</span>
+      <span class="en">Predicting the arrival point and putting the target there worked: the aim error dropped from <b>613 m to 11 m</b> — a factor of 56. The vehicle came to rest 11 m from the target, with its velocity fully nulled and very nearly level.</span>
+    </p>
+    <p>
+      <span class="tr">Ama seçilen yamanın temiz yarıçapı 12 metreydi. 11 metrelik sapma, dört ayağı yamanın tam <em>kenarına</em> getirdi: hedefte 0.106 m olan zemin farkı, fiilen indiği yerde 0.193 m. Sınır 0.16 m. Araç devrilmedi, zarar görmedi — ama simülasyonun ölçütüne göre bu iniş güvenli sayılmaz.</span>
+      <span class="en">But the chosen patch was only 12 m in clear radius. An 11 m miss put the four footpads right at its <em>edge</em>: the ground spread is 0.106 m at the target and 0.193 m where it actually touched down. The limit is 0.16 m. The vehicle did not tip or break — but by the simulator's criterion this landing does not count as safe.</span>
+    </p>
+    <div class="note warn">
+      <span class="tr"><b>Açık problem bu.</b> Tehlike haritası nereye inilebileceğini doğru söylüyor; güdüm aracı oraya metre hassasiyetinde götüremiyor. Bu kontrolcü yatay hızı sıfırlıyor ama konum hatasını kapatmıyor — ikisi birbirine bağlanmadan harita tek başına yetmiyor. Sıradaki iş bu.</span>
+      <span class="en"><b>That is the open problem.</b> The hazard map correctly says where the vehicle could land; the guidance cannot put it there to within a metre. This controller nulls horizontal velocity but does not close position error — and until the two are coupled, the map alone is not enough. That is the next piece of work.</span>
+    </div>
+
+    <figure style="margin-top:34px">
+      <video controls preload="none" playsinline poster="assets/img/landing_dashboard_poster.jpg">
+        <source src="assets/video/landing_dashboard.mp4" type="video/mp4">
+      </video>
+      <figcaption>
+        <span class="tr"><b>Tek koşu, dört kaynak, aynı saniye.</b> Hepsi aynı inişin eş zamanlı kaydı — ayrı çekimler değil, tek bir uçuşun dört ayrı sensöründen.</span>
+        <span class="en"><b>One run, four sources, the same instant.</b> All four are simultaneous recordings of the same landing — not separate takes, but four sensors on one flight.</span>
+      </figcaption>
+    </figure>
+
+    <div class="cards" style="margin-top:0">
+      <div class="card">
+        <div class="tag"><span class="tr">sol üst</span><span class="en">top left</span></div>
+        <h4><span class="tr">Takip kamerası</span><span class="en">Chase camera</span></h4>
+        <p><span class="tr">Aracı dışarıdan izleyen, konumunu her karede yeniden hedefleyen kamera.</span><span class="en">An external camera re-targeted onto the vehicle every frame.</span></p>
+      </div>
+      <div class="card">
+        <div class="tag"><span class="tr">sağ üst</span><span class="en">top right</span></div>
+        <h4><span class="tr">Seyrüsefer kamerası</span><span class="en">Navigation camera</span></h4>
+        <p><span class="tr">Araca monte, aşağı bakan kamera — iniş alanının aracın kendi gözünden görüntüsü.</span><span class="en">Vehicle-mounted, nose-down — the landing site as the vehicle itself sees it.</span></p>
+      </div>
+      <div class="card">
+        <div class="tag"><span class="tr">sol alt</span><span class="en">bottom left</span></div>
+        <h4>IMU</h4>
+        <p><span class="tr">Gerçek atalet ölçüm birimi: açısal hız ve öz-ivme. Serbest düşüşte sıfır okur, yerde 1.62 m/s².</span><span class="en">A real inertial measurement unit: angular rate and proper acceleration. It reads zero in free fall, 1.62 m/s² at rest.</span></p>
+      </div>
+      <div class="card">
+        <div class="tag"><span class="tr">sağ alt</span><span class="en">bottom right</span></div>
+        <h4><span class="tr">LiDAR haritası</span><span class="en">LiDAR map</span></h4>
+        <p><span class="tr">İniş boyunca kurulan yükseklik haritası ve inilebilirlik örtüsü — aşağıdaki bölümün konusu.</span><span class="en">The elevation map and landability overlay built during the descent — the subject of the next section.</span></p>
+      </div>
+    </div>
+
+    <div class="note">
+      <span class="tr"><b>Bu inişi uçuran ne?</b> Bir ZEM/ZEV (sıfır-çaba-mesafe / sıfır-çaba-hız) güdüm yasası ile bir yönelim PD kontrolcüsü. Bu kontrolcü makine öğrenmesi kullanmıyor; görevi "bu araçla, bu arazide güvenli iniş <em>fiziksel olarak</em> mümkün mü?" sorusunu yanıtlamak. Aynı koşuldan 60 denemede %75 güvenli iniş, hiç kontrol kaybı yok.</span>
+      <span class="en"><b>What flew this landing?</b> A ZEM/ZEV (zero-effort-miss / zero-effort-velocity) guidance law plus an attitude PD controller. It uses no machine learning; its job is to answer whether a safe landing is <em>physically</em> achievable with this vehicle on this terrain. Across 60 runs from the same release condition: 75% safe landings, zero loss-of-control.</span>
+    </div>
+  </section>
+
+  <!-- ================= LIDAR ================= -->
+  <section id="lidar">
+    <h2><span class="tr">LiDAR ile tehlike haritalama</span><span class="en">LiDAR hazard mapping</span></h2>
+    <p class="sub">
+      <span class="tr">İnen bir araç iniş alanını tek bakışta göremez. Üç yüze yakın kısmi, eğik taramayı birleştirerek tek bir harita kurar — ve asıl soruyu o haritaya sorar: <em>ayaklarımı nereye koyabilirim?</em></span>
+      <span class="en">A descending vehicle never gets one good look at its site. It builds a single map out of a few hundred partial, oblique scans — and asks that map the operative question: <em>where can I actually put my legs down?</em></span>
+    </p>
+
+    <figure>
+      <video controls preload="none" playsinline poster="assets/img/landing_map_poster.jpg">
+        <source src="assets/video/landing_map.mp4" type="video/mp4">
+      </video>
+      <figcaption>
+        <span class="tr"><b>Harita iniş boyunca doluyor.</b> Her kare gerçek bir LiDAR taraması — 95 saniyede 379 tarama, 12.87 milyon dönüş.</span>
+        <span class="en"><b>The map filling in during the descent.</b> Each frame is one real LiDAR scan — 379 scans and 12.87 million returns over 95 seconds.</span>
+      </figcaption>
+    </figure>
+
+    <div class="legend">
+      <span><i style="background:linear-gradient(90deg,#15316b,#f3e55c)"></i><span class="tr">Sol panel: yükseklik (±0.6 m kabartma)</span><span class="en">Left panel: elevation (±0.6 m relief)</span></span>
+      <span><i style="background:#3fd97a"></i><span class="tr">İnilebilir</span><span class="en">Landable</span></span>
+      <span><i style="background:#8a3b3b"></i><span class="tr">Görüldü, elendi</span><span class="en">Seen, rejected</span></span>
+      <span><i style="background:#07080c;border:1px solid #2a3147"></i><span class="tr">Hiç görülmedi</span><span class="en">Never observed</span></span>
+    </div>
+
+    <h3><span class="tr">Yeşil alanın anlamı</span><span class="en">What the green actually means</span></h3>
+    <p>
+      <span class="tr">Bir hücre, ancak aracın dört ayağının oturacağı 9.4 metrelik açıklıkta zemin yükseklik farkı <b>0.16 metreyi</b> aşmıyorsa <em>ve</em> eğim 15 dereceyi geçmiyorsa yeşil. Bu 0.16 m, gösteri için seçilmiş bir sayı değil: simülasyonun bir inişi "güvenli" sayarken kullandığı ölçütün ta kendisi. Yani harita, görsel bir süs değil, aracın kendi iniş kriterinin sensör verisinden hesaplanmış hâli.</span>
+      <span class="en">A cell is green only when the ground height spread across the vehicle's own 9.4 m footpad span stays within <b>0.16 m</b> <em>and</em> the slope stays within 15°. That 0.16 m is not a number picked for the demo: it is the exact criterion the simulator applies when deciding whether a landing was safe. The map is the vehicle's own landing test, evaluated from sensor data.</span>
+    </p>
+    <p>
+      <span class="tr">Hiç görülmemiş bir hücre asla inilebilir sayılmaz, ve dört ayak noktasından biri bile haritalanmamışsa hücre cevapsız bırakılır — eksik veriden iyimser bir sonuç çıkarmak, bu haritanın yapmaması gereken tek hata.</span>
+      <span class="en">An unobserved cell is never landable, and a cell is left unanswered if even one of its four footpad points is unmapped — drawing an optimistic conclusion from partial data is the one error this map must not make.</span>
+    </p>
+
+    <figure>
+      <img src="assets/img/landing_map_final.jpg" alt="Final LiDAR terrain map and landability mask" loading="lazy">
+      <figcaption>
+        <span class="tr"><b>İniş sonundaki tam harita.</b> Siyah kamalar gerçek okluzyon gölgeleri — tepelerin LiDAR ışınını kestiği, hiçbir taramanın ulaşamadığı bölgeler. Beyaz çizgi aracın yer izi.</span>
+        <span class="en"><b>The completed map at touchdown.</b> The black wedges are real occlusion shadows, where terrain blocked the beam and no scan ever reached. The white line is the vehicle's ground track.</span>
+      </figcaption>
+    </figure>
+
+    <h3><span class="tr">Haritaya neden güveniyoruz</span><span class="en">Why the map is trusted</span></h3>
+    <p>
+      <span class="tr">Aynı zemin parçası iniş boyunca onlarca kez, farklı yükseklik ve açılardan taranıyor. Bu bağımsız ölçümlerin birbiriyle uyumu, yukarıdaki inişte hücre başına <b>0.028 metre</b> — yani harita kendi kendisiyle santimetre mertebesinde tutarlı. Ayrı bir kontrolde haritanın aracın altında verdiği yükseklik, simülasyonun kendi kaydettiği zemin yüksekliğiyle <b>0.13 metre</b> içinde örtüştü.</span>
+      <span class="en">The same patch of ground is scanned dozens of times during the descent, from different altitudes and angles. Those independent measurements agree with each other to <b>0.028 m</b> per cell on the landing above — the map is self-consistent at the centimetre level. In a separate check, the map's height under the vehicle matched the simulator's own recorded ground height to within <b>0.13 m</b>.</span>
+    </p>
+    <p>
+      <span class="tr">Karşılaştırma için: sensörün montaj açısı veya açı eksenleri yanlış varsayıldığında aynı ölçüm 18 ile 35 metre arasına fırlıyor. Yani bu rakamlar "yakın çıktı" değil, doğru çözümü yanlışlardan kesin olarak ayırıyor.</span>
+      <span class="en">For scale: assuming the wrong sensor mount angle or the wrong angular convention pushes the same measurement to between 18 and 35 m. These figures do not merely look close — they separate the correct geometry from the wrong ones decisively.</span>
+    </p>
+    <p>
+      <span class="tr">Ayrıca LiDAR'ın kendisi bağımsız olarak doğrulandı: yükseklik haritası üzerinde analitik ışın izleme ile hesaplanan menziller, Isaac'in RTX LiDAR'ının verdiği menzillerle ortalama <b>0.37 milimetre</b> farkla örtüşüyor.</span>
+      <span class="en">The LiDAR itself was independently cross-checked: ranges computed by analytic ray casting over the heightfield agree with Isaac's RTX LiDAR to a mean deviation of <b>0.37 mm</b>.</span>
+    </p>
+  </section>
+
+  <!-- ================= FREE FALL ================= -->
+  <section id="freefall">
+    <h2><span class="tr">Kontrolsüz düşüş: fizik testi</span><span class="en">Uncontrolled descent: the physics check</span></h2>
+    <p class="sub">
+      <span class="tr">Aynı araç, aynı arazi — ama hiçbir motor komutu verilmeden. 223 metreden, 21 m/s yatay hızla bırakılıp tamamen kendi haline bırakıldı. Çarpma öncesi en yüksek düşüş hızı 26.9 m/s.</span>
+      <span class="en">Same vehicle, same terrain — but with no engine command at all. Released at 223 m with 21 m/s of horizontal speed and left entirely alone. Peak descent rate before impact: 26.9 m/s.</span>
+    </p>
+    <p>
+      <span class="tr">Bu koşu bir başarı gösterisi değil, bir doğrulama: araç gerçek üçgen-ağ araziyle inandırıcı biçimde çarpışıyor mu? Bu hızlarda PhysX'in adım-adım çarpışma testi araziyi tamamen ışınlayıp geçebiliyor — nitekim geçmişti ve sürekli çarpışma tespiti (CCD) ile düzeltildi.</span>
+      <span class="en">This run is not a success story but a validation: does the vehicle collide believably with the real triangle-mesh terrain? At these speeds PhysX's discrete collision test can tunnel straight through the mesh — it did, and was fixed with continuous collision detection.</span>
+    </p>
+
+    <figure>
+      <video controls preload="none" playsinline poster="assets/img/freefall_dashboard_poster.jpg">
+        <source src="assets/video/freefall_dashboard.mp4" type="video/mp4">
+      </video>
+      <figcaption>
+        <span class="tr"><b>Aynı pano, kontrolsüz düşüş için.</b> IMU panelinde çarpma anı tek bir ani sıçrama olarak görünür; LiDAR paneli bu arada 98 taramadan 1.39 milyon dönüşle araziyi haritalamaya devam eder.</span>
+        <span class="en"><b>The same dashboard, for the uncontrolled fall.</b> The impact shows up on the IMU panel as a single sharp spike, while the LiDAR panel keeps mapping the terrain through it — 98 scans, 1.39 million returns.</span>
+      </figcaption>
+    </figure>
+
+    <figure>
+      <img src="assets/img/freefall_map_final.jpg" alt="LiDAR map of the free-fall capture" loading="lazy">
+      <figcaption>
+        <span class="tr"><b>Bu düşüşün tamamlanmış haritası.</b> Soldaki yükseklik panelinde krater dokusu ve tarama gölgeleri, sağdaki inilebilirlik panelinde yeşilin ne kadar seyrek olduğu görülüyor.</span>
+        <span class="en"><b>The completed map of this fall.</b> Crater texture and scan shadows on the elevation panel at left; on the landability panel at right, how sparse the green is.</span>
+      </figcaption>
+    </figure>
+
+    <div class="note warn">
+      <span class="tr"><b>Arazi ne kadar zor?</b> Bu koşudaki sert, yoğun kraterli arazide haritalanan alanın yalnızca <b>%7</b>'si inilebilir çıkıyor; yukarıdaki iniş sahasında aynı ölçüt <b>%82</b> veriyor. Farkın büyük kısmı arazinin kendisinden, ama tamamı değil: bu düşüşün haritası daha gürültülü bir veriden kuruldu ve ölçüm gürültüsü 0.16 m'lik eşiğe doğrudan ekleniyor. Yani harita her zaman "güvenli olan"ı değil, "sensörün güvenli olduğunu kanıtlayabildiği"ni gösterir — ve bu, eksik tarafa düşen bir hata.</span>
+      <span class="en"><b>How hard is the terrain?</b> On the harsh, densely cratered terrain of this run only <b>7%</b> of the mapped area comes out landable; on the landing site above the same criterion gives <b>82%</b>. Most of that gap is the terrain itself, but not all of it: this fall's map was built from noisier data, and measurement noise adds directly into a 0.16 m threshold. So the map shows not always what is safe, but what the sensor can prove is safe — an error that falls on the conservative side.</span>
+    </div>
+  </section>
+
+  <!-- ================= TERRAIN ================= -->
+  <section id="terrain">
+    <h2><span class="tr">Arazi ve ışık</span><span class="en">Terrain and lighting</span></h2>
+    <p class="sub">
+      <span class="tr">Zemin uydurulmuyor. Büyük ölçekli yükseklik, gerçek NASA LOLA / LRO yükseklik modellerinden okunuyor; yalnızca bu modellerin çözemediği krater, kaya ve ince pürüz katmanı prosedürel olarak ekleniyor.</span>
+      <span class="en">The ground is not invented. Large-scale elevation is read from real NASA LOLA / LRO digital elevation models; only the craters, rocks and fine roughness those models cannot resolve are added procedurally.</span>
+    </p>
+
+    <figure>
+      <video controls preload="none" playsinline loop muted poster="assets/img/terrain_poster.jpg">
+        <source src="assets/video/terrain_flyover.mp4" type="video/mp4">
+      </video>
+      <figcaption><span class="tr"><b>Üretilen arazi üzerinde yörünge geçişi.</b> Regolit malzemesi, normal haritası ve gerçek güneş açısıyla aydınlatılmış.</span><span class="en"><b>An orbital pass over the generated terrain,</b> lit with the regolith material, its normal map, and a real solar angle.</span></figcaption>
+    </figure>
+
+    <div class="cards">
+      <div class="card">
+        <div class="tag">DEM</div>
+        <h4><span class="tr">Gerçek yükseklik verisi</span><span class="en">Real elevation data</span></h4>
+        <p><span class="tr">LOLA GDR mozaikleri, LOLA+Kaguya birleşik DEM (59 m/px) ve tek-saha LRO NAC DTM'leri (0.5–5 m/px) okunabiliyor.</span><span class="en">LOLA GDR mosaics, the merged LOLA+Kaguya DEM (59 m/px) and single-site LRO NAC DTMs (0.5–5 m/px).</span></p>
+      </div>
+      <div class="card">
+        <div class="tag"><span class="tr">Güneş</span><span class="en">Sun</span></div>
+        <h4><span class="tr">Gerçek efemeris</span><span class="en">Real ephemeris</span></h4>
+        <p><span class="tr">JPL DE421 efemerisi, NAIF'in resmî Ay yönelim çekirdekleriyle birleştirilerek verilen tarih ve saha için gerçek güneş yüksekliği/azimutu hesaplanıyor — elle yazılmış bir yaklaşım formülü değil.</span><span class="en">The JPL DE421 ephemeris combined with NAIF's official lunar orientation kernels gives the true solar elevation and azimuth for a given date and site — not a hand-written approximation.</span></p>
+      </div>
+      <div class="card">
+        <div class="tag">BRDF</div>
+        <h4><span class="tr">Regolit yansıması</span><span class="en">Regolith reflectance</span></h4>
+        <p><span class="tr">Ay'da atmosfer olmadığı için menzil sönümlemesi yok; LiDAR şiddeti yalnızca geliş açısına bağlı yansıtma modeliyle hesaplanıyor.</span><span class="en">With no atmosphere there is no range attenuation; LiDAR intensity is modelled purely from incidence-angle reflectance.</span></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= METHODS ================= -->
+  <section id="methods">
+    <h2><span class="tr">Kullanılan yöntemler</span><span class="en">Methods and stack</span></h2>
+    <p class="sub">
+      <span class="tr">Çekirdek kütüphane (<code>lunarsim/core</code>) Isaac'ten bağımsız, saf numpy/scipy. Isaac bağlantısı ayrı bir adaptör katmanında, böylece arazi, sensör ve ışık modelleri tek başına test edilebiliyor.</span>
+      <span class="en">The core library (<code>lunarsim/core</code>) is Isaac-independent, plain numpy/scipy. The Isaac binding lives in a separate adapter layer, so the terrain, sensor and lighting models stay testable on their own.</span>
+    </p>
+
+    <div class="cards">
+      <div class="card">
+        <div class="tag"><span class="tr">Simülasyon</span><span class="en">Simulation</span></div>
+        <h4>NVIDIA Isaac Sim 6.0.1 + Isaac Lab</h4>
+        <p><span class="tr">PhysX rijit gövde fiziği 60 Hz'de, gerçek üçgen-ağ arazi çarpışması (dışbükey yaklaşım yok), yüksek hızlı çarpmalar için spekülatif CCD.</span><span class="en">PhysX rigid-body physics at 60 Hz, real triangle-mesh terrain collision (no convex approximation), speculative CCD for high-speed impacts.</span></p>
+      </div>
+      <div class="card">
+        <div class="tag"><span class="tr">Araç</span><span class="en">Vehicle</span></div>
+        <h4><span class="tr">Apollo Ay Modülü</span><span class="en">Apollo Lunar Module</span></h4>
+        <p><span class="tr">İniş başlangıcında 15 103 kg; kısılabilir ana motor 4 672–45 040 N (Isp 311 s); 16 adet 445 N'luk RCS iticisi; 9.4 m ayak açıklığı. Değerler belgelenmiş Apollo verileri.</span><span class="en">15 103 kg at powered descent initiation; throttleable main engine 4 672–45 040 N (Isp 311 s); 16 RCS jets of 445 N; 9.4 m footpad span. All documented Apollo figures.</span></p>
+      </div>
+      <div class="card">
+        <div class="tag"><span class="tr">Sensörler</span><span class="en">Sensors</span></div>
+        <h4>RTX LiDAR · IMU · <span class="tr">kamera</span><span class="en">cameras</span></h4>
+        <p><span class="tr">Ouster OS2 donanım profili: 128 kanal, 360° azimut, 22.5° dikey görüş alanı, 350 m menzil, 10 Hz dönüş. Kayıtlara her 0.25 saniyede bir tam tarama saklanıyor. IMU gerçek öz-ivme ölçüyor (serbest düşüşte sıfır okur).</span><span class="en">Ouster OS2 hardware profile: 128 channels, 360° azimuth, 22.5° vertical field of view, 350 m range, spinning at 10 Hz. One full scan every 0.25 s is kept in the recordings. The IMU measures true proper acceleration (reading zero in free fall).</span></p>
+      </div>
+      <div class="card">
+        <div class="tag"><span class="tr">Haritalama</span><span class="en">Mapping</span></div>
+        <h4><span class="tr">Birikimli tehlike haritası</span><span class="en">Incremental hazard map</span></h4>
+        <p><span class="tr">Taramalar dünya çerçevesinde sabit bir ızgaraya toplam/kare-toplam/min/maks olarak işleniyor, böylece bellek iniş süresinden bağımsız. Türetilen katmanlar: yükseklik, kapsama, hücre içi kabartma, pürüzlülük, eğim, inilebilirlik.</span><span class="en">Scans are folded into a fixed world-frame grid as sum / sum-of-squares / min / max, so memory is independent of how long the descent lasts. Derived layers: elevation, coverage, within-cell relief, roughness, slope, landability.</span></p>
+      </div>
+      <div class="card">
+        <div class="tag"><span class="tr">Güdüm</span><span class="en">Guidance</span></div>
+        <h4>ZEM/ZEV + <span class="tr">yönelim PD</span><span class="en">attitude PD</span></h4>
+        <p><span class="tr">Öğrenme kullanmayan referans kontrolcü. Görevi, görevin fiziksel olarak başarılabilir olduğunu kanıtlamak ve öğrenen politikaya karşılaştırma tabanı sağlamak.</span><span class="en">A reference controller with no learning. Its job is to prove the mission is physically achievable and to give the learned policy a baseline to beat.</span></p>
+      </div>
+      <div class="card">
+        <div class="tag"><span class="tr">Öğrenme</span><span class="en">Learning</span></div>
+        <h4>Soft Actor-Critic</h4>
+        <p><span class="tr">Artan zorlukta aşamalı bir müfredatla eğitilen SAC politikası. Bu aşama hâlâ aktif araştırma: ilk başarılı inişler kaydedildi, güvenilir iniş oranı henüz referans kontrolcünün gerisinde.</span><span class="en">A SAC policy trained through a staged curriculum of increasing difficulty. This part is still active research: the first successful landings have been recorded, but the reliable landing rate still trails the reference controller.</span></p>
+      </div>
+    </div>
+
+    <h3><span class="tr">Doğrulama yaklaşımı</span><span class="en">How things get verified</span></h3>
+    <p>
+      <span class="tr">Projede yinelenen bir ilke var: her sensör ve model, kendisinden bağımsız bir ikinci yöntemle karşılaştırılıyor. LiDAR analitik ışın izlemeye karşı, çarpışma yüksekliği gerçek üçgen-ağa karşı, harita simülasyonun kendi zemin verisine karşı, güneş açısı JPL efemerisine karşı. Bu sitedeki her sayı böyle bir ölçümden geliyor.</span>
+      <span class="en">One principle recurs throughout: every sensor and model is checked against a second, independent method. The LiDAR against analytic ray casting, collision height against the real triangle mesh, the map against the simulator's own ground truth, the solar angle against the JPL ephemeris. Every number on this page comes from such a measurement.</span>
+    </p>
+  </section>
+
+  <footer>
+    <p>
+      <span class="tr">LunarSim — Ay arazi ve sensör simülasyon kütüphanesi. Araştırma projesi; NASA, ESA veya NVIDIA ile bağlantılı değildir.</span>
+      <span class="en">LunarSim — a lunar terrain and sensor simulation library. A research project; not affiliated with NASA, ESA or NVIDIA.</span>
+    </p>
+    <p><a href="https://github.com/GulogluHaktan/LunarSim">github.com/GulogluHaktan/LunarSim</a></p>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  var KEY = "lunarsim-lang";
+  var body = document.body;
+  var btn = document.getElementById("langbtn");
+
+  function apply(lang) {
+    body.classList.remove("lang-tr", "lang-en");
+    body.classList.add("lang-" + lang);
+    document.documentElement.lang = lang;
+    btn.textContent = lang === "tr" ? "EN" : "TR";
+    btn.setAttribute("aria-label", lang === "tr" ? "Switch to English" : "Türkçe'ye geç");
+  }
+
+  // Browser storage can be unavailable or throw (private windows, blocked
+  // site data), and the page has to render correctly either way -- so the
+  // stored preference is strictly an enhancement over the default.
+  var lang = "tr";
+  try {
+    var saved = localStorage.getItem(KEY);
+    if (saved === "tr" || saved === "en") lang = saved;
+  } catch (e) {}
+  apply(lang);
+
+  btn.addEventListener("click", function () {
+    lang = lang === "tr" ? "en" : "tr";
+    apply(lang);
+    try { localStorage.setItem(KEY, lang); } catch (e) {}
+  });
+
+  // Only one video plays at a time -- several of these are large, and a
+  // fair stand is exactly where two soundtracks at once would be worst.
+  var videos = Array.prototype.slice.call(document.querySelectorAll("video"));
+  videos.forEach(function (v) {
+    v.addEventListener("play", function () {
+      videos.forEach(function (o) { if (o !== v && !o.paused && !o.loop) o.pause(); });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -217,3 +217,88 @@ def compare_point_clouds(ground_truth: LidarPointCloud, other: LidarPointCloud) 
         "rmse_m": float(np.sqrt(np.mean(err**2))),
         "max_abs_error_m": float(np.max(np.abs(err))),
     }
+
+
+# ---------------------------------------------------------------------------
+# Frame conversion: spherical sensor output -> cartesian world points
+# ---------------------------------------------------------------------------
+# REAL BUG FOUND BY READING A CAPTURE'S OWN EXPORTS: Isaac's RTX LiDAR
+# GenericModelOutput reports its `x`/`y`/`z` element arrays in whatever
+# `gmo.elementsCoordsType` says, and for the Ouster profiles this project
+# uses that is SPHERICAL -- azimuth in degrees, elevation in degrees, range
+# in metres. `adapters.isaac.sensors.get_point_cloud` had been passing those
+# three straight through as if they were cartesian metres, so every `.ply`
+# in `out/*/lidar_scans/` stored (azimuth, elevation, range) under the
+# property names (x, y, z). The giveaway is in the data: a 600 m tile's
+# scans had an "x" range of exactly -179.9997..179.9998 and a "y" range of
+# -11.1125..10.7883 that never changed between scans, with a 0.176 deg
+# spacing -- i.e. a full 360 deg azimuth sweep and the OS2's 22.5 deg
+# vertical FOV over 128 channels, not metres.
+#
+# These two helpers are the conversion, kept here (pure numpy, no Isaac) so
+# the same code serves the live sensor path and the offline reprocessing of
+# already-captured scans.
+
+
+def spherical_to_cartesian(
+    azimuth_deg: np.ndarray,
+    elevation_deg: np.ndarray,
+    range_m: np.ndarray,
+) -> np.ndarray:
+    """Convert a spherical LiDAR return to `(n, 3)` cartesian sensor-frame
+    points, using the sensor-frame convention this codebase already uses for
+    `LidarScanPattern.ray_directions` (+x forward, +z up; azimuth measured
+    from +x about +z, elevation from the xy plane).
+    """
+    az = np.deg2rad(np.asarray(azimuth_deg, dtype=float).ravel())
+    el = np.deg2rad(np.asarray(elevation_deg, dtype=float).ravel())
+    r = np.asarray(range_m, dtype=float).ravel()
+    if not (az.shape == el.shape == r.shape):
+        raise ValueError(
+            f"azimuth/elevation/range must be the same length, got "
+            f"{az.shape}, {el.shape}, {r.shape}"
+        )
+    ce = np.cos(el)
+    return np.stack([r * ce * np.cos(az), r * ce * np.sin(az), r * np.sin(el)], axis=-1)
+
+
+def sensor_to_world(
+    points_sensor_m: np.ndarray,
+    sensor_pos_m: np.ndarray,
+    sensor_rotation: np.ndarray,
+) -> np.ndarray:
+    """Rotate+translate `(n, 3)` sensor-frame points into the world frame.
+
+    `sensor_rotation` is the 3x3 sensor->world rotation matrix (column-vector
+    convention: `p_world = R @ p_sensor + t`). A matrix rather than a
+    quaternion deliberately -- the pose this is fed in practice comes from a
+    USD world transform, which is already a matrix, so there is no
+    quaternion component-order to get wrong.
+    """
+    points_sensor_m = np.asarray(points_sensor_m, dtype=float)
+    if points_sensor_m.size == 0:
+        return np.empty((0, 3))
+    if points_sensor_m.ndim != 2 or points_sensor_m.shape[1] != 3:
+        raise ValueError(f"points_sensor_m must be (n, 3), got {points_sensor_m.shape}")
+    rotation = np.asarray(sensor_rotation, dtype=float)
+    if rotation.shape != (3, 3):
+        raise ValueError(f"sensor_rotation must be 3x3, got {rotation.shape}")
+    translation = np.asarray(sensor_pos_m, dtype=float).ravel()
+    if translation.shape != (3,):
+        raise ValueError(f"sensor_pos_m must have 3 entries, got {translation.shape}")
+    return points_sensor_m @ rotation.T + translation
+
+
+def euler_to_rotation_matrix(roll_rad: float, pitch_rad: float, yaw_rad: float) -> np.ndarray:
+    """Body->world rotation for the same roll(x)-pitch(y)-yaw(z) aerospace
+    convention `analytic_lander_env._euler_to_quat` /
+    `adapters.isaac.isaac_lander_env._quat_to_euler` use, i.e.
+    `R = Rz(yaw) @ Ry(pitch) @ Rx(roll)`.
+    """
+    cr, sr = np.cos(roll_rad), np.sin(roll_rad)
+    cp, sp = np.cos(pitch_rad), np.sin(pitch_rad)
+    cy, sy = np.cos(yaw_rad), np.sin(yaw_rad)
+    r_x = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+    r_y = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+    r_z = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]])
+    return r_z @ r_y @ r_x

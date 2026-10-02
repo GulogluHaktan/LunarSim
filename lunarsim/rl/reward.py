@@ -217,7 +217,42 @@ class RewardWeights:
     # is LARGER near alt=0 than the old constant slope, which if anything
     # strengthens the original "cross the last few meters" incentive
     # kappa_alt was added for in the first place.
-    kappa_alt_sqrt: float = 12.66  # calibrated so sqrt(40)*kappa ~= old kappa_alt(2.0)*40 = 80
+    # REAL BUG FOUND (this session, direct telemetry diagnostic on a
+    # trained checkpoint after `reward_scale` was cut 4x below: 6/16
+    # episodes reached t_s=60 TIMEOUT at altitudes of 680-1372m with
+    # vz=+28..+50 m/s -- i.e. the policy was actively ROCKETING AWAY under
+    # full throttle for the entire episode, not passively hovering).
+    # `reward_scale` scales every per-step term uniformly, including this
+    # one -- cutting it 4x (see that field's comment) silently cut this
+    # term's absolute deterrent strength 4x too, without anyone touching
+    # `kappa_alt_sqrt` itself to compensate. At the old scale, climbing to
+    # ~330m already cost real money (see this field's own bug history);
+    # at the new scale that same climb became 4x cheaper, reopening almost
+    # exactly the "climb away to dodge risk entirely" exploit this field
+    # was created to close in the first place. Raised 4x (12.66 -> 50.64)
+    # to restore the ORIGINAL absolute per-step cost this term had before
+    # `reward_scale` moved, while everything else keeps the benefit of the
+    # smaller overall scale.
+    # HALVED AGAIN (this session, 50.64 -> 25.32, after the 4x raise above
+    # was measured against the behavior it was meant to stop). The 4x raise
+    # was justified as "restore the pre-reward_scale absolute deterrent", but
+    # a direct sweep showed the thing actually neutralizing this term in the
+    # climb-away regime was NOT `reward_scale` -- it was `altitude_vz_gate_k`
+    # opening on ASCENT as readily as on descent (see that field's new bug
+    # comment and `_altitude_penalty`'s). Measured: at alt=1000 m, vz=+50 m/s
+    # the gate was handing back a 4.67x discount, i.e. cancelling the entire
+    # 4x raise exactly where it was supposed to bite (net effect of the raise
+    # on the targeted exploit: ~1.15x). With the gate fixed to read descent
+    # speed only, the deterrent comes back on its own and the 4x raise sits
+    # on top of it as pure over-weighting: at 4x this term was 42.7% of the
+    # braking-phase shaping sum (12.66 was 15.7%) and 41-57% of the raw sum
+    # across four real Isaac ZemZev landing episodes -- quietly undoing the
+    # `t0` 1.0->20.0 fix, whose whole point was making the braking envelope
+    # COMPARABLE to this term rather than 34x weaker. 2x (25.32) puts the
+    # braking-phase share at 27.0%, back alongside `brake_z`/`brake_xy`
+    # instead of above them, while keeping a strong climb deterrent
+    # (gate-fixed, alt=1000/vz=+50 costs 800.7 vs. the old gated 85.7).
+    kappa_alt_sqrt: float = 25.32
     # REAL BUG FOUND (this session, direct user observation -- "it just
     # prefers to crash straight down"): see `_altitude_penalty`'s comment.
     # Gates the descend-incentive by `1/(1+altitude_vz_gate_k*braking_ratio)`.
@@ -228,6 +263,28 @@ class RewardWeights:
     # itself starts mattering, ratio=1) rather than a separately-fit
     # constant -- retune together with `t0`/`braking_authority_margin` if a
     # real run shows the gate engaging too early/late.
+    # REAL BUG FOUND (this session, direct arithmetic on the shipped code,
+    # then confirmed by a 4-strategy discounted-return sweep): `_braking_
+    # ratio` squares vz, so this gate is BLIND TO THE SIGN of vertical speed
+    # -- a fast CLIMB opened it exactly as wide as a fast descent, switching
+    # off the "get lower" incentive precisely in the regime where the
+    # vehicle is running away from the ground. Measured at alt=100 m:
+    #     vz=-10 -> ratio 1.4682, gate 0.405, altitude penalty 205.17
+    #     vz=  0 -> ratio 0.0000, gate 1.000, altitude penalty 506.40
+    #     vz=+10 -> ratio 1.4682, gate 0.405, altitude penalty 205.17
+    # i.e. climbing at 10 m/s cost EXACTLY what descending at 10 m/s cost,
+    # and both were less than half the cost of simply holding altitude --
+    # every other vz-dependent term is a function of vz**2 too, so the whole
+    # instantaneous shaping sum was an even function of vz. That makes
+    # "rocket away under full throttle" strictly cheaper than hovering, which
+    # is the literal behavior the telemetry diagnostic recorded (6/16 episodes
+    # timing out at 680-1372 m with vz=+28..+50 m/s). The gate is now fed
+    # min(vz, 0.0) in `reward_fn`, so only genuine DESCENT speed relaxes the
+    # descend incentive; `_braking_envelope_penalty` keeps the sign-blind
+    # ratio on purpose (a fast climb SHOULD still pay the envelope term).
+    # Descent-side behavior is bit-for-bit unchanged (alt=100/vz=-10 still
+    # 205.17), so the original "prefers to crash straight down" fix this
+    # gate exists for is untouched.
     altitude_vz_gate_k: float = 1.0
 
     # braking-envelope barrier: -exp(min(ratio^theta, cap)) * t0, where
@@ -387,9 +444,82 @@ class RewardWeights:
     # meaningful by 50 deg (ratio 0.83, barrier~460), sharply large
     # approaching 59 deg (ratio 0.98, barrier~1740) -- a real ceiling the
     # velocity gate alone doesn't provide.
+    # TRIED THIS SESSION, THEN REVERTED: user direction after comparing
+    # real sanity-check episode totals (`lost_control` crash episodes
+    # scoring WORSE than full-60s timeout episodes, e.g. -5841..-9297 vs
+    # -4198..-6586) led to cutting this term 5x (2000 -> 400), on top of
+    # the SAME session's separate `reward_scale` cut (0.01 -> 0.0025, see
+    # that field). Those two cuts COMPOUNDED to a 20x reduction in this
+    # term's actual felt magnitude (59 deg: ~17.4/step at the old scale ->
+    # ~0.87/step at both cuts stacked) -- confirmed by a direct telemetry
+    # diagnostic on the resulting checkpoint: 9/16 episodes lost control,
+    # most showing pitch/roll RCS commands pinned near +-1.0 for dozens of
+    # consecutive steps as tilt climbed straight through 55-60 deg with
+    # essentially no pushback, instead of the barrier intervening before
+    # the cutoff the way it did when this term was first added (see the
+    # bug history above this one). The 5x cut over-corrected: `reward_
+    # scale`'s OWN 4x cut already brings this term's per-step contribution
+    # down into the same ballpark as the other per-step caps during a
+    # tumble (a losing-control trajectory take many tens of steps to climb
+    # from ~45 to 60 deg based on real telemetry, not the few steps
+    # originally assumed, so the cumulative extra cost over a full tumble
+    # stays modest even without an additional cut) -- stacking a second,
+    # separate 5x cut on top gutted the one term whose entire job is to be
+    # strong enough to actually stop the tumble before it reaches the
+    # cutoff. Reverted to the original k/cap; `reward_scale` alone handles
+    # bringing this term's absolute size down along with everything else.
     tilt_cutoff_k: float = 2000.0
     tilt_cutoff_power: float = 8.0
     tilt_cutoff_cap: float = 2000.0
+
+    # REAL BUG FOUND (this session, a measured 16-episode Isaac Sim eval of
+    # the first ramp_20m checkpoint trained under the fixed reward): the
+    # `landed_safely` test requires |w| <= `safe_landing_w_rad_s` = 0.5
+    # rad/s, but NOTHING in the per-step shaping sum was a function of
+    # angular RATE at all -- `_attitude_hold_penalty` reads tilt_x/tilt_y
+    # (angles, and not yaw), never wx/wy/wz. The only rate-adjacent terms
+    # were the RCS effort penalties, and those are numerically invisible:
+    # `lam`=0.02 and `gamma`=0.01 mean all three axes saturated at once
+    # costs 0.02*3 + 0.01*3 = 0.09 raw = 0.000225 after `reward_scale`,
+    # about 1/5600 of the altitude term. So the agent paid essentially
+    # nothing for spinning, right up until a hard terminal rejection.
+    #
+    # The measured consequence, from that eval's per-episode margins:
+    #     [ep 15] CRASH  vz=-0.21  vxy=0.48  tilt=7.1  w=0.65
+    #             margins={v_z=0.79, v_xy=0.60, tilt=0.53, w=0.00} worst=w
+    # -- a touchdown with every OTHER criterion comfortably inside its
+    # limit, rejected solely on angular rate. Of the three touchdowns that
+    # came closest, two had w as their binding margin (ep 15 at 0.00, the
+    # successful ep 8 at 0.38). It is the one landing criterion the reward
+    # never mentioned.
+    #
+    # Shaped the same way the tilt cutoff is (that pattern took lost_control
+    # from 16/16 to 1-6/16 in an earlier session, see `tilt_cutoff_k`): a
+    # gentle always-on quadratic for a global gradient, plus a steep,
+    # velocity-independent barrier that only wakes up approaching the real
+    # cutoff. Sized against the measured rate distribution -- ordinary
+    # flight in that eval ran w=0.01-0.07, a braking tilt maneuver needs
+    # ~0.3 rad/s, and 0.5 is the rejection line:
+    #     |w|=0.1 -> 0.6 quad +   0.04 barrier =   0.6 raw  (negligible)
+    #     |w|=0.3 -> 5.4 quad +  28.0 barrier =  33.4 raw  (modest)
+    #     |w|=0.5 -> 15.0 quad + 600.0 barrier = 615.0 raw  (a real wall)
+    # so a normal braking rotation is close to free and sitting on the
+    # rejection line is not. Smaller than the tilt barrier's 2000 on
+    # purpose: tilt past 60 deg ends the episode, |w| past 0.5 only costs
+    # the landing, and only if the vehicle touches down in that state.
+    omega_k: float = 60.0
+    omega_cutoff_k: float = 600.0
+    omega_cutoff_power: float = 6.0
+    omega_cutoff_cap: float = 600.0
+    # caps the WHOLE term (quadratic included), the same way
+    # `_velocity_tracking_penalty`/`_xy_position_penalty` cap theirs. Caught
+    # by a regression test: with only the barrier capped, a full tumble
+    # (|w| ~ 17 rad/s) drove the uncapped quadratic to 18600 raw on its own
+    # -- four times the entire `shaping_clip_abs` budget, from one term, in
+    # a state the tilt cutoff is already handling. 800 = the 600 barrier
+    # plus up to 200 of quadratic, which saturates at |w| = 1.83 rad/s;
+    # past that the vehicle is tumbling, not landing.
+    omega_penalty_cap: float = 800.0
 
     # velocity tracking: -x5*vxy^x6 (renamed from "position/velocity
     # tracking" -- REAL BUG FOUND via the feasibility-controller
@@ -413,6 +543,42 @@ class RewardWeights:
     x6: float = 2.0
     position_penalty_cap: float = 200.0
 
+    # ADDED THIS SESSION, horizontal analog of `_braking_envelope_penalty`
+    # below (see that function's docstring for the real-stopping-distance
+    # design this mirrors). REAL GAP FOUND via a direct telemetry
+    # diagnostic on a trained checkpoint: 9/16 episodes reached the ground
+    # for real (a genuine first -- earlier checkpoints almost never got
+    # that far), but EVERY one of them touched down at 15-32 m/s
+    # horizontal speed (safe limit ~1.2 m/s) while vertical speed was
+    # often reasonable (one case: vz=-3.15 m/s, well-controlled) and tilt
+    # moderate (13-53 deg, mostly under the loss-of-control range) -- i.e.
+    # the vehicle had learned real vertical/attitude control but never
+    # learned to kill horizontal speed before contact. Root cause: `x5`
+    # above is a FLAT quadratic on vxy, the same cost whether the vehicle
+    # is at 200m (plenty of time left) or 2m (none) -- unlike the vertical
+    # channel, which has `_braking_envelope_penalty`'s real time-to-ground
+    # urgency built in via `_braking_ratio`. This term gives horizontal
+    # speed the same "how much of your real stopping budget is already
+    # spent" urgency signal, using the same required-vs-available-
+    # deceleration physics, just substituting an estimated time-to-ground
+    # (`_time_to_ground_s`) for the vertical channel's direct kinematic
+    # alt/vz relationship (horizontal motion has no vertical "stopping
+    # distance" of its own -- time-to-go is the shared resource both
+    # channels compete for). Defaults mirror `t0`/`theta`/
+    # `braking_penalty_cap` exactly (same vehicle, same authority margin,
+    # no reason to assume a different shape a priori) -- UNTUNED, a first
+    # reasonable attempt to be refined the same way the vertical one was:
+    # by watching real training and checking real telemetry, not guessed
+    # in isolation.
+    t0_xy: float = 20.0
+    xy_braking_theta: float = 2.0
+    xy_braking_penalty_cap: float = 400.0
+    # floors the time-to-ground estimate `_time_to_ground_s` divides by --
+    # a divide-by-zero/blowup guard near touchdown (same role as
+    # `braking_alt_floor_m` plays for the vertical channel), not a
+    # tunable shaping knob.
+    xy_braking_tgo_floor_s: float = 2.0
+
     # REAL BUG FOUND (this session, user direction after a 3-seed eval
     # showed three distinct failure modes across the release envelope --
     # one almost-pure-horizontal miss, one near-free-fall hard impact, one
@@ -433,6 +599,68 @@ class RewardWeights:
     x2: float = 2.0
     position_alt_gate_m: float = 40.0
     xy_position_penalty_cap: float = 150.0
+
+    # REAL BUG FOUND (this session, user direction after BOTH a warm-started
+    # continuation AND a from-scratch run of orbit_descent, under the
+    # now-correctly-scaled terminal reward below, still showed 0/16
+    # `landed_safely` with 11-14/16 episodes running the FULL 60s clock
+    # without ever attempting touchdown): every other per-step term here
+    # (`_altitude_penalty`, `_braking_envelope_penalty`, ...) costs
+    # something about the CURRENT state (altitude, speed, tilt), but
+    # nothing costs TIME itself -- a policy that finds some locally cheap
+    # holding pattern (this vehicle's thrust-to-weight is close to 1, so
+    # near-hover is a natural, low-effort attractor under a not-yet-
+    # confident policy) pays only that pattern's own small per-step cost,
+    # repeated 1200 times, with no additional pressure to actually commit
+    # to descending. `timeout_penalty` below already charges for this, but
+    # only ONCE, at the very end -- it does nothing to make step 200 of
+    # stalling look any worse than step 1. This term is the opposite: a
+    # flat, unconditional per-step tax charged every step the episode is
+    # still running and hasn't landed (not gated by altitude or speed, so
+    # it can't be dodged by finding a cheap place to loiter) -- it makes
+    # the "just survive" strategy's total cost grow LINEARLY with how long
+    # it keeps stalling, instead of staying flat. Sized so that going the
+    # full 60s (1200 steps) alone adds about as much as a real crash's
+    # terminal penalty (1200 * 1.25 = 1500 raw ~= crash_penalty), i.e.
+    # "wait out the whole clock" should cost at least as much as "attempt
+    # and fail outright" -- removing the free-riding timeout option
+    # `timeout_penalty` alone wasn't enough to kill.
+    # DISABLED (set to 0.0) THIS SESSION, after the arithmetic above was
+    # checked against the shipped code -- it was never delivering anything
+    # close to what this comment claims, and once it DID, it pulled against
+    # a stated user requirement. Two separate findings:
+    #
+    # (1) SCALE ERROR, 320x. The sizing argument ("1200 * 1.25 = 1500 raw
+    #     ~= crash_penalty") forgets that this term is summed into `r`,
+    #     which `reward_fn` then multiplies by `reward_scale`=0.0025, while
+    #     `crash_penalty` is added AFTER that multiply and is never scaled.
+    #     Actually delivered over a full 60 s episode: 1200 * 1.25 * 0.0025
+    #     = 3.75 return units against a 1200-unit crash penalty, i.e. 0.3%
+    #     of the intended pressure. Measured share of the real per-episode
+    #     shaping sum on four real Isaac ZemZev episodes: 0.1-0.3%. It has
+    #     been a no-op since the day it was added.
+    # (2) EVEN CORRECTLY SIZED, IT IS THE WRONG SIGN FOR THE STATED GOAL.
+    #     Re-applied OUTSIDE `reward_scale` (the intended semantics) and
+    #     swept at gamma=0.999 over four strategy archetypes, a flat
+    #     per-step tax buys a little land-vs-stall margin by destroying
+    #     crash-vs-stall margin -- it charges the LONG episode most, and a
+    #     crash is the SHORTEST episode there is:
+    #         tax=0.00/step: land-stall=1046, stall-crash= 605
+    #         tax=0.25/step: land-stall=1095, stall-crash= 498
+    #         tax=0.50/step: land-stall=1144, stall-crash= 390
+    #         tax=1.00/step: land-stall=1241, stall-crash= 176
+    #     The user's explicit standing requirement is "crashing must stay
+    #     worse than hovering"; this term erodes exactly that ordering.
+    #
+    # The premise behind it ("nothing costs TIME itself") was also wrong:
+    # `_altitude_penalty` already charges 1.266 scaled units/step at 100 m,
+    # i.e. 1519 over a full clock -- 405x this term, and unlike a flat tax
+    # it is at least informative about WHERE the vehicle is loitering. The
+    # real reason "stall forever" was winning is the discount horizon, not
+    # a missing time cost (see `reward_scale`'s new note and the gamma fix
+    # in scripts/train_sac_isaac.py). Kept as a live, zero-valued field
+    # rather than deleted so the call site and this history stay visible.
+    alive_tax_per_step: float = 0.0
 
     # terminal. The old 100/100 was too small (episode duration dominated
     # economics, not the terminal outcome -- see the alpha comment above).
@@ -507,7 +735,16 @@ class RewardWeights:
     # should move the total return by roughly as much as a whole episode's
     # accumulated behavior does, not by a rounding error under it.
     landing_bonus_scale: float = 1800.0
-    crash_penalty: float = 1500.0
+    # REAL BUG FOUND (this session, see `tilt_cutoff_k`'s field comment for
+    # the real episode numbers): narrowed the gap to `timeout_penalty`
+    # (900 -> 150) alongside the tilt_cutoff fix. The ORIGINAL ordering
+    # invariant (crash strictly worse than timeout) stays true -- this only
+    # makes the margin small instead of large, so one unlucky crash during
+    # an honest attempt isn't a catastrophically worse outcome than never
+    # attempting at all. Combined with the tilt_cutoff fix, a real crash's
+    # TOTAL episode return should now land close to (not far below) a
+    # timeout's, instead of reliably worse by thousands.
+    crash_penalty: float = 1200.0
     # applied on truncation (timeout) without ever having landed -- must
     # be strictly less than crash_penalty (timing out shouldn't be worse
     # than an actual crash) but strictly more than zero (it can't be free).
@@ -543,7 +780,40 @@ class RewardWeights:
     # Raised again alongside the reintroduced `_xy_position_penalty`
     # (gated, see `x1`'s field comment): adds up to `xy_position_penalty_
     # cap`=150 more. New max plausible sum ~2900.
-    shaping_clip_abs: float = 3200.0
+    # RAISED again (this session, alongside `kappa_alt_sqrt`'s 12.66->50.64
+    # restore and `tilt_cutoff_k`/`tilt_cutoff_cap`'s revert back to 2000 --
+    # see both field comments): at a transient climb-away altitude (~330m,
+    # the kind the climb-away exploit this session's `kappa_alt_sqrt` fix
+    # targets actually reached), altitude alone is now 50.64*sqrt(330)~=920.
+    # New max plausible sum ~920 altitude + 400 braking + ~112
+    # velocity-tracking + 2000 tilt-cutoff + 150 xy-position + a few
+    # single-digit terms, roughly ~3600 -- headroom kept above that. Still
+    # a defensive clip, not a routine constraint: ordinary behavior (not a
+    # degenerate climb-away or a mid-tumble) shouldn't come near this.
+    # Raised again alongside the new `_xy_braking_envelope_penalty` (see
+    # `t0_xy`'s field comment): adds up to `xy_braking_penalty_cap`=400
+    # more. New max plausible sum ~4000.
+    # RAISED 4200 -> 5000 alongside the new `_angular_rate_penalty` (see
+    # `omega_k`), and re-derived from the caps rather than re-estimated.
+    # Worst plausible simultaneous sum, every term at its ceiling in a
+    # degenerate climb-away-plus-tumble state (altitude at the 1372 m such
+    # a state actually reached in real telemetry):
+    #     altitude 25.32*sqrt(1372) = 938   tilt_cutoff        2000
+    #     brake_z                     400   omega               800
+    #     brake_xy                    400   vtrack              200
+    #     xy_position                 150   misc (prox/thr/rcs)   2
+    #     -------------------------------------------------- total 4890
+    # 4200 would have CLIPPED that, which breaks the property this field is
+    # supposed to have: a defensive bound that ordinary flight never
+    # approaches, not a constraint that quietly flattens the gradient in
+    # the exact failure state the shaping is trying to push out of. (Note
+    # this total is lower than it would have been before `kappa_alt_sqrt`
+    # came back down 50.64 -> 25.32, which freed ~470 of the headroom the
+    # new omega term now uses.) Measured on four real Isaac ZemZev landing
+    # episodes (2489 steps total) the clip did not bind even once, and the
+    # raw sum at the orbit_descent release point is ~1300, about a quarter
+    # of this -- so it stays defensive.
+    shaping_clip_abs: float = 5000.0
 
     # REAL BUG FOUND (this session, watching orbit_descent training after
     # the t0/cap fixes above): real episode returns were landing in the
@@ -572,7 +842,59 @@ class RewardWeights:
     # `crash_penalty`/`timeout_penalty`, raised accordingly). Every
     # existing per-step term/cap/threshold comment above (about RELATIVE
     # weighting within the shaping sum) stays accurate.
-    reward_scale: float = 0.01
+    # LOWERED again (this session, user direction: "normalize the rewards,
+    # the numbers are extreme right now, shrink them but keep crashing
+    # worse than hovering"). Real per-episode shaping sums were still
+    # landing in the thousands (e.g. -4700 to -9300 total episode return,
+    # mostly shaping, not the terminal term) even after the terminal-scale
+    # fix above -- comparable to or bigger than the terminal bonus/penalty
+    # themselves, which fights the whole point of giving the terminal
+    # outcome real weight. Cut 4x (0.01 -> 0.0025): combined with the
+    # tilt_cutoff_k/crash_penalty narrowing above, a typical episode's
+    # shaping sum should now land in the low hundreds, not thousands,
+    # while the terminal bonus/penalty (not rescaled here, see above)
+    # keeps its full ~1050-1800 magnitude -- so the terminal outcome
+    # dominates the final return far more reliably than before, and a
+    # crash's extra shaping cost during the failing attempt (vs. a calm
+    # hover) shrinks by the same 4x on top of the tilt_cutoff fix itself.
+    #
+    # READ THIS BEFORE RE-BALANCING ANYTHING IN THIS FILE (added this
+    # session, and it invalidates the reasoning style of several comments
+    # above, including this field's own paragraph): every "shaping sum vs.
+    # terminal outcome" argument in this module compares UNDISCOUNTED
+    # episode totals. SAC does not optimize that. It optimizes the
+    # DISCOUNTED return, and `scripts/train_sac_isaac.py` was running SB3's
+    # default gamma=0.99 with dt=0.05 s -- an effective horizon of
+    # 1/(1-gamma) = 100 steps = 5.0 SECONDS, against episodes of 20-60 s.
+    # A landing 700 steps (35 s) away was discounted by 0.99**700 = 8.8e-4,
+    # so `landing_bonus_scale`=1800 was worth 1.58 return units at the
+    # release point, i.e. ~1% of the decision -- the terminal signal this
+    # field's paragraph below claims now "dominates the final return" was
+    # in fact invisible, and cutting `reward_scale` 4x shrank the only
+    # signal the agent could actually see while leaving the invisible one
+    # untouched.
+    #
+    # Scored four strategy archetypes end to end (CPU, no Isaac) to check
+    # which one the agent was actually being asked to pick:
+    #     gamma=0.99 : land -198.2  STALL -146.9  crash -276.2  climb -194.1
+    #     gamma=0.999: land +159.1  stall -1343.3 crash -1527.9 climb -1597.6
+    # At the shipped gamma, STALLING AT 100 m WAS THE OPTIMAL POLICY --
+    # better than a successful landing -- and climbing away was a tie with
+    # landing. That is not a curriculum failure and not a tuning failure;
+    # it is the objective being wrong, and it explains every "0/16
+    # landed_safely, 11-14/16 ran the full clock" result on record. A
+    # kappa/gamma sweep confirmed gamma is the binding constraint: at
+    # gamma=0.99 stall wins for EVERY coefficient variant tried; at
+    # gamma=0.999 landing wins for every one of them. `train_sac_isaac.py`
+    # now passes gamma=0.999 (horizon 1000 steps = 50 s, matched to the
+    # episode length). gamma=0.9995 was also tried and rejected: it breaks
+    # the required crash-worse-than-timeout ordering.
+    #
+    # So: the undiscounted totals this file reasons about are only a valid
+    # proxy while the discount horizon covers the episode. If episode
+    # length or dt changes, gamma must move with it, or all of the balance
+    # work documented above silently stops meaning anything.
+    reward_scale: float = 0.0025
 
 
 def _proximity_penalty(w: RewardWeights, dist_m: float) -> float:
@@ -672,6 +994,76 @@ def _braking_envelope_penalty(w: RewardWeights, ratio_clamped: float) -> float:
     return min(w.t0 * float(ratio_clamped ** w.theta), w.braking_penalty_cap)
 
 
+def _time_to_ground_s(alt_m: float, v_z_m_s: float, gravity_m_s2: float, floor_s: float) -> float:
+    """Rough time-to-ground estimate for `_xy_braking_ratio` -- NOT a
+    guidance-grade tgo solve (see `zemzev_controller.py`'s own iterative
+    `_solve_feasible_tgo` for that); this only needs to be good enough to
+    shape "how urgent is killing horizontal speed right now", the same way
+    `_braking_ratio` doesn't need a perfect vz either.
+
+    REAL BUG FOUND (this session, direct sweep of the shipped code): the
+    original version had TWO branches -- `alt/|vz|` while descending, a
+    free-fall-from-rest estimate otherwise -- and they were DISCONTINUOUS
+    at vz=0, with the descending branch unbounded above as |vz| -> 0.
+    Measured at alt=200 m, v_xy=25 m/s:
+        vz=-1e-7 -> tgo     15.71 s, ratio 4.672  -> penalty 400.00 (cap)
+        vz=-1e-3 -> tgo 200000.00 s, ratio 0.0004 -> penalty   0.00
+        vz=-0.1  -> tgo   2000.00 s, ratio 0.037  -> penalty   0.03
+    i.e. a vehicle hanging at 200 m with 25 m/s of horizontal speed shed
+    the ENTIRE horizontal-braking penalty the instant it began sinking at
+    one centimetre per second. The term added to punish stalling was in
+    fact paying for it -- the single cheapest way to zero it out was to
+    stop descending. (The vz>=0 branch had the mirror pathology: it used
+    free-fall-from-rest, so climbing HIGHER lengthened tgo and made the
+    term cheaper still -- 400 at 200 m down to 63.6 at 1372 m.)
+
+    Replaced with the one exact ballistic solution of
+    `alt + vz*t - 0.5*g*t**2 = 0`, i.e. `t = (vz + sqrt(vz**2 + 2*g*alt))/g`,
+    which is continuous everywhere, bounded as vz -> 0, reproduces the old
+    free-fall branch EXACTLY at vz=0 (both give sqrt(2*alt/g) = 15.7135 s
+    at alt=200), and is physically right for vz>0 too (coast up, then fall
+    back: vz=+30 at 200 m gives 42.81 s, not the old 15.71 s). Still not a
+    guidance-grade tgo solve (see `zemzev_controller.py`'s iterative
+    `_solve_feasible_tgo` for that) -- it ignores thrust, as it should,
+    since this is an urgency signal about the UNPOWERED budget, not a plan.
+    """
+    disc = max(v_z_m_s * v_z_m_s + 2.0 * max(gravity_m_s2, 0.1) * max(alt_m, 0.0), 0.0)
+    return max(float((v_z_m_s + np.sqrt(disc)) / max(gravity_m_s2, 0.1)), floor_s)
+
+
+def _xy_braking_ratio(w: RewardWeights, alt_m: float, v_z_m_s: float, v_xy: float, mass_kg: float,
+                       dps_thrust_max_n: float, gravity_m_s2: float) -> float:
+    """Horizontal analog of `_braking_ratio` -- see `t0_xy`'s field comment
+    for why this was added and `_xy_braking_envelope_penalty`'s docstring
+    for the shape. Required horizontal decel is `v_xy / time_to_ground`
+    (kill all horizontal speed by the time the vehicle reaches the ground),
+    compared against the SAME real deceleration authority and the SAME
+    `braking_authority_margin` the vertical channel uses (one vehicle, one
+    thrust budget shared between both channels via tilt -- no reason to
+    assume a different authority fraction for each).
+    """
+    a_avail = max(dps_thrust_max_n / max(mass_kg, 1.0) - gravity_m_s2, 0.05)
+    tgo = _time_to_ground_s(alt_m, v_z_m_s, gravity_m_s2, w.xy_braking_tgo_floor_s)
+    a_required = v_xy / tgo
+    ratio = a_required / (w.braking_authority_margin * a_avail)
+    return min(ratio, 1000.0)
+
+
+def _xy_braking_envelope_penalty(w: RewardWeights, ratio_clamped: float) -> float:
+    """Horizontal analog of `_braking_envelope_penalty` -- same polynomial
+    shape (zero at ratio=0, 1 at ratio=1, grows gently past that so it
+    stays differentiable instead of saturating immediately), applied to
+    `_xy_braking_ratio` instead of the vertical `_braking_ratio`. See
+    `t0_xy`'s field comment for why this exists: the vertical channel had
+    this real time-to-ground urgency signal from early in the project,
+    the horizontal channel never did, and a direct telemetry diagnostic
+    this session showed exactly that gap in the resulting behavior
+    (vertical speed sometimes well-controlled at touchdown, horizontal
+    speed always 15-32 m/s over a ~1.2 m/s limit).
+    """
+    return min(w.t0_xy * float(ratio_clamped ** w.xy_braking_theta), w.xy_braking_penalty_cap)
+
+
 def _leg_load_penalty(w: RewardWeights, leg_force_n: float, leg_force_max_n: float) -> float:
     if leg_force_n <= 0.0:
         return 0.0
@@ -703,6 +1095,22 @@ def _attitude_hold_penalty(w: RewardWeights, tilt_x: float, tilt_y: float, v_xy:
     ratio = tilt / max(loss_of_control_tilt_rad, 1e-6)
     barrier = min(w.tilt_cutoff_k * float(ratio ** w.tilt_cutoff_power), w.tilt_cutoff_cap)
     return quad + barrier
+
+
+def _angular_rate_penalty(w: RewardWeights, wx: float, wy: float, wz: float,
+                           safe_w_rad_s: float) -> float:
+    """Penalize body angular RATE -- see `omega_k`'s field comment for the
+    measured episode this was added for. Deliberately NOT velocity-gated
+    (unlike `_attitude_hold_penalty`'s quadratic): a high horizontal speed
+    justifies holding a large tilt ANGLE, it never justifies spinning, and
+    the landing test rejects on rate regardless of what the vehicle is
+    doing. All three axes count, including yaw, which no other term reads.
+    """
+    w_mag = float(np.sqrt(wx * wx + wy * wy + wz * wz))
+    quad = w.omega_k * w_mag * w_mag
+    ratio = w_mag / max(safe_w_rad_s, 1e-6)
+    barrier = min(w.omega_cutoff_k * float(ratio ** w.omega_cutoff_power), w.omega_cutoff_cap)
+    return min(quad + barrier, w.omega_penalty_cap)
 
 
 def _velocity_tracking_penalty(w: RewardWeights, v_xy: float) -> float:
@@ -781,18 +1189,31 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
         mass_kg = info.get("mass_kg", p.dry_mass_kg)
         braking_ratio = _braking_ratio(
             w, info["altitude_m"], s["vz"], mass_kg, p.dps_thrust_max_n, p.gravity_m_s2)
+        # `_braking_ratio` squares vz and is therefore sign-blind. That is
+        # CORRECT for `_braking_envelope_penalty` (a fast climb should pay
+        # the envelope term too) and WRONG for `_altitude_penalty`'s gate,
+        # which was switching the descend incentive off during climb-aways
+        # -- see `altitude_vz_gate_k`'s field comment for the measured
+        # numbers. Feed the gate descent speed only.
+        descent_ratio = _braking_ratio(
+            w, info["altitude_m"], min(s["vz"], 0.0), mass_kg, p.dps_thrust_max_n, p.gravity_m_s2)
+        xy_braking_ratio = _xy_braking_ratio(
+            w, info["altitude_m"], s["vz"], v_xy, mass_kg, p.dps_thrust_max_n, p.gravity_m_s2)
 
         r = 0.0
         r -= _proximity_penalty(w, dist_m)
-        r -= _altitude_penalty(w, info["altitude_m"], braking_ratio)
+        r -= _altitude_penalty(w, info["altitude_m"], descent_ratio)
         r -= _braking_envelope_penalty(w, braking_ratio)
+        r -= _xy_braking_envelope_penalty(w, xy_braking_ratio)
         r -= _leg_load_penalty(w, info.get("leg_force_n", 0.0), info.get("leg_force_max_n", 1.0))
         r -= _throttle_effort_penalty(w, s["throttle"])
         r -= _rcs_l1_penalty(w, s["rcs_pitch"], s["rcs_roll"], s["rcs_yaw"])
         r -= _rcs_l2_penalty(w, s["rcs_pitch"], s["rcs_roll"], s["rcs_yaw"])
         r -= _attitude_hold_penalty(w, s["tilt_x"], s["tilt_y"], v_xy, p.loss_of_control_tilt_rad)
+        r -= _angular_rate_penalty(w, s["wx"], s["wy"], s["wz"], p.safe_landing_w_rad_s)
         r -= _velocity_tracking_penalty(w, v_xy)
         r -= _xy_position_penalty(w, dist_m, info["altitude_m"])
+        r -= w.alive_tax_per_step  # 0.0 by default -- see field comment for why it is disabled
 
         # `reward_scale` applies ONLY to the per-step shaping sum (see its
         # field comment) -- the terminal bonus/penalty below is added at its

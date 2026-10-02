@@ -1,0 +1,240 @@
+"""THE curriculum stage table: one definition, imported by everything that
+has to agree on what a "stage" is.
+
+REAL DRIFT THIS FIXES: this table used to be copy-pasted into
+`scripts/train_sac_isaac.py`, `scripts/diag_stage_landing_rate.py`,
+`scripts/diag_policy_telemetry.py`, `scripts/collect_zemzev_demos.py` and
+`scripts/test_landing_feasibility.py`, each with a comment asserting it
+"mirrors scripts/train_sac_isaac.py's STAGES exactly". By this session they
+did not: `test_landing_feasibility.py` -- the script whose entire job is to
+certify that the stage the RL curriculum trains on is physically solvable --
+was still certifying `hover_only_easy`/`hover_only`/`final_approach`, three
+stages that had been DELETED from training, and had never heard of the four
+`ramp_*` stages that replaced them. A feasibility reference that tests a
+different scenario than the trainer is worse than none.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from lunarsim.core.terrain.config import TerrainConfig
+from lunarsim.core.terrain.generate import Tile, generate_tile
+from lunarsim.rl.analytic_lander_env import LanderParams
+
+
+@dataclass
+class Stage:
+    name: str
+    tile_size_m: float
+    params: LanderParams = field(default_factory=LanderParams)
+    terrain_roughness_scale: float = 1.0
+
+
+#  REMOVED EARLIER THIS SESSION, PER USER DIRECTION: the hover_only_easy ->
+#  hover_only -> final_approach curriculum stages that used to precede
+#  orbit_descent. RE-ADDED THIS SESSION as a DIFFERENT shape, after THREE
+#  separate attempts at orbit_descent-only training all reached 0/16
+#  landed_safely: (1) a 1M-step warm-started continuation of the old
+#  13M-step checkpoint, (2) a 2M-step fresh-from-scratch run, (3) a
+#  2M-step fresh run with SAC's replay buffer pre-seeded with real Isaac
+#  Sim ZemZevController demo transitions (20x-repeated so they weren't
+#  diluted to <2% of the buffer by online data -- see
+#  _seed_replay_buffer_from_demos's field comment for that first-try bug).
+#  All three: 11-14/16 episodes ran the FULL 60s clock without ever
+#  attempting touchdown, ent_coef decayed to a low flat value, no trend
+#  toward improvement. Root cause, CORRECTED this session against the real
+#  constants (the earlier wording here said "this vehicle's thrust-to-weight
+#  ratio is close to 1", which is NOT true and would have meant the task was
+#  barely flyable at all): the DPS gives T/W = 1.84 at the full 15103 kg PDI
+#  mass and 4.01 at dry mass, i.e. plenty of authority. What is close to 1
+#  is the T/W at action[0] = 0 -- the exact CENTRE of the action box, and
+#  the mean of an untrained squashed-Gaussian SAC policy. throttle =
+#  (a+1)/2 = 0.5 maps to 4672 + 0.5*(45040-4672) = 24856 N against a PDI
+#  weight of 15103*1.62 = 24467 N, i.e. T/W = 1.016, and the exact hover
+#  action is a0 = -0.019. So "hover" is not merely findable under random
+#  exploration, it is literally what a freshly-initialized policy outputs
+#  on average, and it stays that way all episode (only ~5% of the
+#  propellant burns in 60 s, so T/W at a0=0 drifts only 1.016 -> ~1.06).
+#  orbit_descent's release (200m, 10-30 m/s horizontal) is far enough from
+#  that attractor that the policy essentially never randomly stumbles into
+#  a full successful touchdown to learn its value from. Demo-bootstrapping
+#  tried to shortcut this without curriculum; it didn't work within budget
+#  -- though see `_seed_replay_buffer_from_demos`, the demo FILE that run
+#  used turned out to contain only 4 terminal transitions in 39824.
+#
+#  THIS curriculum is shaped differently from the old hover_only_easy ->
+#  final_approach -> orbit_descent one (which jumped straight from
+#  final_approach's 35m/0-3 m/s to orbit_descent's 200m/10-30 m/s in ONE
+#  step -- a cliff, not a ramp): every stage below starts from a release
+#  the PREVIOUS stage's policy should already handle reasonably (small
+#  altitude/speed delta each step), so the policy is always warm-started
+#  into a regime "near" what it already knows, instead of ever facing a
+#  qualitatively new release condition cold. Terrain stays at FULL
+#  roughness throughout (unlike the old hover_only_easy/hover_only, which
+#  used roughness=0) -- the skill being ramped here is altitude/speed
+#  control, not terrain handling, and the real target (orbit_descent) is
+#  real terrain, so there's no reason to ease that dimension separately.
+#
+#  REAL BUG FOUND IN THE TILE SIZES (this session, and it was already in
+#  orbit_descent's 600m tile long before the ramp stages copied its
+#  method): they were sized as "fall time x top horizontal speed, +30%" --
+#  but that is the distance travelled FROM the release point, which has to
+#  fit inside the tile's HALF-extent, not inside its full size. Factor-of-2
+#  error, compounded by using free-fall time (a CONTROLLED descent takes
+#  ~2.5x longer than free fall, because braking horizontal speed is what
+#  the extra time is spent on). The consequence is not a modelling nicety:
+#  `sample_height_at`/`collision_mesh_height_at` CLAMP out-of-range lookups
+#  to the grid edge, so past the tile boundary the env keeps reporting a
+#  confident altitude while PhysX has no collider there at all (see
+#  `isaac_lander_env.out_of_tile`). Measured on every real orbit_descent
+#  capture on disk, 600m tile / 300m half-extent:
+#    orbit_descent_margins_check_1 ended at r=650 m ("touchdown" at a
+#      reported alt of -3.2 m, against nothing);
+#    orbit_descent_margins_check_2 ended at r=524 m, reported alt -32.8 m;
+#    orbit_descent_multiseed_33 (the PROVEN ZemZev controller) ended at
+#      r=487 m, reported alt -2.4 m.
+#  And measured directly, 24 ZemZev episodes per stage on AnalyticLanderEnv
+#  with an unlimited time budget (the ground track does not depend on which
+#  backend integrates it), max distance from the tile centre vs. the OLD
+#  half-extent: ramp_20m 15 m vs 30 (fine), ramp_50m 93 vs 60, ramp_100m
+#  252 vs 130, ramp_150m 469 vs 225, orbit_descent 672 vs 300 -- i.e. 7/24,
+#  12/24, 15/24 and 13/24 episodes respectively flew off the terrain even
+#  under the controller that is this project's proof the task is solvable.
+#  Tile sizes below are now 2 x (that measured max radius) x ~1.25 margin,
+#  rounded to a multiple of TERRAIN_GRID_N. This is also forced by simple
+#  physics independent of any controller: killing 30 m/s with the DPS at
+#  its 30 deg braking tilt gives ~1.49 m/s^2 of lateral decel
+#  (45040 N / 15103 kg x sin30 deg), i.e. a 302 m minimum stopping
+#  distance, so a +-300 m tile CANNOT contain orbit_descent's release
+#  envelope no matter how well it is flown.
+STAGES = [
+    Stage(
+        name="ramp_20m",
+        tile_size_m=60.0,
+        params=LanderParams(
+            spawn_altitude_m=20.0, spawn_xy_radius_m=10.0,
+            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(0.0, 2.0),
+            max_episode_s=20.0,
+        ),
+    ),
+    Stage(
+        name="ramp_50m",
+        tile_size_m=240.0,
+        params=LanderParams(
+            spawn_altitude_m=50.0, spawn_xy_radius_m=25.0,
+            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(2.0, 8.0),
+            max_episode_s=30.0,
+        ),
+    ),
+    Stage(
+        name="ramp_100m",
+        tile_size_m=640.0,
+        params=LanderParams(
+            spawn_altitude_m=100.0, spawn_xy_radius_m=50.0,
+            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(6.0, 16.0),
+            max_episode_s=40.0,
+        ),
+    ),
+    Stage(
+        name="ramp_150m",
+        tile_size_m=1200.0,
+        params=LanderParams(
+            spawn_altitude_m=150.0, spawn_xy_radius_m=65.0,
+            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(10.0, 24.0),
+            max_episode_s=50.0,
+        ),
+    ),
+    # "yorunge" stage: an uncontrolled-release-scale altitude/horizontal-
+    # speed regime, matching what scripts/isaaclab_static_telemetry_capture.py's
+    # actual demo descents used (120-350m release, real craters/hills/rocks
+    # at full roughness) -- NOT literal orbital mechanics, same scope
+    # caveat as everywhere else in this codebase (see analytic_lander_env's
+    # module docstring). This is the hardest, most "final descent"-like
+    # stage: real obstacles (rocks, via IsaacLanderVecEnv's tile.rocks
+    # spawning), a real crater/hill field, and (since this session) a tile
+    # actually big enough for the ground track -- 1680 m, i.e. a +-840 m
+    # half-extent against a measured 672 m worst-case ZemZev ground track
+    # and a 302 m hard physical minimum stopping distance. The old 600 m
+    # was derived from free-fall time (15.7 s) x 30 m/s = ~470 m "of
+    # drift" compared against the FULL tile size instead of its half-
+    # extent, and with free-fall rather than controlled-descent time.
+    Stage(
+        name="orbit_descent",
+        tile_size_m=1680.0,
+        params=LanderParams(
+            spawn_altitude_m=200.0, spawn_xy_radius_m=80.0,
+            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(10.0, 30.0),
+            max_episode_s=60.0,
+        ),
+    ),
+]
+
+
+# Terrain feature scales, in ABSOLUTE METRES, identical at every stage.
+#
+# REAL BUG FOUND (this session): these used to be written as fractions of
+# the tile size (`wavelength_m = size/6`, crater `d_max_m = size/10`),
+# which silently made terrain DIFFICULTY a function of which curriculum
+# stage you were on -- the exact opposite of this curriculum's stated
+# design ("the skill being ramped here is altitude/speed control, not
+# terrain handling"). A 60 m tile got 10 m-wavelength hills at the same
+# 0.3 m amplitude as a 600 m tile's 100 m-wavelength hills, i.e. 10x the
+# slope. Measured fraction of landing sites that satisfy
+# `safe_landing_max_leg_height_diff_m = 0.16` (the footpad-span terrain
+# flatness test in `landed_safely`), 3000 random sites x 6 tiles per stage,
+# with the OLD size-relative scales: ramp_20m 58%, ramp_50m 88%, ramp_100m
+# 99.9%, ramp_150m 100%, orbit_descent 100%. The curriculum's FIRST and
+# supposedly easiest stage was the one where 42% of episodes could not be
+# landed safely no matter how well they were flown. Pinning the scales to
+# the values the 600 m orbit_descent tile used to produce gives: ramp_20m
+# 91.5%, ramp_50m 100%, everything else 100%.
+_HILL_WAVELENGTH_M = 100.0
+_CRATER_D_MAX_M = 60.0
+
+# Heightfield grid edge length. res_m = tile_size_m / TERRAIN_GRID_N, so
+# this (not the tile size) is what sets the per-reset cost: the PhysX
+# collision mesh `IsaacLanderVecEnv._rebuild_terrain` rebuilds on EVERY
+# episode reset of EVERY env has 2*(N-1)^2 triangles.
+#
+# Kept at 80 -- the value every run on disk used -- so enlarging the tiles
+# above changes zero about training throughput. It is NOT the value this
+# scenario deserves: at 80, orbit_descent's 1680 m tile has 21 m cells, so
+# the 9.4 m footpad span falls inside a single cell and
+# `safe_landing_max_leg_height_diff_m` becomes inert (measured median
+# footpad height diff 0.010 m against a 0.16 m limit). `--terrain-grid-n
+# 160` is the natural next step and is FREE on the generation side
+# (measured: generate_tile takes 80 ms at both N=80 and N=160, and only
+# jumps to 315 ms at N=200) -- but it quadruples the triangle count PhysX
+# has to cook per reset (12482 -> 50562), which cannot be measured without
+# a GPU run. Try it with a short --steps-per-stage first and compare
+# wall-clock before committing a long run to it.
+_DEFAULT_TERRAIN_GRID_N = 80
+
+STAGES_BY_NAME = {s.name: s for s in STAGES}
+
+
+def terrain_config(stage: Stage, seed: int, grid_n: int = _DEFAULT_TERRAIN_GRID_N) -> TerrainConfig:
+    r = stage.terrain_roughness_scale
+    return TerrainConfig(
+        mode="fine", size_m=stage.tile_size_m, res_m=max(0.5, stage.tile_size_m / grid_n), seed=seed,
+        coarse_source="procedural",
+        hills={"amplitude_m": 0.3 * r, "wavelength_m": _HILL_WAVELENGTH_M, "hurst": 0.75},
+        craters={"count_scale": 0.1 * r, "d_min_m": 1.0, "d_max_m": _CRATER_D_MAX_M, "b": 2.5,
+                 "depth_ratio": 0.08, "age": 0.5},
+        # real, PHYSICAL (collidable) rocks -- see IsaacLanderVecEnv's
+        # `_rebuild_terrain` docstring on the real `tile.rocks` field this
+        # spawns from (capped per-env regardless of density, for reset cost).
+        rocks={"density_scale": r, "d_max_m": 1.0},
+        roi={"sigma_m": stage.tile_size_m / 4.0, "centers": None},
+        curvature=False,
+    )
+
+
+def make_tile_fn(stage: Stage, grid_n: int = _DEFAULT_TERRAIN_GRID_N):
+    """A fresh-terrain-per-episode `tile_fn` for this stage."""
+    def tile_fn(rng: np.random.Generator) -> Tile:
+        return generate_tile(terrain_config(stage, int(rng.integers(0, 2 ** 31 - 1)), grid_n))
+    return tile_fn
+

@@ -50,6 +50,7 @@ class ApolloLMSpecs:
     # --- geometry (documented) ---
     height_m: float = 7.04             # legs deployed, footpad to docking hatch
     footpad_span_m: float = 9.4        # diagonal span across deployed footpads
+    footpad_radius_m: float = 0.47     # dish radius (commonly cited 37 in diameter)
 
     # --- geometry/inertia inputs (engineering estimate, see docstring) ---
     body_radius_m: float = 2.1          # structural core radius (not leg span)

@@ -32,8 +32,91 @@ from lunarsim.core.vehicle.apollo_lm import ApolloLMSpecs, moment_of_inertia
 
 # measured directly off the raw mesh (see module docstring) -- inputs to
 # the visual-only scale correction in spawn_apollo_lm, not real-vehicle numbers.
+#
+# Re-measured per-prim with a USD BBoxCache, because the previous footprint
+# figure was taken from the asset's WHOLE bounding box and that box is
+# dominated by one prim, `Object_8`: a thin boom high on the ascent stage
+# (y = 231..294 cm) that reaches x = +669.8 cm while every other prim in
+# the model stays inside +/-192.4 cm. It stretched the measured footprint
+# to 862.2 cm, so `scale_horizontal` came out 2.24x too small and the LM
+# rendered 4.19 m wide instead of its real 9.4 m footpad span -- correct
+# height, far too narrow. Excluding that one prim, the body measures
+# 384.7 x 300.0 x 384.6 cm, symmetric in both horizontal axes.
+#
+# The height figure was NOT affected (the body spans the full 300.0 cm in
+# y on its own), so only the footprint changes here.
 _RAW_MESH_HEIGHT_M = 3.0
-_RAW_MESH_FOOTPRINT_M = 8.622
+_RAW_MESH_FOOTPRINT_M = 3.847
+# the mesh stands on its origin rather than being centred on it: its lowest
+# point (the footpads) is this far ABOVE y = 0 in raw mesh units.
+_RAW_MESH_BOTTOM_M = 0.061
+
+# How far the descent stage's collidable underside sits above the footpad
+# contact plane. An engineering estimate of the deployed gear height, not a
+# sourced figure -- its only job is to keep the body cylinder out of the way
+# so the four pads are what touches down (see the physics proxy below).
+_BODY_UNDERSIDE_ABOVE_PADS_M = 1.5
+
+
+def author_physics(stage, prim_path: str, specs: ApolloLMSpecs | None = None,
+                   total_mass_kg: float | None = None) -> None:
+    """Author everything physical that plain `UsdPhysics` can express: the
+    rigid body, its mass/inertia/centre of mass, four footpads at the real
+    stance, and a raised descent-stage cylinder.
+
+    Split out of `spawn_apollo_lm` so all of it can be asserted without an
+    Isaac runtime. `spawn_apollo_lm` goes on to import `PhysxSchema` for the
+    PhysX-only extras (speculative CCD), and that module ships only with
+    Isaac Sim -- so a plain `usd-core` test could not otherwise reach any of
+    this.
+    """
+    from pxr import Gf, UsdGeom, UsdPhysics
+
+    specs = specs or ApolloLMSpecs()
+    if total_mass_kg is None:
+        total_mass_kg = float(specs.dry_mass_kg + specs.descent_propellant_kg)
+    contact_plane_z = -specs.height_m / 2.0
+    stance_radius = specs.footpad_span_m / 2.0
+
+    # descent-stage body: raised so its underside clears the pads by roughly
+    # a real LM's gear height, leaving the pads as first contact.
+    body_underside_z = contact_plane_z + _BODY_UNDERSIDE_ABOVE_PADS_M
+    body_height = specs.height_m / 2.0 - body_underside_z
+    proxy = UsdGeom.Cylinder.Define(stage, f"{prim_path}/PhysicsProxy")
+    proxy.CreateRadiusAttr(specs.body_radius_m)
+    proxy.CreateHeightAttr(body_height)
+    proxy.CreateAxisAttr("Z")
+    UsdGeom.Xformable(proxy.GetPrim()).AddTranslateOp().Set(
+        Gf.Vec3d(0.0, 0.0, body_underside_z + body_height / 2.0))
+    UsdGeom.Imageable(proxy.GetPrim()).MakeInvisible()
+    UsdPhysics.CollisionAPI.Apply(proxy.GetPrim())
+
+    # four footpads, at the azimuths `_footpad_height_diff_m` samples.
+    # Spheres rather than thin discs: a sphere is the shape PhysX's
+    # speculative CCD handles most reliably against a concave triangle mesh,
+    # which this terrain is (see the CCD note in `spawn_apollo_lm`).
+    for q, az_deg in enumerate((0.0, 90.0, 180.0, 270.0)):
+        az = np.deg2rad(az_deg)
+        pad = UsdGeom.Sphere.Define(stage, f"{prim_path}/Footpad{q + 1}")
+        pad.CreateRadiusAttr(specs.footpad_radius_m)
+        UsdGeom.Xformable(pad.GetPrim()).AddTranslateOp().Set(Gf.Vec3d(
+            stance_radius * np.cos(az), stance_radius * np.sin(az),
+            contact_plane_z + specs.footpad_radius_m))
+        UsdGeom.Imageable(pad.GetPrim()).MakeInvisible()
+        UsdPhysics.CollisionAPI.Apply(pad.GetPrim())
+
+    root_prim = stage.GetPrimAtPath(prim_path)
+    UsdPhysics.RigidBodyAPI.Apply(root_prim)
+    mass_api = UsdPhysics.MassAPI.Apply(root_prim)
+    mass_api.CreateMassAttr(total_mass_kg)
+    i_tilt, i_yaw = moment_of_inertia(total_mass_kg, specs.body_radius_m, specs.height_m)
+    mass_api.CreateDiagonalInertiaAttr(Gf.Vec3f(i_tilt, i_tilt, i_yaw))
+    # Pin the centre of mass to the body origin. Without this PhysX derives
+    # it from the collision shapes, and the shapes are no longer a single
+    # origin-centred cylinder -- the pads would drag it down and silently
+    # change every thrust/RCS moment arm in a model whose inertia tensor is
+    # authored about the origin.
+    mass_api.CreateCenterOfMassAttr(Gf.Vec3f(0.0, 0.0, 0.0))
 
 
 def spawn_apollo_lm(
@@ -84,7 +167,6 @@ def spawn_apollo_lm(
     visual_path = f"{prim_path}/Visual"
     visual = UsdGeom.Xform.Define(stage, visual_path)
     visual.GetPrim().GetReferences().AddReference(visual_asset_path)
-    visual.AddRotateXOp().Set(90.0)  # source mesh is Y-up; this stage is Z-up
 
     source_mpu = UsdGeom.GetStageMetersPerUnit(Usd.Stage.Open(visual_asset_path))
     target_mpu = UsdGeom.GetStageMetersPerUnit(stage)
@@ -92,22 +174,50 @@ def spawn_apollo_lm(
 
     scale_vertical = unit_scale * specs.height_m / _RAW_MESH_HEIGHT_M
     scale_horizontal = unit_scale * specs.footpad_span_m / _RAW_MESH_FOOTPRINT_M
+
+    # REAL BUG FOUND BY WATCHING A LANDING: the vehicle came to rest with
+    # its footpads visibly in the air, balanced on nothing. The raw mesh is
+    # modelled standing ON its own origin, not centred on it -- its lowest
+    # point sits at +6.1 cm (`_RAW_MESH_BOTTOM_M`), so after scaling the
+    # visual LM occupies z = +0.14 .. +7.18 m in the body frame while the
+    # collision cylinder occupies z = -3.52 .. +3.52. The physics therefore
+    # rested on a cylinder face 3.66 m BELOW the footpads anyone could see.
+    # Shift the mesh down so its footpad plane coincides with the collision
+    # cylinder's bottom, which is the surface that actually makes contact.
+    #
+    # Ops are authored translate-rotate-scale so the composed transform is
+    # T * R * S (scale in the mesh's own frame, then the Y-up -> Z-up
+    # rotation, then the shift in the vehicle's frame). USD applies them in
+    # the order of `xformOpOrder`, so the translate has to be added FIRST.
+    footpad_offset_m = specs.height_m * _RAW_MESH_BOTTOM_M / _RAW_MESH_HEIGHT_M
+    visual.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -specs.height_m * 0.5 - footpad_offset_m))
+    visual.AddRotateXOp().Set(90.0)  # source mesh is Y-up; this stage is Z-up
     visual.AddScaleOp().Set(Gf.Vec3f(scale_horizontal, scale_vertical, scale_horizontal))
 
     # -- physics proxy: mass + collision, independent of the visual mesh --
+    #
+    # REAL BUG FOUND BY WATCHING A LANDING SETTLE: the whole vehicle used to
+    # collide as ONE `body_radius_m` (2.1 m) cylinder spanning the full
+    # height, so it came to rest balanced on a 2.1 m disc rather than on its
+    # 9.4 m leg base. Measured on the successful ZemZev capture
+    # (`orbit_descent_controller_isaacsim_seed2001_terrainfix`): first
+    # contact at t=44 s produced an angular-rate spike, after which the
+    # vehicle ROCKED for ~10 s -- tilt swinging 14.9 -> 6.9 -> 10.4 -> 3.1
+    # deg with the engine already off (throttle 0.005) and the reported
+    # clearance stuck between 0.10 and 0.26 m, which free fall would have
+    # closed in half a second. A 4.5x narrower support polygon than the real
+    # gear is exactly the kind of thing that rings like that.
+    #
+    # Modelled now the way the vehicle is actually built: four footpads at
+    # the real `footpad_span_m` stance carry the touchdown load, and the
+    # descent-stage body is a shorter cylinder sitting ABOVE them so it only
+    # participates if the vehicle bottoms out on something tall. Note the
+    # landing-safety test already assumed this geometry -- it measures
+    # terrain height spread under exactly these four points
+    # (`_footpad_height_diff_m`) -- so the collider and the criterion only
+    # now agree with each other.
     if not visual_only:
-        proxy = UsdGeom.Cylinder.Define(stage, f"{prim_path}/PhysicsProxy")
-        proxy.CreateRadiusAttr(specs.body_radius_m)
-        proxy.CreateHeightAttr(specs.height_m)
-        proxy.CreateAxisAttr("Z")
-        UsdGeom.Imageable(proxy.GetPrim()).MakeInvisible()
-        UsdPhysics.CollisionAPI.Apply(proxy.GetPrim())
-
-        UsdPhysics.RigidBodyAPI.Apply(root_prim)
-        mass_api = UsdPhysics.MassAPI.Apply(root_prim)
-        mass_api.CreateMassAttr(total_mass_kg)
-        i_tilt, i_yaw = moment_of_inertia(total_mass_kg, specs.body_radius_m, specs.height_m)
-        mass_api.CreateDiagonalInertiaAttr(Gf.Vec3f(i_tilt, i_tilt, i_yaw))
+        author_physics(stage, prim_path, specs, total_mass_kg)
 
         # REAL BUG FOUND VIA A DOCKER RUN: a real, uncontrolled ballistic
         # descent (released at ~340m, no thrust to slow it) hits the ground

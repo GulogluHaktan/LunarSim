@@ -70,10 +70,10 @@ echo "[LunarSim] encoding raw camera videos..."
 ffmpeg -y -framerate 30 -i "$CAPTURE_DIR/chase_frames/frame_%04d.png" -c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p "$CAPTURE_DIR/chase.mp4"
 ffmpeg -y -framerate 30 -i "$CAPTURE_DIR/nav_frames/frame_%04d.png" -c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p "$CAPTURE_DIR/nav.mp4"
 
-echo "[LunarSim] building 4-panel dashboard + standalone lidar video..."
+echo "[LunarSim] building 4-panel dashboard + standalone LiDAR mapping video..."
 "$PROJECT_ROOT/.venv/bin/python" "$PROJECT_ROOT/scripts/compose_capture_video.py" \
   --capture-dir "$CAPTURE_DIR" \
   --out "$CAPTURE_DIR/dashboard.mp4" \
-  --lidar-out "$CAPTURE_DIR/lidar.mp4"
+  --map-out "$CAPTURE_DIR/map.mp4"
 
 echo "[LunarSim] done -> $CAPTURE_DIR"

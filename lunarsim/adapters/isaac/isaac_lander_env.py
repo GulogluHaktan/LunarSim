@@ -55,7 +55,6 @@ import numpy as np
 from gymnasium import spaces
 
 from lunarsim.core.terrain.generate import Tile
-from lunarsim.core.terrain.rocks import sample_height_at
 from lunarsim.core.vehicle.apollo_lm import ApolloLMSpecs, G0, leg_force_bounds_n, moment_of_inertia
 from lunarsim.rl.analytic_lander_env import LanderParams, _euler_to_quat
 from lunarsim.rl.obs_norm import normalize_obs
@@ -63,6 +62,167 @@ from lunarsim.rl.obs_norm import normalize_obs
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 RewardFn = Callable[["IsaacLanderEnv", dict], float]
+
+# Azimuths of the contact-footprint stencil (see `contact_clearance_m`): the
+# vehicle rests on a ring of footpads, so the ground it can come to rest on
+# is the highest surface anywhere under that ring, not the single point
+# under the body origin.
+#
+# 16 samples rather than the 8 this used while the contact ring was the
+# 2.1 m body radius: the ring is now the 4.7 m footpad stance, so 8 samples
+# would sit 3.7 m apart along it and miss far more relief between them than
+# the measured stencil error `TOUCHDOWN_CONTACT_EPS_M` is sized for. At 16
+# the arc spacing is 1.84 m, slightly tighter than the 1.65 m the old
+# calibration was taken at.
+_FOOTPRINT_AZIMUTHS_RAD = np.deg2rad(np.arange(0.0, 360.0, 22.5))
+
+# Tolerance on the "lowest point of the collider has reached the ground"
+# test below. Two real, measured error sources have to fit inside it:
+#   1. the 17-point footprint stencil under-estimates the true maximum of
+#      the collision surface over the contact ring whenever the peak falls
+#      between samples. RE-MEASURED after the contact ring moved from the
+#      2.1 m body radius to the 4.7 m footpad stance (and the stencil from
+#      8 azimuths to 16), against a 256-point dense sampling of the same
+#      exact mesh, over 1200 random sites x 3 tiles per stage: worst case
+#      0.0215 m (ramp_20m, res=0.75 m -- the finest/roughest grid in the
+#      curriculum), <=0.0053 m at every other stage. That is BETTER than
+#      the 0.039 m the old 8-point/2.1 m stencil measured: the bigger ring
+#      sampled 16 times has tighter arc spacing (1.84 m vs 1.65 m, so
+#      comparable) while covering ground whose relief the small disc used
+#      to miss entirely.
+#   2. PhysX's own contact offset (default 0.02 m) -- contacts are generated
+#      before the surfaces literally coincide.
+# 0.0215 + 0.02 = 0.0415 -> 0.05 m still covers both with margin, and is
+# ~0.05x the tightest safety threshold it interacts with
+# (safe_landing_v_z_m_s=1.0 m/s crosses 0.05 m in 0.05 s, exactly one dt_s
+# control step), i.e. it cannot meaningfully flatter a touchdown's measured
+# velocity/attitude.
+TOUCHDOWN_CONTACT_EPS_M = 0.05
+
+
+def collision_mesh_height_at(height: np.ndarray, res_m: float, x_m: np.ndarray, y_m: np.ndarray) -> np.ndarray:
+    """Height of the ACTUAL PhysX collision surface at (x, y) -- i.e. of the
+    exact triangle mesh `lunarsim.adapters.isaac.heightfield.
+    _mesh_from_heightfield` authors from the same `height` grid, including
+    its triangulation (each grid cell split along the p00-p11 diagonal:
+    faces (p00, p10, p11) and (p00, p11, p01), with grid index i <-> x and
+    j <-> y).
+
+    REAL BUG THIS FIXES: everything on the Isaac side previously asked
+    `lunarsim.core.terrain.rocks.sample_height_at` where the ground was.
+    That function is a NEAREST-SAMPLE lookup, which is the right answer for
+    `AnalyticLanderEnv` (there the heightfield IS the world) but not here,
+    where PhysX collides against the interpolated mesh between those
+    samples. Measured discrepancy between the two, over 2500 random sites x
+    5 tiles at each curriculum stage: p99 ~0.026 m, max 0.054 m, and it does
+    NOT shrink with grid resolution (the terrain amplitude is fixed, so a
+    finer grid just has proportionally steeper cells). 0.054 m is 54x the
+    1 mm touchdown tolerance this module used to apply -- see
+    `contact_clearance_m`.
+
+    Verified exactly (max abs error 4.9e-15 m over 500 random query points)
+    against a brute-force barycentric lookup over the literal face list
+    `_mesh_from_heightfield` emits.
+    """
+    n = height.shape[0]
+    center = (n - 1) / 2.0
+    fi = np.clip(np.asarray(x_m, dtype=np.float64) / res_m + center, 0.0, n - 1.0)
+    fj = np.clip(np.asarray(y_m, dtype=np.float64) / res_m + center, 0.0, n - 1.0)
+    i0 = np.minimum(fi.astype(np.int64), n - 2)
+    j0 = np.minimum(fj.astype(np.int64), n - 2)
+    a, b = fi - i0, fj - j0
+    h00, h10 = height[i0, j0], height[i0 + 1, j0]
+    h01, h11 = height[i0, j0 + 1], height[i0 + 1, j0 + 1]
+    # a >= b is the (p00, p10, p11) triangle; b > a is (p00, p11, p01)
+    return np.where(a >= b,
+                    h00 + (h10 - h00) * a + (h11 - h10) * b,
+                    h00 + (h01 - h00) * b + (h11 - h01) * a)
+
+
+def contact_clearance_m(height: np.ndarray, res_m: float, x: float, y: float, z: float,
+                        tilt_x: float, tilt_y: float, half_height_m: float,
+                        stance_radius_m: float) -> tuple[float, float]:
+    """`(clearance_m, ground_z)`: how far the LOWEST point of the real
+    collision proxy is above the HIGHEST collision surface under its
+    footprint, and that surface height.
+
+    REAL BUG FOUND (this session, from a real Isaac Sim capture of the
+    hand-designed ZemZev controller --
+    `out/eval_snapshots/orbit_descent_multiseed_44/`): that episode flew a
+    textbook landing, came to rest at t=47s with the vehicle motionless
+    (pos (-296.60, 49.11, 3.34) unchanged for the last 16 s, tilt 0.6 deg,
+    throttle 0.04), and the run was nevertheless classified
+    `end_reason=max_episode_s`, `landed_safely=None` -- the sim never
+    noticed it had landed. Cause: touchdown was tested as
+    `(z - half_height_m) <= ground_z + 1e-3`, i.e. a POINT model (the centre
+    of the belly) against the ground height at the body origin, with a 1 mm
+    tolerance. The real collider is a `body_radius_m`-radius,
+    `height_m`-tall cylinder, which at rest sits with its lowest RIM point
+    on the highest ground under that disc -- so the belly centre rests
+    ABOVE the sampled ground by (terrain relief under the footprint) +
+    `body_radius_m * sin(tilt)`. In that episode the reported resting
+    altitude was 0.067 m: 67x the tolerance, so the test could never fire.
+
+    Measured over 2400 random sites x 6 tiles per stage, this resting offset
+    is median 0.006 m (orbit_descent) to 0.059 m (ramp_20m) from terrain
+    relief alone, and only 1.7-28% of sites ever let the belly centre reach
+    within 1 mm of the sampled ground. Residual tilt adds a further
+    `body_radius_m * sin(tilt)` = 0.037 m per degree. So on real terrain the
+    old test fired essentially ONLY when the vehicle was moving fast enough
+    to punch the belly centre through the surface within one step -- i.e.
+    the only touchdowns the trainer ever saw were crashes, and every soft
+    arrival was silently relabelled "timed out". That asymmetry is enough on
+    its own to prevent any policy from ever being paid the terminal landing
+    bonus (see `reward.py`), independent of reward tuning.
+
+    Geometry: `stance_radius_m` is the radius of the ring the vehicle rests
+    on, at `half_height_m` below the body origin. Tilted by `tilt` from
+    vertical, the ring's lowest point sits
+    `half_height_m*cos(tilt) + stance_radius_m*sin(tilt)` below the origin
+    (the downhill side of the ring swings down). The ground it can rest on
+    is the max of the collision surface over that ring, sampled at the
+    centre plus `_FOOTPRINT_AZIMUTHS_RAD`.
+
+    `stance_radius_m` is the FOOTPAD stance (`footpad_span_m / 2`), not the
+    body radius: the collider is four footpads at that stance plus a raised
+    descent-stage cylinder (see `adapters.isaac.lander.spawn_apollo_lm`).
+    A continuous ring rather than the four discrete pads, deliberately --
+    yaw is not an argument here, and the ring is the yaw-marginalised
+    version of four pads at unknown heading. It is also the conservative
+    direction: the max over a whole ring is never below the max over four
+    points on it, so contact is reported no later than it really happens.
+    """
+    tilt = float(np.hypot(tilt_x, tilt_y))
+    lowest_z = z - (half_height_m * np.cos(tilt) + stance_radius_m * np.sin(tilt))
+    xs = np.concatenate(([x], x + stance_radius_m * np.cos(_FOOTPRINT_AZIMUTHS_RAD)))
+    ys = np.concatenate(([y], y + stance_radius_m * np.sin(_FOOTPRINT_AZIMUTHS_RAD)))
+    ground_z = float(collision_mesh_height_at(height, res_m, xs, ys).max())
+    return float(lowest_z - ground_z), ground_z
+
+
+def out_of_tile(tile: Tile, x: float, y: float, margin_m: float) -> bool:
+    """Is (x, y) outside the part of `tile` that actually has ground under it?
+
+    REAL BUG FOUND (this session, from every single real orbit_descent
+    capture on disk): `sample_height_at` CLAMPS out-of-range indices to the
+    grid edge, so it keeps returning a plausible-looking height forever
+    outside the tile -- while the PhysX collision mesh simply ENDS at the
+    tile boundary. A vehicle that drifts off the tile therefore flies over
+    a void while the env reports a confident, entirely fictional altitude.
+    Real evidence, 600 m tile (half-extent 300 m):
+      orbit_descent_margins_check_2: crosses r=300 m at t~13 s of a 60 s
+        episode and ends at r=524 m with a reported altitude of -32.8 m,
+        i.e. 33 m "underground" with nothing to collide with;
+      orbit_descent_margins_check_1: ends at r=650 m, reported alt -3.2 m,
+        logged as `end_reason=touchdown` with vxy=17.45 m/s -- a "crash"
+        against ground that does not exist;
+      orbit_descent_multiseed_33 (ZemZev): ends at r=487 m, alt -2.4 m,
+        also logged as a touchdown.
+    Terminating these as `truncated` keeps the fiction out of the replay
+    buffer and makes an undersized tile fail loudly instead of silently.
+    """
+    half = tile.size_m / 2.0 - margin_m
+    return bool(abs(x) > half or abs(y) > half)
 
 
 def _quat_to_euler(qw: float, qx: float, qy: float, qz: float) -> tuple[float, float, float]:
@@ -163,7 +323,18 @@ class IsaacLanderEnv(gym.Env):
         self.body.initialize()
 
     def _ground_z(self, x: float, y: float) -> float:
-        return float(sample_height_at(self.tile.height, self.tile.res_m, np.array([x]), np.array([y]))[0])
+        return float(collision_mesh_height_at(
+            self.tile.height, self.tile.res_m, np.array([x]), np.array([y]))[0])
+
+    def _contact(self) -> tuple[float, float]:
+        """`(clearance_m, ground_z)` for the current state -- see
+        `contact_clearance_m`. One call costs a single 9-point vectorized
+        heightfield lookup (~20 us), negligible against the 6 PhysX substeps
+        in the same control step."""
+        s = self.state
+        return contact_clearance_m(
+            self.tile.height, self.tile.res_m, s["x"], s["y"], s["z"],
+            s["tilt_x"], s["tilt_y"], self._half_height_m, self._specs.footpad_span_m / 2.0)
 
     def _footpad_height_diff_m(self, x: float, y: float) -> float:
         radius = self._specs.footpad_span_m / 2.0
@@ -298,22 +469,30 @@ class IsaacLanderEnv(gym.Env):
         self._t += p.dt_s
         mass_kg = self._write_mass_inertia()
 
-        ground_z = self._ground_z(s["x"], s["y"])
         # REAL BUG CAUGHT VIA A TOUCHDOWN SMOKE TEST: PhysX collision (real,
         # against the real terrain mesh) correctly rests the vehicle with
         # its root (body CENTER, not a zero-height point like the analytic
-        # env's `z`) at `ground_z + half_height_m` and stops it there -- but
-        # comparing that real resting height directly against `ground_z`
-        # (the analytic env's touchdown test) never fires, since the root
-        # never reaches the ground itself. Has to account for the real
-        # vehicle's physical extent.
-        belly_z = s["z"] - self._half_height_m
-        touched_down = bool(belly_z <= ground_z + 1e-3)
+        # env's `z`) above the ground and stops it there -- but comparing
+        # that real resting height directly against `ground_z` (the analytic
+        # env's touchdown test) never fires, since the root never reaches
+        # the ground itself. Has to account for the real vehicle's physical
+        # extent -- and, as a LATER REAL BUG showed (see
+        # `contact_clearance_m`'s docstring: a real ZemZev capture that
+        # landed, parked for 16 s and was still logged as a timeout), the
+        # extent that matters is the whole tilted cylinder against the
+        # ground under its whole footprint, not the belly centre against the
+        # ground under the body origin.
+        clearance_m, ground_z = self._contact()
+        touched_down = bool(clearance_m <= TOUCHDOWN_CONTACT_EPS_M)
         lost_control = bool(np.hypot(s["tilt_x"], s["tilt_y"]) > p.loss_of_control_tilt_rad)
         timed_out = self._t >= p.max_episode_s
+        # off the edge of the terrain tile there is no collision mesh at all
+        # -- see `out_of_tile`. Margin = the footpad sampling radius, so the
+        # leg-height-diff stencil can still land on real grid cells.
+        left_tile = out_of_tile(self.tile, s["x"], s["y"], self._specs.footpad_span_m / 2.0)
 
         terminated = touched_down or lost_control
-        truncated = bool(timed_out and not terminated)
+        truncated = bool((timed_out or left_tile) and not terminated)
 
         landed_safely = False
         landing_margins: dict = {}
@@ -352,8 +531,16 @@ class IsaacLanderEnv(gym.Env):
             "truncated": truncated,
             "landed_safely": landed_safely,
             "lost_control": lost_control,
+            "left_tile": left_tile,
             "landing_margins": landing_margins,
-            "altitude_m": belly_z - ground_z,
+            # "altitude" is now the real clearance of the collider's lowest
+            # point above the ground it can rest on, so it reaches 0 exactly
+            # at touchdown -- it used to be the belly CENTRE above the
+            # ground at the body origin, which bottomed out at a stage-
+            # dependent +0.006..+0.059 m and never reached 0 (see
+            # `contact_clearance_m`). Same quantity the observation and
+            # `reward.py`'s shaping terms read.
+            "altitude_m": clearance_m,
             "fuel_kg": s["fuel_kg"],
             "rcs_fuel_kg": s["rcs_fuel_kg"],
             "mass_kg": mass_kg,
@@ -368,10 +555,12 @@ class IsaacLanderEnv(gym.Env):
     def _observation(self) -> np.ndarray:
         p = self.params
         s = self.state
-        ground_z = self._ground_z(s["x"], s["y"])
+        # same clearance definition the termination test and info["altitude_m"]
+        # use, so "altitude" means one thing everywhere in the pipeline.
+        clearance_m, _ = self._contact()
         qw, qx, qy, qz = _euler_to_quat(s["tilt_x"], s["tilt_y"], s["yaw"])
         obs = [
-            s["x"] - p.target_x, s["y"] - p.target_y, (s["z"] - self._half_height_m) - ground_z,
+            s["x"] - p.target_x, s["y"] - p.target_y, clearance_m,
             s["vx"], s["vy"], s["vz"],
             qw, qx, qy, qz,
             s["wx"], s["wy"], s["wz"],
