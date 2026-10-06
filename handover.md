@@ -2884,3 +2884,158 @@ scripts/train_sac_isaac.py --only-stage ramp_35m --steps-per-stage 300000 \
 ```
 
 Evaluate with 96 episodes on seeds not used for selection. 24 is a smoke test.
+
+# ================================================================
+# FOUR-AGENT AUDIT, 2026-10-06 — the measurement was broken
+# ================================================================
+
+Seven hyperparameter interventions had failed, all of them invariant. That
+pattern says "something below the hyperparameters is wrong", so four agents were
+pointed at four areas hyperparameters cannot reach. Three of them found real
+defects and one of those changes the project's headline number.
+
+## THE BIG ONE: the touchdown label was inflating every RL rate ~4.5x
+
+Termination was graded from the state read AFTER all `_n_substeps` PhysX
+substeps. A control step is `dt_s=0.05 s`, so the vehicle travels `0.05*|vz|` m,
+while `TOUCHDOWN_CONTACT_EPS_M` is a fixed 0.05 m. **Above 1 m/s the contact
+band is narrower than one step of travel**, so contact happens mid-loop, and the
+regolith is authored with `restitution=0.0` -- PhysX has already stopped the
+vehicle before the grader looks. Roughly `1/|vz|` of fast impacts were caught
+honestly; the rest were graded at `vz ~ 0`.
+
+So `landed_safely` passed slams, and `_touchdown_severity` -- the function whose
+only job is "how many times over its limit was this touchdown" -- returned ~0
+for an arbitrarily hard impact.
+
+**Measured consequence.** The v24 checkpoint, the one this file has been calling
+the 22.9% baseline:
+
+```
+                                   landed      timeout
+old (post-substep) grading         22/96 = 23%   22/96
+FIXED (pre-substep) grading         5/96 =  5%    8/96
+```
+
+17 of the 22 "landings" were slams. The real ramp_35m figure is **5%**, and the
+controller's **85%** stands, because it flies its terminal descent at 0.80 m/s
+(0.04 m of travel against the 0.05 m band) -- inside the honest regime. An RL
+policy exploring faster descents was graded by coin flip.
+
+### What this invalidates
+
+Everything measured through `landed_safely` before this fix, which is every rate
+in this file. In particular, today's hyperparameter comparisons are confounded:
+
+  - the 11.5% -> 22.9% reward result (p~0.037)
+  - the ramp_35m progression across v21/v23/v24
+  - the gamma, replay-ratio, learning-rate, entropy and log-std comparisons
+  - the proxy-vs-true correlation (r=+0.84, r=+0.92) and the training-time
+    7.5%/12.5% figures -- the "true" column was the broken label
+
+The REWARD-SHAPE findings survive, because they were proven by direct
+computation rather than by training outcome: the lateral term was provably flat
+above 7.07 m/s near the ground, the clip was provably filled by one term, and
+the vertical channel was provably 12x weaker than the lateral one. The margin
+DISTRIBUTIONS also survive as distributions, but the pass/fail verdicts on them
+do not.
+
+Fixed by snapshotting vz/v_xy/tilt/|w| before the substep loop and grading from
+that, in both envs, including the leg-force kinetic energy. Costs no extra reads;
+off by at most one step of acceleration (~0.08 m/s against a 1.0 m/s limit)
+instead of by the whole impact velocity. Regression test added.
+
+## The behaviour clone flies AWAY, and the loss cannot see it
+
+The ramp_35m clone (4/96, 63 timeouts) does not hover -- its vertical feedback
+gain has the **wrong sign**:
+
+```
+                 d(throttle)/d(vz)        d(throttle)/d(alt)
+teacher               -0.98                    -0.047
+clone 5-10 m          +0.088                   +0.024
+clone 10-20 m         +0.306                   +0.010
+clone 20+ m           +0.247                   +0.008
+```
+
+Positive is positive feedback: with `d(az)/d(a0) = 0.504 m/s^2` the growth rate
+is +0.154/s, i.e. 47x over a 25 s episode. The measured trace does exactly that
+-- descends to 18 m, crosses vz=0 at t=9 s, runs the throttle to +0.68, climbs
+back to 55.6 m at +4.75 m/s.
+
+The throttle bias hypothesis was real but is NOT the cause: the +0.0152 bias
+(43 sigma) is 29x too small, and adding exactly it to the TEACHER's action
+changes nothing (23/24 still land).
+
+**Root cause is the expert data's geometry.** On the kept trajectories
+`corr(alt, vz) = -0.98`, and vz never exceeds -0.80 m/s -- not one ascending
+state. On that near-1D manifold MSE is nearly invariant to how throttle is
+apportioned between collinear regressors, so a sign-flipped partial is almost
+free. A per-transition validation split cannot see it either, because adjacent
+steps of one episode land on both sides. This is why MSE 0.068 and a mean action
+error of 0.0485 -- numbers that look like a good fit -- coexisted with 4%.
+
+**Fixed and verified.** `--dagger-iters` added to `train_bc_from_demos.py`:
+roll the clone out in the ANALYTIC env (which reproduces the Isaac failure at
+~20 s of CPU per 24 episodes), relabel every visited state with the teacher,
+aggregate, refit. Three iterations took `d/dvz` from +0.306 to **-0.96..-1.54**,
+i.e. the teacher's own gain. Noise injection alone does NOT work -- the teacher
+drags the state back onto the manifold and `corr(alt, vz)` stays at -0.98.
+
+`--gain-check` (on by default) finite-differences both gains per altitude band
+and REJECTS a positive one. It takes seconds and catches the entire defect class
+that the loss is blind to. Verified: it passes the DAgger clone and fires on
+`out/bc_ramp35.zip`. Note it also separates the two BC failures -- the
+orbit_descent clone's gains are all NEGATIVE (-1.2..-1.7), so that 0/96 is a
+different problem (42% teacher, 20 episodes, longer horizon).
+
+## Also fixed
+
+  - `info["action"]` is now written by both envs. `reward.py` read it and
+    nothing wrote it, so `_action_saturation_penalty` was identically zero --
+    which VOIDS the v34 experiment and the conclusion that the penalty "failed
+    and made things worse". That 8% was variance on a disabled term.
+  - the dead `obs[15]` slot (`leg_force_frac`, hardcoded 0.0 everywhere) now
+    carries TIME REMAINING. The envs truncate on the clock and charge 105
+    against a 225-450 landing bonus, so two bit-identical observations had
+    returns differing by ~105 on an unobservable variable. Caveat from the
+    audit: a clock is ALSO collinear with alt/vz on expert trajectories, so this
+    helps the MDP but does not by itself fix a BC gain sign.
+  - a `NameError` of mine: `step_wait` binds the batch as `a`, so the vec env's
+    `info["action"]` needed `a[i]`.
+
+## Clean bills of health (verified against SB3's own source, not from memory)
+
+  - episode boundary handling: `info["terminal_observation"]` is set BEFORE the
+    reset and SB3 reads exactly that key, so the critic never bootstraps across
+    a boundary
+  - terminated vs truncated: `TimeLimit.truncated` plumbed correctly, so a
+    timeout bootstraps and a crash does not
+  - observation normalization: one static `OBS_SCALE`, no `VecNormalize`,
+    identical element-for-element between the vec and single envs
+  - the landing criteria and spawn block are literally the same code (the vec
+    env imports them), byte-identical after normalizing away `[i]` indexing
+
+## Known, recorded, NOT yet fixed
+
+  1. **Replay buffer capacity is `buffer_size // n_envs` = 62,500 rows, not
+     1e6.** The demo-seeding comment is wrong by 16x, so demos WERE evicted --
+     which invalidates the earlier conclusion that demo bootstrapping did not
+     help.
+  2. **`left_tile` is both bootstrapped as a truncation and charged the timeout
+     penalty.** On some stages it is the dominant ending, so a large share of
+     terminal targets are extrapolations from edge-of-map states.
+  3. **Evaluation uses one fixed terrain (seed 7) for every episode** while
+     training regenerates it per reset. Every headline rate is a single-tile
+     measurement; more episodes do not average that out. Site flatness alone
+     caps ramp_20m at 91.5%.
+  4. **A warm start without `--save-buffer` refits the critic on 10k uniform
+     random transitions** before its first gradient step, because SB3 samples
+     randomly below `learning_starts` and the buffer was just reset.
+  5. **Rocks exist only in training** (vec env default 10/env, colliders the
+     contact test cannot see; a rock top sits 0.65*d above ground against a
+     0.05 m band). `--max-rocks-per-env 0` is effectively mandatory and was
+     passed on every run today, but the DEFAULT is 10 and run args are not
+     persisted next to checkpoints, so older runs are unauditable.
+  6. `env_spacing_m` is sized off the largest stage, so env 15 sits at
+     x ~ 37.8 km where float32 spacing is 3.9 mm -- 8% of the contact band.

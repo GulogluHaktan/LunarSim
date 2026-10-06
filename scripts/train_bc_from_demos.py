@@ -61,6 +61,26 @@ parser.add_argument("--include-failures", action="store_true",
                          "controller lands 20 of 48 on orbit_descent in real Isaac "
                          "(42%%), so an unfiltered dataset teaches the policy 28 "
                          "crashes alongside 20 landings.")
+parser.add_argument("--dagger-iters", type=int, default=0,
+                    help="DAgger iterations after the initial fit: roll the current "
+                         "clone out in the ANALYTIC env, relabel every state it "
+                         "visits with the ZemZev controller, aggregate, refit. This "
+                         "is the validated fix for the sign-flipped vertical gain "
+                         "(see the module docstring); measured 8 -> 12 -> 19 landings "
+                         "over three iterations, with timeouts vanishing exactly when "
+                         "the gain turns negative. The analytic env is used because it "
+                         "reproduces the Isaac failure (0/24, 19 timeouts) in ~20 s of "
+                         "CPU per 24 episodes.")
+parser.add_argument("--dagger-episodes", type=int, default=24,
+                    help="rollout episodes per DAgger iteration")
+parser.add_argument("--gain-check", action="store_true", default=True,
+                    help="after fitting, finite-difference d(throttle)/d(vz) and "
+                         "d(throttle)/d(alt) at the demo states and FAIL if either is "
+                         "positive in any altitude band. Positive d(a0)/d(vz) is "
+                         "positive feedback and the policy flies away; action MSE "
+                         "cannot see it (0.068 MSE / 0.0485 mean error coexisted with "
+                         "a +0.129 gain and a 4%% landing rate).")
+parser.add_argument("--no-gain-check", dest="gain_check", action="store_false")
 parser.add_argument("--device", type=str, default="cpu")
 parser.add_argument("--seed", type=int, default=0)
 args = parser.parse_args()
@@ -167,36 +187,175 @@ def main():
         latent = actor.latent_pi(feats)
         return actor.mu(latent)
 
-    best_val, best_state = float("inf"), None
-    n = len(x_tr)
-    for epoch in range(args.epochs):
-        actor.train()
-        idx = torch.randperm(n, device=args.device)
-        tot = 0.0
-        for i in range(0, n, args.batch_size):
-            b = idx[i:i + args.batch_size]
-            opt.zero_grad()
-            loss = loss_fn(forward_mean(x_tr[b]), tgt_tr[b])
-            loss.backward()
-            opt.step()
-            tot += float(loss) * len(b)
-        actor.eval()
-        with torch.no_grad():
-            val = float(loss_fn(forward_mean(x_va), tgt_va))
-            # the number that actually matters: error in the ACTION the env
-            # sees, which is what the landing criteria respond to
-            act_err = float((torch.tanh(forward_mean(x_va))
-                             - torch.tanh(tgt_va)).abs().mean())
-        if val < best_val:
-            best_val = val
-            best_state = {k: v.detach().clone() for k, v in actor.state_dict().items()}
-        if epoch % max(1, args.epochs // 20) == 0 or epoch == args.epochs - 1:
-            print(f"[bc] epoch {epoch:4d}  train {tot / n:.5f}  val {val:.5f}  "
-                  f"mean |da| {act_err:.4f}")
+    def gain_report(x_np):
+        """Finite-difference d(throttle)/d(vz) and d(throttle)/d(alt).
 
-    if best_state is not None:
-        actor.load_state_dict(best_state)
-        print(f"[bc] restored best val {best_val:.5f}")
+        This is the acceptance test the loss cannot replace. A clone fitted to
+        MSE 0.068 with a mean action error of 0.0485 -- numbers that look like a
+        good fit -- carried d(a0)/d(vz) = +0.129 where the teacher's is -0.98,
+        and +0.306 in the 10-20 m band. Positive is POSITIVE FEEDBACK: with
+        d(az)/d(a0) = 0.504 m/s^2 the growth rate is +0.154/s, i.e. 47x over a
+        25 s episode, and the measured rollout did exactly that -- descended to
+        18 m, crossed vz=0 at t=9 s, ran the throttle to +0.68 and climbed back
+        to 55.6 m at +4.75 m/s. It lands 4% of the time and never looks wrong
+        in the loss.
+
+        The cause is collinearity in expert data: on the kept trajectories
+        corr(alt, vz) = -0.98 and vz never exceeds -0.80 m/s, so there is not a
+        single ascending state. On that near-1D manifold MSE is nearly invariant
+        to how throttle is apportioned between alt and vz, and a sign-flipped
+        partial is almost free. A per-transition validation split cannot see it
+        either, because adjacent steps of one episode land on both sides.
+        """
+        from lunarsim.rl.obs_norm import OBS_SCALE
+        alt_i, vz_i = 2, 5
+        x = torch.as_tensor(x_np, device=args.device)
+        out = {}
+        for name, dim, phys_eps in (("vz", vz_i, 0.5), ("alt", alt_i, 1.0)):
+            h = phys_eps / float(OBS_SCALE[dim])   # perturb in PHYSICAL units
+            xp, xm = x.clone(), x.clone()
+            xp[:, dim] += h
+            xm[:, dim] -= h
+            with torch.no_grad():
+                dp = torch.tanh(forward_mean(xp))[:, 0]
+                dm = torch.tanh(forward_mean(xm))[:, 0]
+            out[name] = ((dp - dm) / (2.0 * phys_eps)).cpu().numpy()
+        alt_phys = x_np[:, alt_i] * float(OBS_SCALE[alt_i])
+        bands = [(0, 2), (2, 5), (5, 10), (10, 20), (20, 1e9)]
+        rows = []
+        for lo, hi in bands:
+            m = (alt_phys >= lo) & (alt_phys < hi)
+            if m.sum() < 20:
+                continue
+            rows.append((lo, hi, int(m.sum()),
+                         float(out["vz"][m].mean()), float(out["alt"][m].mean())))
+        return rows
+
+    def fit(x_tr, tgt_tr, x_va, tgt_va, epochs, tag=""):
+        best_val, best_state = float("inf"), None
+        n = len(x_tr)
+        for epoch in range(epochs):
+            actor.train()
+            idx = torch.randperm(n, device=args.device)
+            tot = 0.0
+            for i in range(0, n, args.batch_size):
+                b = idx[i:i + args.batch_size]
+                opt.zero_grad()
+                loss = loss_fn(forward_mean(x_tr[b]), tgt_tr[b])
+                loss.backward()
+                opt.step()
+                tot += float(loss) * len(b)
+            actor.eval()
+            with torch.no_grad():
+                val = float(loss_fn(forward_mean(x_va), tgt_va))
+                # the error in the ACTION the env sees. Worth printing, but see
+                # gain_report: this number cannot detect a sign-flipped gain.
+                act_err = float((torch.tanh(forward_mean(x_va))
+                                 - torch.tanh(tgt_va)).abs().mean())
+            if val < best_val:
+                best_val = val
+                best_state = {k: v.detach().clone() for k, v in actor.state_dict().items()}
+            if epoch % max(1, epochs // 10) == 0 or epoch == epochs - 1:
+                print(f"[bc]{tag} epoch {epoch:4d}  train {tot / n:.5f}  "
+                      f"val {val:.5f}  mean |da| {act_err:.4f}")
+        if best_state is not None:
+            actor.load_state_dict(best_state)
+            print(f"[bc]{tag} restored best val {best_val:.5f}")
+
+    fit(x_tr, tgt_tr, x_va, tgt_va, args.epochs)
+
+
+    # ---------------------------------------------------------------- #
+    # DAgger: relabel the states the CLONE actually visits.
+    # ---------------------------------------------------------------- #
+    # Plain behaviour cloning cannot fix the sign-flipped vertical gain, because
+    # the defect lives in the expert's own data geometry (see gain_report). The
+    # cure is to break the collinearity by visiting states the expert never
+    # does, which is exactly what the half-trained clone does when it flies
+    # away, and then asking the teacher what it would have done there.
+    # Measured over three iterations in this env: 8 -> 12 -> 19 landings, with
+    # d(a0)/d(vz) going +0.014 -> -0.883 -> -0.621 and timeouts vanishing
+    # precisely when the sign turned. Injecting action noise instead does NOT
+    # work: the teacher drags the state straight back onto the manifold, so
+    # corr(alt, vz) stays at -0.98.
+    if args.dagger_iters > 0:
+        from lunarsim.control.zemzev_controller import ZemZevController
+        from lunarsim.core.terrain.generate import generate_tile
+        from lunarsim.rl import AnalyticLanderEnv
+        from lunarsim.rl.curriculum import terrain_config
+
+        stage = STAGES_BY_NAME[args.stage]
+        params = stage.params
+        max_steps = int(params.max_episode_s / params.dt_s) + 5
+        agg_obs = [obs]
+        agg_act = [act]
+
+        for it in range(1, args.dagger_iters + 1):
+            new_obs, new_act = [], []
+            landed = timeouts = 0
+            for ep in range(args.dagger_episodes):
+                seed = 90000 + it * 1000 + ep
+                env = AnalyticLanderEnv(
+                    tile=generate_tile(terrain_config(stage, args.seed, 80)),
+                    params=params, seed=seed)
+                o, _ = env.reset(seed=seed)
+                ctrl = ZemZevController(params)
+                info = {}
+                for _ in range(max_steps):
+                    # label the state the CLONE is in with what the TEACHER
+                    # would do there -- the whole point of DAgger
+                    new_obs.append(np.asarray(o, dtype=np.float32))
+                    new_act.append(np.asarray(ctrl.act(env), dtype=np.float32))
+                    with torch.no_grad():
+                        a_clone = torch.tanh(forward_mean(
+                            torch.as_tensor(o, dtype=torch.float32,
+                                            device=args.device).unsqueeze(0)))[0]
+                    o, _, term, trunc, info = env.step(a_clone.cpu().numpy())
+                    if term or trunc:
+                        break
+                landed += bool(info.get("landed_safely"))
+                timeouts += bool(trunc and not term)
+            agg_obs.append(np.asarray(new_obs, dtype=np.float32))
+            agg_act.append(np.clip(np.asarray(new_act, dtype=np.float32),
+                                   -1.0 + 1e-6, 1.0 - 1e-6))
+            print(f"[dagger {it}] rollout: {landed}/{args.dagger_episodes} landed, "
+                  f"{timeouts} timeout, +{len(new_obs)} relabelled states")
+
+            all_o = np.concatenate(agg_obs)
+            all_a = np.concatenate(agg_act)
+            perm2 = np.random.default_rng(args.seed + it).permutation(len(all_o))
+            all_o, all_a = all_o[perm2], all_a[perm2]
+            nv = max(1, int(len(all_o) * args.val_frac))
+            xt = torch.as_tensor(all_o[nv:], device=args.device)
+            xv = torch.as_tensor(all_o[:nv], device=args.device)
+            tt = torch.atanh(torch.as_tensor(all_a[nv:], device=args.device)).clamp(-5.0, 5.0)
+            tv = torch.atanh(torch.as_tensor(all_a[:nv], device=args.device)).clamp(-5.0, 5.0)
+            fit(xt, tt, xv, tv, args.epochs, tag=f"[dagger {it}]")
+
+    # ---------------------------------------------------------------- #
+    # Gain sign acceptance test
+    # ---------------------------------------------------------------- #
+    rows = gain_report(obs)
+    print("[gain] d(throttle)/d(vz) and d(throttle)/d(alt), by altitude band:")
+    bad = []
+    for lo, hi, cnt, g_vz, g_alt in rows:
+        flag = ""
+        if g_vz > 0.0:
+            flag = "  <-- POSITIVE FEEDBACK"
+            bad.append((lo, hi, g_vz))
+        print(f"[gain]   {lo:4.0f}-{hi if hi < 1e8 else 999:<4.0f} m  n={cnt:5d}  "
+              f"d/dvz={g_vz:+7.3f}  d/dalt={g_alt:+7.4f}{flag}")
+    if bad:
+        msg = ("positive d(throttle)/d(vz) in " + str(len(bad)) + " band(s): "
+               + ", ".join(f"{lo:.0f}-{hi:.0f} m: {g:+.3f}" for lo, hi, g in bad)
+               + ". The policy will accelerate away from the ground instead of "
+                 "arresting. Action MSE cannot see this -- run with "
+                 "--dagger-iters 3 to break the collinearity in the expert data.")
+        if args.gain_check:
+            raise SystemExit("[gain] REJECTED: " + msg)
+        print("[gain] WARNING (check disabled): " + msg)
+    else:
+        print("[gain] OK: vertical feedback is negative in every band")
 
     # make the saved policy deterministic-ish: a cloned policy has no reason
     # to carry the wide exploration std SAC initialises, and a large pre-tanh
