@@ -57,6 +57,7 @@ from gymnasium import spaces
 from lunarsim.core.terrain.generate import Tile
 from lunarsim.core.vehicle.apollo_lm import ApolloLMSpecs, G0, leg_force_bounds_n, moment_of_inertia
 from lunarsim.rl.analytic_lander_env import LanderParams, _euler_to_quat
+from lunarsim.rl.action_map import action_to_throttle
 from lunarsim.rl.obs_norm import normalize_obs
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -408,7 +409,7 @@ class IsaacLanderEnv(gym.Env):
         p = self.params
         s = self.state
 
-        throttle = float(np.clip((action[0] + 1.0) / 2.0, 0.0, 1.0))
+        throttle = float(action_to_throttle(action[0]))
         pitch_cmd = float(np.clip(action[1], -1.0, 1.0))
         roll_cmd = float(np.clip(action[2], -1.0, 1.0))
         yaw_cmd = float(np.clip(action[3], -1.0, 1.0))
@@ -516,6 +517,14 @@ class IsaacLanderEnv(gym.Env):
                 "v_xy": float(np.clip(1.0 - v_xy / max(p.safe_landing_v_xy_m_s, 1e-6), 0.0, 1.0)),
                 "tilt": float(np.clip(1.0 - tilt / max(p.safe_landing_tilt_rad, 1e-6), 0.0, 1.0)),
                 "w": float(np.clip(1.0 - w / max(p.safe_landing_w_rad_s, 1e-6), 0.0, 1.0)),
+                # leg_diff is the FIFTH `landed_safely` criterion and was the
+                # only one missing here, so `_terminal_reward`'s quality average
+                # graded 4 of 5 and a touchdown rejected purely on footpad
+                # flatness reported margins that all looked comfortable -- the
+                # "CRASH with every printed number inside its limit" case
+                # diag_stage_landing_rate.py's own comment describes.
+                "leg_diff": float(np.clip(
+                    1.0 - leg_diff / max(p.safe_landing_max_leg_height_diff_m, 1e-6), 0.0, 1.0)),
             }
             _, leg_force_max_n = leg_force_bounds_n(self._specs, mass_kg, p.safe_landing_v_z_m_s, p.gravity_m_s2)
             ke_j = 0.5 * mass_kg * s["vz"] ** 2

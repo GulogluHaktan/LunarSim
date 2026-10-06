@@ -50,6 +50,7 @@ from stable_baselines3.common.vec_env.base_vec_env import VecEnv
 
 from lunarsim.core.terrain.generate import Tile
 from lunarsim.core.terrain.rocks import sample_height_at
+from lunarsim.rl.action_map import action_to_throttle
 from lunarsim.core.vehicle.apollo_lm import ApolloLMSpecs, G0, leg_force_bounds_n, moment_of_inertia
 from lunarsim.rl.analytic_lander_env import LanderParams, _euler_to_quat
 from lunarsim.rl.obs_norm import normalize_obs
@@ -341,7 +342,7 @@ class IsaacLanderVecEnv(VecEnv):
         n = self.num_envs
         a = self._actions
 
-        throttle = np.clip((a[:, 0] + 1.0) / 2.0, 0.0, 1.0)
+        throttle = action_to_throttle(a[:, 0])
         pitch_cmd, roll_cmd, yaw_cmd = a[:, 1].copy(), a[:, 2].copy(), a[:, 3].copy()
         throttle = np.where(s["fuel_kg"] <= 0.0, 0.0, throttle)
         no_rcs = s["rcs_fuel_kg"] <= 0.0
@@ -425,6 +426,14 @@ class IsaacLanderVecEnv(VecEnv):
                     "v_xy": float(np.clip(1.0 - v_xy / max(p.safe_landing_v_xy_m_s, 1e-6), 0.0, 1.0)),
                     "tilt": float(np.clip(1.0 - tilt / max(p.safe_landing_tilt_rad, 1e-6), 0.0, 1.0)),
                     "w": float(np.clip(1.0 - w / max(p.safe_landing_w_rad_s, 1e-6), 0.0, 1.0)),
+                    # leg_diff is the FIFTH `landed_safely` criterion and was the
+                    # only one missing here, so `_terminal_reward`'s quality average
+                    # graded 4 of 5 and a touchdown rejected purely on footpad
+                    # flatness reported margins that all looked comfortable -- the
+                    # "CRASH with every printed number inside its limit" case
+                    # diag_stage_landing_rate.py's own comment describes.
+                    "leg_diff": float(np.clip(
+                        1.0 - leg_diff / max(p.safe_landing_max_leg_height_diff_m, 1e-6), 0.0, 1.0)),
                 }
                 _, leg_force_max_n = leg_force_bounds_n(self._specs, mass_kg_all[i], p.safe_landing_v_z_m_s, p.gravity_m_s2)
                 ke_j = 0.5 * mass_kg_all[i] * s["vz"][i] ** 2

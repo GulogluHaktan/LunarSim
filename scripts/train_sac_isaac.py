@@ -82,8 +82,36 @@ parser.add_argument("--gamma", type=float, default=0.999,
                           "the SAC(...) call site: at dt_s=0.05 a gamma of 0.99 is a 5-second "
                           "horizon against 20-60 second episodes, which makes the terminal landing "
                           "bonus invisible and stalling the optimal policy.")
+parser.add_argument("--tau", type=float, default=0.001,
+                     help="SAC target-network Polyak rate. NOT SB3's 0.005 default -- see the REAL "
+                          "BUG note at the SAC(...) call site: 0.005 gives the target net a 200-step "
+                          "time constant, against the 1000-step bootstrap horizon gamma=0.999 implies. "
+                          "SB3's default is tuned for gamma=0.99, where 200 > 100 and the target is "
+                          "the SLOWER of the two; at our gamma that ordering inverts.")
+parser.add_argument("--ent-coef", type=str, default="0.05",
+                     help="SAC entropy temperature. NOT SB3's 'auto' default -- see the REAL BUG "
+                          "note at the SAC(...) call site: auto-tuning ran away from 0.635 to 6.6 "
+                          "over 268k steps and took critic_loss from 7e3 to 3e6 with it. 0.05 keeps "
+                          "the entropy term at ~9% of the measured Q spread (~1074 units), against the "
+                          "16x-of-spread the runaway reached; 0.01 was numerically safe but left the "
+                          "Q term outweighing entropy ~1e4:1, i.e. sigma->0 and SAC degenerates to TD3 "
+                          "without exploration noise -- the wrong side to err on for a task whose "
+                          "standing failure is never sampling a landing. Accepts a float, or "
+                          "'auto'/'auto_<init>' to hand control back to the tuner.")
+parser.add_argument("--checkpoint-every", type=int, default=0,
+                     help="also save a checkpoint every N timesteps, not just at stage end. "
+                          "MEASURED reason this exists: performance across runs goes up then "
+                          "DOWN (42%% -> 8%% on one stage with 500k more steps), and every stage "
+                          "result so far is the END of a run. If the peak is mid-run, saving only "
+                          "the last step systematically keeps the over-trained tail. 0 disables.")
 parser.add_argument("--headless", action="store_true", default=True)
 args = parser.parse_args()
+
+
+def _parse_ent_coef(raw: str):
+    """SB3 takes `ent_coef` as either the string 'auto'/'auto_<init>' or a
+    float. Keep both reachable from one CLI string."""
+    return raw if raw.startswith("auto") else float(raw)
 
 # MEASURED THIS SESSION (two throughput points off the same config, one
 # with --gradient-steps 1 and one with -1): at --n-envs 16 a rollout costs
@@ -147,9 +175,19 @@ def _seed_replay_buffer_from_demos(model: "SAC", demo_path: str, n_envs: int, n_
 
     obs, next_obs = data["obs"], data["next_obs"]
     actions, rewards, dones, truncated = data["actions"], data["rewards"], data["dones"], data["truncated"]
-    n_chunks = obs.shape[0] // n_envs  # the tail that doesn't fill a chunk is dropped
+    n_chunks = obs.shape[0] // n_envs
     if n_chunks == 0:
         raise SystemExit(f"{demo_path} holds only {obs.shape[0]} transitions, fewer than --n-envs={n_envs}")
+    # The transitions that do not fill a whole chunk have to go somewhere.
+    # Drop them off the FRONT, not the tail: a demo file is a concatenation
+    # of episodes, so its last rows are the last episode's final steps --
+    # i.e. a TERMINAL, the single most valuable row in the file and the
+    # entire reason for seeding. The first rows are release-condition
+    # states, of which there are 48 and which the online policy will
+    # re-sample constantly anyway. Measured: 35521 transitions at
+    # --n-envs 16 dropped exactly 1 row, and the seeding log duly reported
+    # "47 terminal transitions per repeat" against 48 episodes.
+    offset = obs.shape[0] - n_chunks * n_envs
 
     # REAL BUG FOUND (this session, a real 2M-step demo-bootstrapped training
     # run that still reached 0/16 landed_safely despite 39824 seeded demo
@@ -174,10 +212,10 @@ def _seed_replay_buffer_from_demos(model: "SAC", demo_path: str, n_envs: int, n_
     n_terminal = 0
     for _ in range(max(1, n_repeats)):
         for c in range(n_chunks):
-            sl = slice(c * n_envs, (c + 1) * n_envs)
+            sl = slice(offset + c * n_envs, offset + (c + 1) * n_envs)
             infos = [{"TimeLimit.truncated": bool(v)} for v in truncated[sl]]
             model.replay_buffer.add(obs[sl], next_obs[sl], actions[sl], rewards[sl], dones[sl], infos)
-        n_terminal = int(dones[: n_chunks * n_envs].sum())
+        n_terminal = int(dones[offset:].sum())
     print(f"seeded replay buffer with {n_chunks * n_envs * max(1, n_repeats)} demo transitions "
           f"({n_chunks} add() calls x {n_envs} lanes x {max(1, n_repeats)} repeats, "
           f"{n_terminal} terminal transitions per repeat) from {demo_path}")
@@ -272,8 +310,25 @@ def main():
                 # branch below for why that single number decided the
                 # outcome of every run so far.
                 model.gamma = args.gamma
+                # and the same for the entropy temperature. A checkpoint
+                # saved mid-runaway carries its own `log_ent_coef` tensor,
+                # so warm-starting from `out/sac_training_run_cal_v1` would
+                # silently resume at alpha~6.6 no matter what --ent-coef
+                # says. Only an auto-tuned checkpoint HAS that tensor, hence
+                # the guard.
+                # tau too: a checkpoint restores its own, and SB3's 0.005
+                # default is wrong for gamma=0.999 (see the --tau help).
+                model.tau = args.tau
+                _ec = _parse_ent_coef(args.ent_coef)
+                if not isinstance(_ec, str):
+                    import torch as _t
+                    model.ent_coef = _ec
+                    model.ent_coef_tensor = _t.tensor(float(_ec), device=model.device)
+                    model.ent_coef_optimizer = None
+                    model.log_ent_coef = None
                 print(f"warm-started from {args.warm_start} "
-                      f"(gamma={model.gamma}, gradient_steps={model.gradient_steps})")
+                      f"(gamma={model.gamma}, gradient_steps={model.gradient_steps}, "
+                      f"ent_coef={args.ent_coef})")
                 if not args.keep_buffer:
                     model.replay_buffer.reset()
             else:
@@ -323,8 +378,38 @@ def main():
                 # 0.999 = a 1000-step / 50-second horizon, matched to the
                 # episode length. If `max_episode_s` or `dt_s` ever change,
                 # this must move with them.
+                # REAL BUG FOUND (2026-10-02, run `out/train_cal_v1.log`):
+                # SB3's `ent_coef="auto"` default diverged on this task.
+                # Measured over 268k steps: ent_coef 0.635 -> 6.6 and
+                # critic_loss 7.15e3 -> 3.03e6, both monotonic and still
+                # climbing at the end. Mechanism: alpha is tuned only
+                # against `target_entropy` = -dim(A) = -4, so once a large
+                # reward scale pulls the policy deterministic, alpha climbs
+                # to push back -- and alpha re-enters the critic target
+                # (`Q = r + gamma*(Q' - alpha*log_pi)`), which at
+                # gamma=0.999 compounds over a ~1000-step horizon and
+                # inflates Q, which inflates the gradient. A feedback loop.
+                # reward.py's 10x scale-down addresses the cause; pinning
+                # alpha removes the loop outright. 0.01 was sized against
+                # the measured per-step reward on the winning controller
+                # run (mean |r| = 0.0483), so the entropy term
+                # `alpha*|target_entropy|` = 0.04 sits at ~0.8x the task
+                # signal per step -- real exploration pressure, ~8% of the
+                # discounted terminal over a typical episode, and 660x
+                # below where the tuner ran to.
+                # REAL BUG FOUND (2026-10-04 audit): SB3's default tau=0.005
+                # gives the target network a 1/tau = 200 gradient-step time
+                # constant. At gamma=0.999 the bootstrap horizon is
+                # 1/(1-gamma) = 1000 steps, so the target moves 5x FASTER
+                # than the horizon it exists to stabilise and bootstrap
+                # error chases itself. SB3's default is calibrated for its
+                # own gamma=0.99 default (horizon 100), where the target is
+                # the slower of the two by 2x -- the stable ordering. This
+                # is an independent divergence driver from the entropy
+                # runaway and pinning alpha does not address it.
                 model = SAC("MlpPolicy", venv, verbose=1, device=args.torch_device,
-                             gamma=args.gamma, gradient_steps=args.gradient_steps)
+                             gamma=args.gamma, gradient_steps=args.gradient_steps,
+                             tau=args.tau, ent_coef=_parse_ent_coef(args.ent_coef))
         else:
             model.set_env(venv)
             if not args.keep_buffer:
@@ -347,7 +432,14 @@ def main():
         if args.demo_path and first_model_creation:
             _seed_replay_buffer_from_demos(model, args.demo_path, args.n_envs, args.demo_repeat)
 
-        model.learn(total_timesteps=args.steps_per_stage, reset_num_timesteps=False)
+        cb = None
+        if args.checkpoint_every > 0:
+            from stable_baselines3.common.callbacks import CheckpointCallback
+            cb = CheckpointCallback(
+                save_freq=max(1, args.checkpoint_every // max(1, args.n_envs)),
+                save_path=f"{args.out_dir}/snapshots",
+                name_prefix=f"{stage.name}")
+        model.learn(total_timesteps=args.steps_per_stage, reset_num_timesteps=False, callback=cb)
         out_path = f"{args.out_dir}/sac_lunar_lander_isaac_{stage.name}.zip"
         model.save(out_path)
         print(f"saved: {out_path}")

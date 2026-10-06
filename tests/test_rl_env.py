@@ -4,6 +4,7 @@ import pytest
 from lunarsim.core.terrain.config import TerrainConfig
 from lunarsim.core.terrain.generate import generate_tile
 from lunarsim.rl import AnalyticLanderEnv, LanderParams
+from lunarsim.rl.action_map import throttle_to_action
 
 
 def _flat_tile():
@@ -113,7 +114,13 @@ def test_gentle_descent_lands_safely():
     mass0 = params.dry_mass_kg + params.initial_fuel_kg
     weight = mass0 * params.gravity_m_s2
     hover_throttle = (weight - params.dps_thrust_min_n) / (params.dps_thrust_max_n - params.dps_thrust_min_n)
-    action = np.array([2 * (hover_throttle * 0.97) - 1.0, 0.0, 0.0, 0.0])
+    # `throttle_to_action`, not a hand-rolled `2*t - 1`: the env's action[0]
+    # -> throttle curve is not linear (see lunarsim/rl/action_map.py), and an
+    # inverse written out here is just one more copy to drift. This caught it
+    # for real -- under the new curve the old expression asked for throttle
+    # 0.4951 instead of 0.4757, close enough to hover that the vehicle no
+    # longer reached the ground inside the episode.
+    action = np.array([throttle_to_action(hover_throttle * 0.97), 0.0, 0.0, 0.0])
     landed_safely = False
     for _ in range(1200):
         _, _, terminated, truncated, info = env.step(action)

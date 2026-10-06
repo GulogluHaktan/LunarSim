@@ -112,19 +112,127 @@ class Stage:
 STAGES = [
     Stage(
         name="ramp_20m",
-        tile_size_m=60.0,
+        # 60 -> 120 m (2026-10-05). MEASURED: tiles were sized for the drift
+        # during a ballistic FALL, but episodes run ~4x the fall time, so a
+        # vehicle that has not yet learned to brake laterally leaves the tile
+        # by construction -- and `out_of_tile` truncates, so it never reaches
+        # the ground and can never discover the landing bonus. The
+        # sparse-reward trap was being enforced by the tile size.
+        #   usable lateral room (half-width - footpad margin - spawn radius)
+        #     = 30 - 4.7 - 10 = 15.3 m
+        #   drift over a full 20 s episode at the 2 m/s release = 40 m
+        # Measured consequence: 14/16 ramp_20m episodes ended `left_tile`.
+        # At 120 m the usable room is 45.3 m, which covers it. Grid stays at
+        # 80, so resolution is 1.5 m -- no PhysX cost.
+        # The same mismatch exists at every other stage (ramp_50m 90.3 m
+        # usable vs 240 m of episode drift, orbit_descent 755 vs 1800); they
+        # are left alone for now because a competent policy brakes early and
+        # the ZemZev demos never leave any tile (0/48), but a from-scratch
+        # policy on those stages will hit the same wall.
+        tile_size_m=120.0,
         params=LanderParams(
             spawn_altitude_m=20.0, spawn_xy_radius_m=10.0,
-            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(0.0, 2.0),
+            # MEASURED 2026-10-05, and it was the wall seven training runs
+            # hit: released at vz=0 a RANDOM policy touches the ground
+            # 0/40 times -- 40/40 time out instead. The vehicle's
+            # thrust-to-weight at the centre of the action box is 1.0159,
+            # so "do nothing", which is exactly an untrained policy's mean
+            # action, IS a hover. Nothing ever reaches the ground, so the
+            # terminal reward is never sampled and cannot be learned, no
+            # matter what it says.
+            # Released at vz=-2.0 the same random policy touches down
+            # 40/40, at a median severity of 1.67x the vz limit and a best
+            # of 1.16x -- i.e. the success region is immediately adjacent
+            # to random behaviour, and `crash_severity` grades every metre
+            # per second it shaves off. The deleted `hover_only_easy`
+            # stage, which this file's history records as "presumed
+            # solved", used exactly this value; that is why it worked.
+            spawn_v_z_m_s=-2.0, spawn_horizontal_speed_m_s=(0.0, 2.0),
             max_episode_s=20.0,
         ),
     ),
     Stage(
+        # INSERTED 2026-10-05. ramp_20m -> ramp_50m changed BOTH dimensions
+        # at once -- altitude 2.5x and release lateral speed 4x -- and the
+        # policy that lands 83% on ramp_20m scored 1/16 and 0/16 there, with
+        # lateral speed the binding criterion both times. That is the same
+        # "cliff, not a ramp" defect this file records for the curriculum
+        # this ramp replaced.
+        # Lateral is the hard dimension (it was also the binding criterion
+        # on 10 of 12 touchdowns at ramp_20m), so ramp it alone first, at an
+        # altitude the policy has already solved. Budget check: descent
+        # 11.5 s + bleeding 5 m/s at the ~20 deg tilt the policy uses
+        # (8.5 s), partially overlapped, needs ~14.5 s against 20.
+        name="ramp_20m_fast",
+        # 120 -> 260 m (2026-10-06). This stage was created with ramp_20m's
+        # tile and inherited the same mismatch the moment its release speed
+        # went to 5 m/s: usable lateral room 45.3 m against 100 m of drift
+        # over a 20 s episode. The 42% measured on it was scored under that
+        # handicap.
+        tile_size_m=260.0,
+        params=LanderParams(
+            spawn_altitude_m=20.0, spawn_xy_radius_m=10.0,
+            spawn_v_z_m_s=-2.0, spawn_horizontal_speed_m_s=(2.0, 5.0),
+            max_episode_s=20.0,
+        ),
+    ),
+    Stage(
+        # INSERTED 2026-10-06, same reasoning that produced ramp_20m_fast:
+        # ramp_20m_fast -> ramp_50m changed altitude 2.5x AND release speed
+        # 1.6x at once, and ramp_50m managed only 2/16 even after its
+        # reachability was fixed. This stage moves ALTITUDE alone (20 -> 35 m)
+        # at ramp_20m_fast's own 2-5 m/s.
+        # Every number below is derived from the three rules this file now
+        # records, not picked:
+        #   budget 25 s     -> needs h0/T = 1.40 m/s of average descent
+        #   vz0 -2.8        =  2x that, and inside the 4.61 m/s envelope at
+        #                      35 m, so the episode does not start in penalty
+        #   drift 5*25=125 m -> tile >= 2*(125 + 4.7 + 15) = 289 -> 320 m
+        name="ramp_35m",
+        tile_size_m=320.0,
+        params=LanderParams(
+            spawn_altitude_m=35.0, spawn_xy_radius_m=15.0,
+            spawn_v_z_m_s=-2.8, spawn_horizontal_speed_m_s=(2.0, 5.0),
+            max_episode_s=25.0,
+        ),
+    ),
+    Stage(
         name="ramp_50m",
-        tile_size_m=240.0,
+        # 240 -> 600 m (2026-10-06). The random-policy probe on this stage
+        # came back `land 0, touchdown 2, timeout 16, LEFT_TILE 22` out of 40:
+        # 55% of episodes end by flying off the map before anything can be
+        # learned. Same blocker ramp_20m had, same cause -- the tile is sized
+        # for drift during a ballistic FALL (63 m) while the episode runs 30 s,
+        # which at the 8 m/s release is 240 m of drift against 90.3 m of usable
+        # lateral room (half-width minus footpad margin minus spawn radius).
+        # 600 m gives 270 m of room. Grid stays 80, so cells are 7.5 m and the
+        # 9.4 m footpad span spans ~1.25 of them -- leg_diff becomes nearly
+        # trivial, which is acceptable only because it already passes ~100% of
+        # the time on training terrain; revisit with --terrain-grid-n if that
+        # stops being true.
+        tile_size_m=600.0,
         params=LanderParams(
             spawn_altitude_m=50.0, spawn_xy_radius_m=25.0,
-            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(2.0, 8.0),
+            # Bootstrap descent, sized at ~2x h0/max_episode_s (2026-10-06).
+            # The first version of this TAPERED the value down as the
+            # curriculum climbed, on the reasoning that later stages inherit
+            # a policy that already descends. That was backwards and the
+            # random-policy probe caught it: reachability needs AT LEAST
+            # h0/T of average descent, and h0 grows faster than the budget
+            # does, so the requirement rises stage to stage while I was
+            # lowering the help.
+            #   stage        h0/T needed   was given
+            #   ramp_50m        1.67 m/s     -1.5   <- unreachable
+            #   ramp_100m       2.50         -1.0
+            #   ramp_150m       3.00         -0.5
+            # Measured at ramp_50m with -1.5: a random policy gets 0/40
+            # touchdowns, 40/40 timeouts, median final altitude 18.7 m --
+            # the same unreachable-goal signature ramp_20m had at vz=0.
+            # These values stay INSIDE the descent envelope (5.52 m/s at
+            # 50 m, 7.80 at 100), so an episode does not start in penalty.
+            # orbit_descent keeps 0.0: it is the real scenario, an orbital
+            # release, and by then the policy has to descend on its own.
+            spawn_v_z_m_s=-3.0, spawn_horizontal_speed_m_s=(2.0, 8.0),
             max_episode_s=30.0,
         ),
     ),
@@ -133,7 +241,26 @@ STAGES = [
         tile_size_m=640.0,
         params=LanderParams(
             spawn_altitude_m=100.0, spawn_xy_radius_m=50.0,
-            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(6.0, 16.0),
+            # Bootstrap descent, sized at ~2x h0/max_episode_s (2026-10-06).
+            # The first version of this TAPERED the value down as the
+            # curriculum climbed, on the reasoning that later stages inherit
+            # a policy that already descends. That was backwards and the
+            # random-policy probe caught it: reachability needs AT LEAST
+            # h0/T of average descent, and h0 grows faster than the budget
+            # does, so the requirement rises stage to stage while I was
+            # lowering the help.
+            #   stage        h0/T needed   was given
+            #   ramp_50m        1.67 m/s     -1.5   <- unreachable
+            #   ramp_100m       2.50         -1.0
+            #   ramp_150m       3.00         -0.5
+            # Measured at ramp_50m with -1.5: a random policy gets 0/40
+            # touchdowns, 40/40 timeouts, median final altitude 18.7 m --
+            # the same unreachable-goal signature ramp_20m had at vz=0.
+            # These values stay INSIDE the descent envelope (5.52 m/s at
+            # 50 m, 7.80 at 100), so an episode does not start in penalty.
+            # orbit_descent keeps 0.0: it is the real scenario, an orbital
+            # release, and by then the policy has to descend on its own.
+            spawn_v_z_m_s=-4.0, spawn_horizontal_speed_m_s=(6.0, 16.0),
             max_episode_s=40.0,
         ),
     ),
@@ -142,7 +269,26 @@ STAGES = [
         tile_size_m=1200.0,
         params=LanderParams(
             spawn_altitude_m=150.0, spawn_xy_radius_m=65.0,
-            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(10.0, 24.0),
+            # Bootstrap descent, sized at ~2x h0/max_episode_s (2026-10-06).
+            # The first version of this TAPERED the value down as the
+            # curriculum climbed, on the reasoning that later stages inherit
+            # a policy that already descends. That was backwards and the
+            # random-policy probe caught it: reachability needs AT LEAST
+            # h0/T of average descent, and h0 grows faster than the budget
+            # does, so the requirement rises stage to stage while I was
+            # lowering the help.
+            #   stage        h0/T needed   was given
+            #   ramp_50m        1.67 m/s     -1.5   <- unreachable
+            #   ramp_100m       2.50         -1.0
+            #   ramp_150m       3.00         -0.5
+            # Measured at ramp_50m with -1.5: a random policy gets 0/40
+            # touchdowns, 40/40 timeouts, median final altitude 18.7 m --
+            # the same unreachable-goal signature ramp_20m had at vz=0.
+            # These values stay INSIDE the descent envelope (5.52 m/s at
+            # 50 m, 7.80 at 100), so an episode does not start in penalty.
+            # orbit_descent keeps 0.0: it is the real scenario, an orbital
+            # release, and by then the policy has to descend on its own.
+            spawn_v_z_m_s=-5.0, spawn_horizontal_speed_m_s=(10.0, 24.0),
             max_episode_s=50.0,
         ),
     ),

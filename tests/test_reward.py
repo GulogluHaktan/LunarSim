@@ -142,112 +142,98 @@ def _step_reward(reward_fn, params, alt_m, **state_overrides):
     })
 
 
-def test_climbing_costs_more_than_hovering_which_costs_more_than_descending():
-    """Regression test for the sign-blind altitude gate (see
-    `altitude_vz_gate_k`'s field comment). `_braking_ratio` squares vz, so
-    the gate used to open identically for a fast CLIMB and a fast descent,
-    and -- because every other vz-dependent term is also even in vz -- the
-    whole per-step shaping sum was an even function of vz. Measured before
-    the fix at alt=100 m: cost(vz=-10) == cost(vz=+10) == 249.63, both less
-    than half of cost(vz=0) == 507.75, i.e. rocketing away was strictly
-    cheaper than holding station. The ordering asserted here is the whole
-    point of the term: going up must never be cheaper than standing still.
+def test_climbing_costs_more_than_hovering_and_overspeed_costs_more_than_in_envelope():
+    """The two degenerate modes this project measured, in one test.
+
+    Both were real: policies that climbed away under full throttle to
+    680-1372 m, and policies that free-fell into the ground at 7.6x the
+    touchdown limit. The rewrite answers both with one envelope -- vertical
+    speed must be a descent, and no faster than `profile_c*sqrt(alt)` --
+    so the costs have to order climb > hover == in-envelope < overspeed.
+    Hovering and a legal descent being EQUAL per step is deliberate: what
+    makes the vehicle go down is the flat time cost, not an altitude term.
+    An altitude term is what made diving optimal before (corr(episode
+    length, shaping) = -0.927, i.e. it scored duration, not quality).
     """
-    reward_fn = make_apollo_reward_fn(RewardWeights())
+    from lunarsim.rl.reward import _descent_envelope_penalty, descent_envelope_m_s
+
+    w = RewardWeights()
+    alt = 20.0
+    env_v = descent_envelope_m_s(w, alt)
+
+    climbing = _descent_envelope_penalty(w, alt, +2.0)
+    hovering = _descent_envelope_penalty(w, alt, 0.0)
+    in_envelope = _descent_envelope_penalty(w, alt, -0.5 * env_v)
+    overspeed = _descent_envelope_penalty(w, alt, -2.0 * env_v)
+
+    assert hovering == in_envelope == 0.0
+    assert climbing > hovering
+    assert overspeed > hovering
+    # and the faster you overshoot the envelope, the worse it gets -- the
+    # old braking term saturated instead, leaving no gradient to brake on
+    assert _descent_envelope_penalty(w, alt, -3.0 * env_v) > overspeed
+
+
+def test_descent_envelope_follows_the_measured_controller_profile():
+    """The envelope's sqrt shape is not an assumption. The ZemZev
+    controller, which lands on real Isaac Sim, flies vz = -0.276*sqrt(alt)
+    with a spread of 0.275-0.278 from 198 m down to 10 m over 5360
+    telemetry points. The envelope has to be that shape and has to leave
+    the proven profile INSIDE it at every altitude -- a reward that
+    penalises the one trajectory known to work cannot teach it.
+    """
+    from lunarsim.rl.reward import _descent_envelope_penalty, descent_envelope_m_s
+
+    w = RewardWeights()
+    for alt in (200.0, 100.0, 20.0, 5.0, 1.0):
+        controller_vz = -0.276 * alt ** 0.5
+        assert abs(controller_vz) < descent_envelope_m_s(w, alt)
+        assert _descent_envelope_penalty(w, alt, controller_vz) == 0.0
+
+    # and it must bring the vehicle in under the touchdown limit on its own
+    assert descent_envelope_m_s(w, 1.0) < LanderParams().safe_landing_v_z_m_s
+
+
+def test_descent_envelope_is_continuous_through_zero_vertical_speed():
+    """The term it replaces had a real discontinuity here: going from
+    vz=-1e-7 to -1e-3 moved its time-to-ground estimate 15.71 s -> 200000 s
+    and the penalty 400 -> 0, so a stalled vehicle shed the whole term by
+    sinking 1 cm/s. Nothing may be gained by creeping across vz=0.
+    """
+    from lunarsim.rl.reward import _descent_envelope_penalty
+
+    w = RewardWeights()
+    vals = [_descent_envelope_penalty(w, 200.0, vz)
+            for vz in (-1e-3, -1e-7, 0.0, 1e-7, 1e-3)]
+    assert max(vals) - min(vals) < 1e-3
+
+
+def test_horizontal_speed_penalty_depends_on_nothing_but_horizontal_speed():
+    """The term this replaces coupled lateral speed to the vertical
+    channel through a time-to-ground estimate, which let the penalty
+    collapse to zero for a vehicle that was barely sinking. Lateral speed
+    is bad near the ground whatever the vertical channel is doing.
+    """
+    from lunarsim.rl.reward import _horizontal_speed_penalty
+
+    w = RewardWeights()
+    assert _horizontal_speed_penalty(w, 10.0) > _horizontal_speed_penalty(w, 1.0)
+    assert _horizontal_speed_penalty(w, 0.0) == 0.0
+
+
+def test_climbing_away_is_never_cheaper_than_staying_put():
+    """The measured exploit, end to end: a policy climbed from 198 m to
+    350 m+ under throttle 0.92-0.97 and sat there, because at the time
+    climbing was cheaper than holding station. Checked on the whole
+    per-step shaping sum, not one term, since that is what the policy
+    actually optimises.
+    """
     params = LanderParams()
+    reward_fn = make_apollo_reward_fn(RewardWeights())
 
-    climb = _step_reward(reward_fn, params, 100.0, vz=+10.0)
-    hover = _step_reward(reward_fn, params, 100.0, vz=0.0)
-    descend = _step_reward(reward_fn, params, 100.0, vz=-10.0)
-
-    assert climb < hover < descend
-
-
-def test_altitude_gate_descent_side_is_unchanged_by_the_climb_fix():
-    """The gate exists to stop the 'just dive straight in' failure, so the
-    fix above must not weaken it on the descent side -- only on the climb
-    side. A fast descent must still relax the descend incentive relative to
-    hovering (that is what makes the braking term the dominant signal once
-    vz is eating into the stopping budget)."""
-    from lunarsim.rl.reward import _altitude_penalty, _braking_ratio
-
-    w = RewardWeights()
-    p = LanderParams()
-    ratio = _braking_ratio(w, 100.0, -10.0, 15103.0, p.dps_thrust_max_n, p.gravity_m_s2)
-    gated = _altitude_penalty(w, 100.0, ratio)
-    ungated = _altitude_penalty(w, 100.0, 0.0)
-    assert gated < ungated
-
-
-def test_time_to_ground_is_continuous_through_zero_vertical_speed():
-    """Regression test for the two-branch `_time_to_ground_s` (see its
-    docstring). The old descending branch was `alt/|vz|`, unbounded as
-    |vz| -> 0, so at alt=200 m tgo jumped 15.71 s -> 200000 s between
-    vz=-1e-7 and vz=-1e-3, and `_xy_braking_envelope_penalty` collapsed
-    400.00 -> 0.00 across that same hair's breadth: a stalled vehicle shed
-    the entire horizontal-braking penalty by sinking one cm/s."""
-    from lunarsim.rl.reward import _time_to_ground_s
-
-    g = LanderParams().gravity_m_s2
-    at_zero = _time_to_ground_s(200.0, 0.0, g, 2.0)
-
-    # exactly the free-fall-from-rest value the old vz>=0 branch returned
-    assert at_zero == pytest.approx(float(np.sqrt(2.0 * 200.0 / g)), rel=1e-9)
-
-    for vz in (-1e-3, -1e-2, -0.1, -1.0):
-        assert _time_to_ground_s(200.0, vz, g, 2.0) < at_zero
-    for vz in (+1e-3, +1e-2, +0.1, +1.0):
-        assert _time_to_ground_s(200.0, vz, g, 2.0) > at_zero
-
-    # continuity: no step change across vz=0
-    left = _time_to_ground_s(200.0, -1e-6, g, 2.0)
-    right = _time_to_ground_s(200.0, +1e-6, g, 2.0)
-    assert abs(left - right) < 1e-3
-
-
-def test_horizontal_braking_penalty_does_not_collapse_when_barely_sinking():
-    """The behavioural half of the test above: a vehicle carrying 25 m/s of
-    horizontal speed at 200 m must not be able to zero out the horizontal
-    braking term by starting a 1 cm/s sink."""
-    from lunarsim.rl.reward import _xy_braking_envelope_penalty, _xy_braking_ratio
-
-    w = RewardWeights()
-    p = LanderParams()
-
-    def penalty(vz):
-        ratio = _xy_braking_ratio(w, 200.0, vz, 25.0, 15103.0,
-                                   p.dps_thrust_max_n, p.gravity_m_s2)
-        return _xy_braking_envelope_penalty(w, ratio)
-
-    hanging = penalty(0.0)
-    barely_sinking = penalty(-0.01)
-    assert hanging > 0.0
-    assert barely_sinking == pytest.approx(hanging, rel=0.05)
-
-
-def test_climbing_away_is_not_cheaper_than_staying_put_on_the_xy_braking_term():
-    """The old `_time_to_ground_s` used free-fall-from-rest for vz>=0, so
-    climbing lengthened tgo and made the horizontal-braking term CHEAPER
-    the further the vehicle ran away (400 at 200 m down to 63.6 at 1372 m).
-    The ballistic solve keeps climbing expensive in the only sense this
-    term can express: it must not pay to leave."""
-    from lunarsim.rl.reward import _xy_braking_envelope_penalty, _xy_braking_ratio
-
-    w = RewardWeights()
-    p = LanderParams()
-
-    def penalty(alt, vz):
-        ratio = _xy_braking_ratio(w, alt, vz, 25.0, 15103.0,
-                                   p.dps_thrust_max_n, p.gravity_m_s2)
-        return _xy_braking_envelope_penalty(w, ratio)
-
-    # the full per-step sum is what actually has to order correctly, and
-    # `_altitude_penalty` is what carries the climb deterrent -- assert the
-    # combined behaviour rather than this one term in isolation.
-    reward_fn = make_apollo_reward_fn(w)
-    low = _step_reward(reward_fn, p, 200.0, vz=+20.0, vx=25.0)
-    high = _step_reward(reward_fn, p, 1372.0, vz=+20.0, vx=25.0)
-    assert high < low
+    holding = _step_reward(reward_fn, params, 100.0, vz=0.0)
+    climbing = _step_reward(reward_fn, params, 100.0, vz=5.0)
+    assert climbing < holding
 
 
 def test_spinning_is_penalized_and_yaw_rate_is_not_free():

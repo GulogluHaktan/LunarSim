@@ -64,6 +64,7 @@ from lunarsim.core.terrain.generate import Tile
 from lunarsim.core.terrain.rocks import sample_height_at
 from lunarsim.core.vehicle.apollo_lm import ApolloLMSpecs, G0, leg_force_bounds_n, moment_of_inertia
 from lunarsim.rl.obs_norm import normalize_obs
+from lunarsim.rl.action_map import action_to_throttle
 
 _SPECS = ApolloLMSpecs()
 
@@ -268,7 +269,7 @@ class AnalyticLanderEnv(gym.Env):
         p = self.params
         s = self.state
 
-        throttle = float(np.clip((action[0] + 1.0) / 2.0, 0.0, 1.0))
+        throttle = float(action_to_throttle(action[0]))
         pitch_cmd = float(np.clip(action[1], -1.0, 1.0))
         roll_cmd = float(np.clip(action[2], -1.0, 1.0))
         yaw_cmd = float(np.clip(action[3], -1.0, 1.0))

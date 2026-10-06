@@ -96,6 +96,7 @@ from pxr import Gf, PhysxSchema, UsdGeom, UsdPhysics, UsdShade
 sys.path.insert(0, args_cli.lunarsim_root)
 
 from lunarsim.adapters.isaac.heightfield import (
+from lunarsim.rl.action_map import action_to_throttle  # noqa: E402
     add_heightfield_collision, apply_regolith_physics_material, build_render_mesh,
 )
 from lunarsim.adapters.isaac.isaac_lander_env import (
@@ -473,7 +474,7 @@ with open(telemetry_path, "w", newline="") as tf, \
         }
         if step % decision_stride == 0:
             action = controller.act(state_view)
-        throttle = float(np.clip((action[0] + 1.0) / 2.0, 0.0, 1.0))
+        throttle = float(action_to_throttle(action[0]))
         pitch_cmd = float(np.clip(action[1], -1.0, 1.0))
         roll_cmd = float(np.clip(action[2], -1.0, 1.0))
         yaw_cmd = float(np.clip(action[3], -1.0, 1.0))

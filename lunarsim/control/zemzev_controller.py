@@ -76,6 +76,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from lunarsim.rl.analytic_lander_env import AnalyticLanderEnv, LanderParams
+from lunarsim.rl.action_map import throttle_to_action
 
 
 @dataclass
@@ -368,7 +369,12 @@ class ZemZevController:
         roll_cmd = float(np.clip(roll_cmd, -1.0, 1.0))
         yaw_cmd = float(np.clip(yaw_cmd, -1.0, 1.0))
 
-        throttle_norm = 2.0 * (thrust_mag_n - p.dps_thrust_min_n) / (p.dps_thrust_max_n - p.dps_thrust_min_n) - 1.0
-        throttle_norm = float(np.clip(throttle_norm, -1.0, 1.0))
+        # The env's action[0] -> throttle curve is NOT linear any more (see
+        # lunarsim/rl/action_map.py for the measurement that motivated it), so
+        # inverting a linear curve here would hand the env a different thrust
+        # than this controller just solved for -- silently, and worst at the
+        # small corrections near hover where the curve differs most.
+        throttle_frac = (thrust_mag_n - p.dps_thrust_min_n) / (p.dps_thrust_max_n - p.dps_thrust_min_n)
+        throttle_norm = float(throttle_to_action(float(np.clip(throttle_frac, 0.0, 1.0))))
 
         return np.array([throttle_norm, pitch_cmd, roll_cmd, yaw_cmd], dtype=np.float32)
