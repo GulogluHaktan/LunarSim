@@ -354,6 +354,23 @@ class RewardWeights:
     # in this file.
     action_saturation_k: float = 0.0
 
+    # UNIFORM scale on the finished reward, shaping AND terminal together.
+    #
+    # `reward_scale` above applies to the shaping only, deliberately, so that
+    # the terminal can outweigh the sum of hundreds of shaping steps. That
+    # argument is about the RATIO between them and a uniform factor preserves it
+    # exactly -- what it changes is the numeric range the critic has to fit.
+    #
+    # Measured why that matters: per-step reward here is ~0.5 while the terminal
+    # is -450..+450, so episode returns are O(+-400). At gamma=0.998 over ~500
+    # steps the critic must carry a +-450 jump back through the whole episode,
+    # and with an MSE loss over that range it diverged outright -- Q ran to 1972
+    # while actual returns sat at -429. Standard continuous-control benchmarks
+    # keep returns O(1-10); this was two orders of magnitude outside that.
+    #
+    # 1.0 reproduces every number measured before this existed.
+    reward_total_scale: float = 1.0
+
     reward_scale: float = 0.00025
 
 
@@ -514,7 +531,7 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
             # `truncated` keep the previous behaviour.
             if info.get("timed_out", True):
                 r -= w.timeout_penalty
-        return float(r)
+        return float(r * w.reward_total_scale)
 
     return reward_fn
 

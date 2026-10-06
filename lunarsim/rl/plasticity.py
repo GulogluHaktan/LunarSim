@@ -347,3 +347,55 @@ class ActorLearningRateCallback(BaseCallback):  # type: ignore[misc]
 
     def _on_step(self) -> bool:
         return True
+
+
+class PolicyDelayCallback(BaseCallback):  # type: ignore[misc]
+    """Update the actor once every `delay` gradient steps (TD3's policy_delay).
+
+    This is the two-timescale condition implemented as a RATE of updates rather
+    than a learning rate, and the distinction turned out to be the whole point.
+    Lowering the shared learning rate does not slow the actor the way it looks
+    like it should, because Adam normalises gradient magnitude: each step moves
+    parameters by roughly `lr` regardless of the gradient, so the 10,000 actor
+    updates that follow a release (gradient_steps=-1 with 16 envs gives 16 per
+    vec step) displace the parameters by about 10,000 * lr. At lr 1e-5 that is
+    0.1 in parameter space, which is enormous for weights of order 0.1-1 -- and
+    it is why making the actor "30x slower" changed nothing.
+
+    Measured, with everything else already fixed: a policy landing 52% with the
+    actor frozen drops to 3% in the first window after release and 0% in the
+    second, at every learning rate and critic-ensemble size tried.
+
+    Implemented by wrapping the actor optimizer's `step`, which SB3 cannot
+    overwrite (unlike param-group learning rates, which `_update_learning_rate`
+    rewrites at the top of every `train()`), and which is not part of what
+    `save()` pickles.
+    """
+
+    def __init__(self, delay: int, verbose: int = 1):
+        super().__init__(verbose)
+        self.delay = max(1, int(delay))
+        self._installed = False
+
+    def _on_training_start(self) -> None:
+        if self._installed or self.delay <= 1:
+            return
+        opt = self.model.actor.optimizer
+        original_step = opt.step
+        state = {"n": 0}
+        delay = self.delay
+
+        def step(*a, **kw):
+            state["n"] += 1
+            if state["n"] % delay == 0:
+                return original_step(*a, **kw)
+            return None
+
+        opt.step = step
+        self._installed = True
+        if self.verbose:
+            print(f"[policy-delay] actor steps once every {delay} critic steps",
+                  flush=True)
+
+    def _on_step(self) -> bool:
+        return True

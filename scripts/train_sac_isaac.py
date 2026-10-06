@@ -99,6 +99,13 @@ parser.add_argument("--ent-coef", type=str, default="0.05",
                           "without exploration noise -- the wrong side to err on for a task whose "
                           "standing failure is never sampling a landing. Accepts a float, or "
                           "'auto'/'auto_<init>' to hand control back to the tuner.")
+parser.add_argument("--policy-delay", type=int, default=1,
+                     help="update the actor once every N critic steps (TD3's "
+                          "policy_delay). This is the two-timescale condition as a RATE "
+                          "of updates rather than a learning rate, and the difference "
+                          "matters: Adam normalises gradient magnitude, so 10k actor "
+                          "updates at lr 1e-5 still displace parameters by ~0.1, which "
+                          "is why making the actor 30x slower changed nothing.")
 parser.add_argument("--actor-lr", type=float, default=None,
                      help="separate learning rate for the ACTOR. SAC uses one rate for "
                           "both networks, which violates the two-timescale condition "
@@ -544,12 +551,10 @@ def main():
                 # would keep the loaded rate while the attribute lied about it.
                 model.learning_rate = args.learning_rate
                 model.lr_schedule = FloatSchedule(args.learning_rate)
-                if args.actor_lr is not None:
-                    # the actor keeps its own optimizer, so a separate rate only
-                    # needs its param groups set -- but SB3 rewrites them from
-                    # `lr_schedule` at the top of every train(), so this is
-                    # re-applied by the callback below rather than once here.
-                    pass
+                # NOTE: --actor-lr and --policy-delay are applied by callbacks
+                # (ActorLearningRateCallback, PolicyDelayCallback), not here:
+                # SB3 rewrites every param group from `lr_schedule` at the top
+                # of each train(), so anything set at load time is overwritten.
                 _ec = _parse_ent_coef(args.ent_coef)
                 if not isinstance(_ec, str):
                     import torch as _t
@@ -718,6 +723,9 @@ def main():
                 save_path=f"{args.out_dir}/snapshots",
                 name_prefix=f"{stage.name}",
                 save_replay_buffer=args.save_buffer))
+        if args.policy_delay > 1:
+            from lunarsim.rl.plasticity import PolicyDelayCallback
+            cbs.append(PolicyDelayCallback(args.policy_delay))
         if args.actor_lr is not None:
             from lunarsim.rl.plasticity import ActorLearningRateCallback
             cbs.append(ActorLearningRateCallback(args.actor_lr))
