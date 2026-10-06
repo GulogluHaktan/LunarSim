@@ -507,6 +507,13 @@ class IsaacLanderVecEnv(VecEnv):
                 # was meant to test it (out/train_v34_actsat.log measured a
                 # disabled penalty).
                 "action": np.asarray(a[i], dtype=float).copy(),
+    # the impact state, so `_touchdown_severity` grades the speed the
+                # vehicle actually hit at rather than the ~0 PhysX leaves after
+                # the contact substep. Keys match `_STATE_FIELDS` names so the
+                # severity function needs no special case.
+                "impact_state": {"vz": float(pre_vz[i]), "vx": float(pre_vxy[i]), "vy": 0.0,
+                                 "tilt_x": float(pre_tilt[i]), "tilt_y": 0.0,
+                                 "wx": float(pre_w[i]), "wy": 0.0, "wz": 0.0},
                 "landing_margins": landing_margins,
                 # real clearance of the collider's lowest point above the
                 # ground it can rest on; reaches 0 exactly at touchdown.

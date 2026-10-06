@@ -355,6 +355,14 @@ class AnalyticLanderEnv(gym.Env):
                 "v_xy": float(np.clip(1.0 - v_xy / max(p.safe_landing_v_xy_m_s, 1e-6), 0.0, 1.0)),
                 "tilt": float(np.clip(1.0 - tilt / max(p.safe_landing_tilt_rad, 1e-6), 0.0, 1.0)),
                 "w": float(np.clip(1.0 - w / max(p.safe_landing_w_rad_s, 1e-6), 0.0, 1.0)),
+                # leg_diff is the FIFTH `landed_safely` criterion. Both Isaac
+                # envs publish it and this one did not, so an identical
+                # touchdown was graded on 4 criteria here and 5 there (up to
+                # +/-31.5 on a 450-point bonus), and reward.py's leg_diff
+                # severity bump -- which reads `.get("leg_diff", 1.0)` -- could
+                # never fire in the analytic env at all.
+                "leg_diff": float(np.clip(
+                    1.0 - leg_diff / max(p.safe_landing_max_leg_height_diff_m, 1e-6), 0.0, 1.0)),
             }
 
             _, leg_force_max_n = leg_force_bounds_n(ApolloLMSpecs(), mass_kg, p.safe_landing_v_z_m_s, p.gravity_m_s2)
@@ -365,6 +373,12 @@ class AnalyticLanderEnv(gym.Env):
 
         info = {
             "terminated": terminated,
+            # the action that produced this step. The Isaac envs publish it so
+            # `_action_saturation_penalty` can charge for it; without it here
+            # that term would silently apply in training and not in any
+            # analytic baseline, unit test or controller comparison -- the same
+            # silent-divergence class as the bug that made the term dead.
+            "action": np.asarray(action, dtype=float).copy(),
             "truncated": truncated,
             "landed_safely": landed_safely,
             "lost_control": lost_control,

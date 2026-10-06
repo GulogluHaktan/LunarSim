@@ -439,3 +439,49 @@ def test_touchdown_grading_uses_the_impact_speed_not_the_post_contact_speed():
         sev.append(_touchdown_severity(p, state, margins))
     assert sev == sorted(sev), f"severity not monotone in impact speed: {sev}"
     assert sev[-1] > sev[0] * 2.0, f"severity barely responds to a 12x impact: {sev}"
+
+
+def test_crashing_is_never_cheaper_than_timing_out():
+    """The ordering that a half-finished fix inverted.
+
+    `landed_safely` was moved onto the pre-substep impact state while
+    `_touchdown_severity` still read `env.state`, which both Isaac envs
+    overwrite with POST-substep velocities. After contact the regolith
+    (restitution 0) has already stopped the vehicle, so every slam graded at
+    vz ~ 0 and paid the severity FLOOR: a 7.6 m/s impact delivered -60 against
+    -105 for a timeout, making a crash strictly more profitable than doing
+    nothing, and a tumble (-360) six times worse than a hard slam.
+    """
+    from lunarsim.rl.reward import _terminal_reward, _touchdown_severity
+    p, w = LanderParams(), RewardWeights()
+    margins = {"v_z": 0.0, "v_xy": 0.5, "tilt": 0.9, "w": 0.9, "leg_diff": 0.9}
+    info = {"landed_safely": False, "landing_margins": margins}
+    for vz in (-2.0, -4.0, -7.6):
+        state = {"vz": vz, "vx": 0.5, "vy": 0.0, "tilt_x": 0.05, "tilt_y": 0.0,
+                 "wx": 0.05, "wy": 0.0, "wz": 0.0}
+        r = _terminal_reward(w, info, _touchdown_severity(p, state, margins))
+        assert r < -w.timeout_penalty, (
+            f"impact at {vz} m/s costs {r:.1f}, a timeout costs "
+            f"{-w.timeout_penalty:.1f} -- crashing is the better option")
+
+
+def test_all_three_envs_publish_the_same_landing_margin_keys():
+    """One missing key silently regrades the success bonus.
+
+    The analytic env published 4 of the 5 `landed_safely` criteria while both
+    Isaac envs published 5, so an identical touchdown scored up to 31.5 points
+    differently on a 450-point bonus, and the leg_diff severity bump could
+    never fire analytically because it reads `.get("leg_diff", 1.0)`.
+    """
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    wanted = {"v_z", "v_xy", "tilt", "w", "leg_diff"}
+    for rel in ("lunarsim/rl/analytic_lander_env.py",
+                "lunarsim/adapters/isaac/isaac_lander_env.py",
+                "lunarsim/adapters/isaac/isaac_lander_vec_env.py"):
+        src = (root / rel).read_text()
+        block = src[src.index("landing_margins = {"):]
+        block = block[:block.index("}")]
+        found = set(re.findall(r'"(\w+)":', block))
+        assert wanted <= found, f"{rel} is missing {wanted - found}"

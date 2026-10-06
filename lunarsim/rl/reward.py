@@ -484,7 +484,24 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
         r = -min(shaping, w.shaping_clip_abs) * w.reward_scale
 
         if info.get("terminated"):
-            r += _terminal_reward(w, info, _touchdown_severity(p, s, info.get("landing_margins") or {}))
+            # Grade the severity from the IMPACT state when the env publishes
+            # one. Both Isaac envs overwrite `env.state` with POST-substep
+            # velocities before calling this function, and after contact the
+            # regolith (restitution 0) has already stopped the vehicle -- so
+            # reading `s` here scored every slam at vz ~ 0.
+            #
+            # That was measured: a 7.6 m/s impact delivered -60 instead of -360,
+            # which put crashing (-60) AHEAD of timing out (-105) and made a
+            # tumble (-360) six times worse than a hard slam. Fixing the LABEL
+            # (`landed_safely`, `landing_margins`) without fixing this left the
+            # penalty flat, which is worse than either state alone.
+            #
+            # The analytic env has no contact solver, so its `state` already
+            # holds the true impact velocity and the fallback is correct there.
+            grade_state = info.get("impact_state") or s
+            r += _terminal_reward(w, info,
+                                  _touchdown_severity(p, grade_state,
+                                                      info.get("landing_margins") or {}))
         elif info.get("truncated"):
             r -= w.timeout_penalty
         return float(r)

@@ -552,6 +552,13 @@ class IsaacLanderEnv(gym.Env):
             # `info["action"]` and nothing used to write it, so that term was
             # identically zero and the run meant to test it measured nothing.
             "action": np.asarray(action, dtype=float).copy(),
+            # the impact state, so `_touchdown_severity` grades the speed the
+            # vehicle actually hit at rather than the ~0 PhysX leaves after
+            # the contact substep. Keys match `_STATE_FIELDS` names so the
+            # severity function needs no special case.
+            "impact_state": {"vz": pre_vz, "vx": pre_vxy, "vy": 0.0,
+                             "tilt_x": pre_tilt, "tilt_y": 0.0,
+                             "wx": pre_w, "wy": 0.0, "wz": 0.0},
             "landed_safely": landed_safely,
             "lost_control": lost_control,
             "left_tile": left_tile,
