@@ -558,6 +558,9 @@ class IsaacLanderEnv(gym.Env):
         info = {
             "terminated": terminated,
             "truncated": truncated,
+            # which KIND of truncation, so the reward can charge a timeout
+            # without charging an artificial tile-edge cut (see reward.py).
+            "timed_out": bool(truncated and not left_tile),
             # the action that produced this step. See the matching note in the
             # vec env: reward.py's `_action_saturation_penalty` reads
             # `info["action"]` and nothing used to write it, so that term was

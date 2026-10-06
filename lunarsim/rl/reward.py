@@ -503,7 +503,17 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
                                   _touchdown_severity(p, grade_state,
                                                       info.get("landing_margins") or {}))
         elif info.get("truncated"):
-            r -= w.timeout_penalty
+            # Charge the timeout penalty only for an actual TIMEOUT. The other
+            # way an episode truncates is `left_tile`, which is an artificial
+            # cut at the edge of the terrain collider rather than a failure the
+            # policy should be taught to avoid by this term -- and it is also
+            # the one that still bootstraps, so paying the penalty there would
+            # charge for the state AND carry its value forward.
+            #
+            # `timed_out` is published by the envs; older callers that only set
+            # `truncated` keep the previous behaviour.
+            if info.get("timed_out", True):
+                r -= w.timeout_penalty
         return float(r)
 
     return reward_fn

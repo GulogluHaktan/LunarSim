@@ -266,8 +266,13 @@ def _expand_critic_ensemble(old_model, venv, args, n_critics):
             if idx < old_n:
                 dst[key] = src_val.clone()
             else:
+                # build on CPU (the generator is a CPU one, so results stay
+                # reproducible) then move to the parameter's own device --
+                # without this the whole call dies with "Expected all tensors
+                # to be on the same device" the moment the model is on CUDA.
                 noise = 1.0 + 0.01 * torch.randn(src_val.shape, generator=gen)
-                dst[key] = src_val * noise.to(src_val.dtype)
+                dst[key] = src_val * noise.to(device=src_val.device,
+                                              dtype=src_val.dtype)
         getattr(model, attr).load_state_dict(dst)
 
     if hasattr(old_model, "log_ent_coef") and old_model.log_ent_coef is not None \

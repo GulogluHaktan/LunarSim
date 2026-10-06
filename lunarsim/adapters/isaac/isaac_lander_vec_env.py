@@ -529,7 +529,26 @@ class IsaacLanderVecEnv(VecEnv):
             dones[i] = done
 
             if done:
-                info["TimeLimit.truncated"] = bool(truncated and not terminated)
+                # TIME LIMITS. Pardo et al. 2018 ("Time Limits in Reinforcement
+                # Learning") separate two cases, and this project is squarely in
+                # the first: in a TIME-LIMITED task, where the budget is part of
+                # the problem and the remaining time is in the observation, the
+                # limit is a genuine terminal and must NOT be bootstrapped.
+                # Bootstrapping is only correct for a time-unlimited task that is
+                # cut short for convenience, where the agent cannot see the clock.
+                #
+                # We were doing the wrong one, and double-counting on top of it:
+                # a timeout both bootstrapped `gamma * Q(terminal_obs)` AND paid
+                # `-timeout_penalty` (105 against a 225-450 landing bonus). The
+                # clock is now in observation slot 15, so the honest treatment is
+                # to end the episode there.
+                #
+                # `left_tile` is different and keeps bootstrapping: the vehicle
+                # drifting off the terrain collider is an artificial cut, not a
+                # real end, so the value of that state is whatever flying on
+                # would have been worth.
+                info["TimeLimit.truncated"] = bool(left_tile and not terminated)
+                info["timed_out"] = bool(timed_out and not terminated)
                 info["terminal_observation"] = self._obs_one(i)
                 self._reset_one(i)
                 infos[i] = info
