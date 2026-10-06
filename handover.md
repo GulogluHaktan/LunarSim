@@ -2398,3 +2398,60 @@ ramp_100m 24/24 | ramp_150m 24/24 | orbit_descent 22/24
 ```
 
 ### Target agreed with the user: 75% landing rate, given a safe site exists
+
+## Overestimation is NOT the cause of the collapse -- three experiments say so
+
+```
+intervention                       Q behaviour              landing rate
+gamma 0.998 -> 0.997               Q -14%                   no change
+replay ratio 1:1 -> 1:4            --                       no change
+learning rate 3e-4 -> 5e-5         inflation STOPPED        still collapses
+```
+
+v29 (lr 3e-4): Q 151 -> 246 -> 323 -> 391 -> **406** -> 352 -> 288 -> 263
+v30 (lr 5e-5): Q 143 -> 197 -> 217 -> **222** -> 215 -> **175**
+
+Low LR gave exactly the stability we wanted -- Q plateaus and comes back down --
+and the policy collapsed anyway (8%, 4%, 0%, 0%, with 13-15 of 24 timing out).
+
+So `n_critics` should NOT be the next thing tried, even though it is the
+textbook answer: it targets the same max-bias mechanism that these three
+experiments exonerate. Keep it as a last resort.
+
+### The actual signature: the policy has collapsed to bang-bang
+
+```python
+m.predict(obs, deterministic=True)   -> [-1.  1. -1.  1.]
+m.predict(obs, deterministic=False)  -> [-1.  1. -1.  1.]   (identical)
+```
+
+Deterministic and stochastic predictions are bit-identical because the policy's
+PRE-TANH std is 4.7-5.8, so tanh is saturated and sampling cannot move the
+output off the box corners. Measured over 48 episodes, the stochastic and
+deterministic landing rates are identical (10/48 and 14/48 timeouts, both).
+
+That explains the near misses directly -- a saturated policy cannot make small
+corrections, and ramp_35m failures were losing by 0.09 m/s of lateral speed. And
+the std GROWS in the runs that collapse:
+
+```
+v24 best (22.9%)   std = 4.75  3.76  4.98  3.74
+v30 last (0%)      std = 4.73  4.47  5.75  4.52
+```
+
+This is a known SAC pathology on a bounded action space: with the entropy
+coefficient pinned too high, the cheapest way to earn the entropy bonus is to
+widen the pre-squash distribution into tanh's saturation region, where extra
+width costs nothing in behavioural diversity but destroys fine control.
+
+And the coefficient is mis-sized BY MY OWN CHANGE: handover records 0.05 as
+sized against the OLD reward's measured per-step magnitude (mean |r| = 0.0483),
+and the reward was then rewritten from scratch with different magnitudes
+throughout. v31 tests ent_coef 0.005 (lr held at 5e-5, which demonstrably fixed
+the Q inflation).
+
+### `--stochastic` added to diag_stage_landing_rate.py
+
+Training collects data by sampling the policy while evaluation takes its mean,
+so the gap between the two is worth being able to measure. Here it is zero,
+which is itself the finding.

@@ -30,6 +30,12 @@ parser.add_argument("--terrain-seed", type=int, default=7)
 parser.add_argument("--terrain-grid-n", type=int, default=80,
                      help="must match the --terrain-grid-n the checkpoint was trained with")
 parser.add_argument("--seed0", type=int, default=7000)
+parser.add_argument("--stochastic", action="store_true",
+                     help="sample from the policy instead of taking its mean. Training "
+                          "collects data this way while evaluation is deterministic, so a "
+                          "large gap between the two means exploration noise is costing "
+                          "landings that the mean policy would make -- which poisons the "
+                          "replay buffer with failures the policy did not intend.")
 parser.add_argument("--headless", action="store_true", default=True)
 args = parser.parse_args()
 
@@ -68,7 +74,7 @@ def main():
         obs, _ = env.reset(seed=seed)
         info = {}
         for _ in range(max_steps):
-            action, _ = model.predict(obs, deterministic=True)
+            action, _ = model.predict(obs, deterministic=not args.stochastic)
             obs, reward, terminated, truncated, info = env.step(action)
             if terminated or truncated:
                 break
