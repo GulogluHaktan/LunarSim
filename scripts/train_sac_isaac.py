@@ -98,6 +98,27 @@ parser.add_argument("--ent-coef", type=str, default="0.05",
                           "without exploration noise -- the wrong side to err on for a task whose "
                           "standing failure is never sampling a landing. Accepts a float, or "
                           "'auto'/'auto_<init>' to hand control back to the tuner.")
+parser.add_argument("--layer-norm", action="store_true",
+                     help="weave LayerNorm into the actor and critic trunks. The "
+                          "Klein et al. (2024) plasticity survey finds general "
+                          "regularisation usually beats domain-specific fixes, and "
+                          "Lyle et al. (2024) report normalisation also fights "
+                          "overestimation. Fresh models only -- it reshapes the nets.")
+parser.add_argument("--reset-every", type=int, default=0,
+                     help="periodically reset part of the agent (Nikishin et al. 2022). "
+                          "Pair with --checkpoint-every: the steps right after a reset "
+                          "are expected to be bad, so snapshots are what you evaluate.")
+parser.add_argument("--reset-alpha", type=float, default=1.0,
+                     help="1.0 = full reinit of the scope, <1 pulls partway toward it "
+                          "(Calibrated Partial Resets, 2026, avoids the collapse that "
+                          "full reinit can cause).")
+parser.add_argument("--reset-scope", type=str, default="last",
+                     choices=["last", "critic", "all"])
+parser.add_argument("--save-buffer", action="store_true",
+                     help="save the replay buffer beside each checkpoint, and restore it "
+                          "on --warm-start. Without this the buffer is EMPTY after a warm "
+                          "start (SAC.load does not restore one), so the critic refits "
+                          "from a narrow early window -- textbook primacy bias.")
 parser.add_argument("--n-critics", type=int, default=2,
                      help="size of the SAC critic ensemble. SB3's default is 2 and it "
                           "takes the min, which already damps overestimation; more "
@@ -411,6 +432,15 @@ def main():
                 model = SAC.load(args.warm_start, env=venv, device=args.torch_device)
                 if len(model.critic.q_networks) != args.n_critics:
                     model = _expand_critic_ensemble(model, venv, args, args.n_critics)
+                # SAC.load does NOT restore a replay buffer, so without this the
+                # critic starts from an empty one and refits off a narrow early
+                # window every single warm start.
+                _buf = Path(args.warm_start).with_suffix(".buffer.pkl")
+                if args.save_buffer and _buf.is_file():
+                    model.load_replay_buffer(str(_buf))
+                    print(f"[buffer] restored {model.replay_buffer.size()} "
+                          f"transitions from {_buf}", flush=True)
+                    args.keep_buffer = True   # do not throw away what we just loaded
                 # a checkpoint saved before --gradient-steps existed carries
                 # SB3's default of 1; honour the CLI either way (see the
                 # REAL BUG note on the fresh-model branch below).
@@ -530,6 +560,10 @@ def main():
                              tau=args.tau, ent_coef=_parse_ent_coef(args.ent_coef),
                              learning_rate=args.learning_rate,
                              policy_kwargs={"n_critics": args.n_critics})
+                if args.layer_norm:
+                    from lunarsim.rl.plasticity import add_layer_norm_to_sac
+                    n_ln = add_layer_norm_to_sac(model)
+                    print(f"[layernorm] rebuilt {n_ln} trunks with LayerNorm", flush=True)
         else:
             model.set_env(venv)
             if not args.keep_buffer:
@@ -552,16 +586,26 @@ def main():
         if args.demo_path and first_model_creation:
             _seed_replay_buffer_from_demos(model, args.demo_path, args.n_envs, args.demo_repeat)
 
-        cb = None
+        cbs = []
         if args.checkpoint_every > 0:
             from stable_baselines3.common.callbacks import CheckpointCallback
-            cb = CheckpointCallback(
+            cbs.append(CheckpointCallback(
                 save_freq=max(1, args.checkpoint_every // max(1, args.n_envs)),
                 save_path=f"{args.out_dir}/snapshots",
-                name_prefix=f"{stage.name}")
+                name_prefix=f"{stage.name}",
+                save_replay_buffer=args.save_buffer))
+        if args.reset_every > 0:
+            from lunarsim.rl.plasticity import PeriodicResetCallback
+            cbs.append(PeriodicResetCallback(
+                every=args.reset_every, alpha=args.reset_alpha,
+                scope=args.reset_scope, seed=args.terrain_seed))
+        cb = cbs if cbs else None
         model.learn(total_timesteps=args.steps_per_stage, reset_num_timesteps=False, callback=cb)
         out_path = f"{args.out_dir}/sac_lunar_lander_isaac_{stage.name}.zip"
         model.save(out_path)
+        if args.save_buffer:
+            model.save_replay_buffer(out_path.replace(".zip", ".buffer.pkl"))
+            print(f"saved buffer: {out_path.replace('.zip', '.buffer.pkl')}")
         print(f"saved: {out_path}")
         # Measure THIS stage on ITS OWN release condition before moving on.
         # Previously the only rollout in this script ran once, at the very

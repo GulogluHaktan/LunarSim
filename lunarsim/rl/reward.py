@@ -331,6 +331,29 @@ class RewardWeights:
     # own scale, because it has to outweigh the SUM of hundreds of shaping
     # steps rather than one of them -- conflating the two is a mistake
     # this project made once already (see reward_legacy.py).
+    # Charge for sitting ON the action bounds, so the optimum is INTERIOR.
+    #
+    # Measured 2026-10-06: every policy this project has produced is ~95%
+    # saturated, emitting literally [-1, 1, -1, 1], and the v30 checkpoint went
+    # from 22.9% to 0% while its actor weight norm moved 190.7 -> 192.2. A
+    # saturated policy makes the parameter-to-behaviour map a step function:
+    # tiny gradient steps flip discrete action choices instead of refining
+    # them, so training is a random walk in behaviour space.
+    #
+    # The literature says do NOT attack this through the tanh Jacobian --
+    # Shamass (2026) tried restoring the missing gradient and collapsed return
+    # from -31.6 to -195.5, concluding that "saturating a bound is not the same
+    # as solving a problem whose optimum lives on that bound". Charging for
+    # |a| near 1 is the other direction: it moves the optimum off the bound
+    # instead of trying to make the bound differentiable.
+    #
+    # Quartic so it is nearly free through the usable band and bites only in
+    # the last ~20% of the range: at |a|=0.5 it costs 0.06x the weight, at 0.9
+    # 0.66x, at 1.0 the full weight. 0.0 disables it, which is the default --
+    # it must be switched on deliberately and measured, like everything else
+    # in this file.
+    action_saturation_k: float = 0.0
+
     reward_scale: float = 0.00025
 
 
@@ -360,6 +383,14 @@ def _descent_progress_reward(w: RewardWeights, alt_m: float, v_z: float,
     normalisation is needed."""
     rate = min(max(-v_z, 0.0), descent_envelope_m_s(w, alt_m))
     return w.progress_k * rate / max(release_alt_m, 1.0)
+
+
+def _action_saturation_penalty(w: RewardWeights, action) -> float:
+    """Quartic charge on how close the action sits to the box bounds."""
+    if w.action_saturation_k <= 0.0 or action is None:
+        return 0.0
+    a = np.clip(np.abs(np.asarray(action, dtype=float)), 0.0, 1.0)
+    return float(w.action_saturation_k * np.mean(a ** 4))
 
 
 def _horizontal_speed_penalty(w: RewardWeights, v_xy: float, alt_m: float = 0.0) -> float:
@@ -448,6 +479,7 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
             + _tilt_cutoff_penalty(w, s["tilt_x"], s["tilt_y"], p.loss_of_control_tilt_rad)
             + _angular_rate_penalty(w, s.get("wx", 0.0), s.get("wy", 0.0), s.get("wz", 0.0),
                                      p.safe_landing_w_rad_s)
+            + _action_saturation_penalty(w, info.get("action"))
         )
         r = -min(shaping, w.shaping_clip_abs) * w.reward_scale
 

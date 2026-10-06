@@ -71,6 +71,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--lunarsim-root", type=str, default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 parser.add_argument("--episodes", type=int, default=48)
 parser.add_argument("--out", type=str, default="out/zemzev_orbit_descent_demos.npz")
+parser.add_argument("--stage", type=str, default="orbit_descent",
+                     help="which curriculum stage to fly. Was hard-wired to "
+                          "orbit_descent; behaviour cloning needs demos from "
+                          "whichever stage is being imitated.")
 parser.add_argument("--terrain-seed", type=int, default=7)
 parser.add_argument("--terrain-grid-n", type=int, default=80,
                      help="must match train_sac_isaac.py's --terrain-grid-n for the run that "
@@ -93,8 +97,8 @@ from lunarsim.rl.reward import RewardWeights, default_reward_fn  # noqa: E402
 # the ONE curriculum definition -- this used to be a hand-copied
 # orbit_descent Stage + terrain config (see lunarsim/rl/curriculum.py's
 # docstring on the four copies that had drifted apart).
-_STAGE = STAGES_BY_NAME["orbit_descent"]
-ORBIT_DESCENT_PARAMS = _STAGE.params
+_STAGE = STAGES_BY_NAME[args.stage]
+ORBIT_DESCENT_PARAMS = _STAGE.params  # kept name; it is args.stage's params
 DEMO_FORMAT_VERSION = 2
 
 

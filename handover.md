@@ -2791,3 +2791,96 @@ re-raising as a decision, because it is the field's main road.
 
 Do NOT: unthrottle the tanh Jacobian (published negative result), or spend more
 on n_critics (two independent lines of evidence against it now).
+
+## All five review items implemented (2026-10-06 12:35)
+
+### 5. Behaviour cloning from the controller — DONE, needs evaluating
+
+`scripts/train_bc_from_demos.py` fits the SAC actor to the ZemZev controller's
+actions and saves a REAL SAC checkpoint, so `diag_stage_landing_rate.py`,
+`--warm-start` and the snapshot machinery all work on it unchanged. Only the
+actor is fitted; the critic stays at init, which is right for something that
+will be evaluated directly or RL-finetuned.
+
+Two details that matter:
+  - it regresses the PRE-TANH mean (`atanh(a)`), not the squashed action.
+    Regressing the squashed output would push the loss through a saturating
+    nonlinearity and give almost no gradient exactly where the controller
+    commands extremes -- which is most of the time.
+  - it sets the policy's log_std head to a small constant. SB3's `log_std` is a
+    state-dependent `Linear`, not a parameter, so the weight is zeroed and the
+    bias set to -3. Left at init, a std of 4.5+ would saturate tanh and throw
+    the fit away.
+
+Trained on the existing 48-episode orbit_descent demo set:
+`val MSE 0.078, mean |da| 0.046` (on a +/-1 action scale, ~2.3% of range).
+Checkpoint: `out/bc_orbit_descent.zip`.
+
+**NOT YET EVALUATED** -- this is the first thing to run:
+
+```
+scripts/diag_stage_landing_rate.py --checkpoint out/bc_orbit_descent.zip \
+    --stage orbit_descent --episodes 96 --seed0 41000
+```
+
+The controller it cloned lands 22/24 (92%), so this measurement is the real
+test of whether the field's main road works here. `collect_zemzev_demos.py` now
+takes `--stage`, so demos can be gathered for any rung.
+
+### 1-3. LayerNorm, periodic resets, action-saturation penalty
+
+New module `lunarsim/rl/plasticity.py` (LayerNorm weaving, ReDo's
+dormant-neuron metric as a diagnostic, partial resets + an SB3 callback), wired
+into the trainer:
+
+```
+--layer-norm                 LayerNorm in the actor and critic trunks. Fresh
+                             models only. Klein+24: general regularisation
+                             usually beats domain-specific fixes.
+--reset-every N              periodic partial reset (Nikishin+22)
+--reset-alpha A              1.0 = full reinit of the scope, <1 pulls partway
+                             (Calibrated Partial Resets, 2026)
+--reset-scope last|critic|all  Ma+23 find the modules differ, so this is
+                             separable on purpose
+--save-buffer                item 4: save the replay buffer beside every
+                             checkpoint and restore it on --warm-start
+```
+
+Item 3 is `action_saturation_k` in RewardWeights, **default 0.0 (off)**. Quartic
+charge on `|a|`: nearly free through the usable band (0.06x at |a|=0.5), biting
+only in the last 20% (0.66x at 0.9, full at 1.0). It attacks the brittleness
+from the other side than the literature's failed attempt: instead of trying to
+make the tanh bound differentiable (Shamass 2026, return -31.6 -> -195.5), it
+moves the optimum off the bound.
+
+Smoke-tested: LayerNorm rebuilds 5 trunks and forward/predict still work,
+resets touch 3 layers and the model still predicts, dormant_fraction computes.
+Suite at baseline: 163 passed, 7 pre-existing failures.
+
+### Suggested run order when the machine is next free
+
+```
+# 0. the one that already exists -- just measure it
+scripts/diag_stage_landing_rate.py --checkpoint out/bc_orbit_descent.zip \
+    --stage orbit_descent --episodes 96 --seed0 41000
+
+# 1. LayerNorm, from scratch up the corrected ladder
+scripts/train_sac_isaac.py --steps-per-stage 200000 --checkpoint-every 50000 \
+    --out-dir out/sac_v34_layernorm --layer-norm --gamma 0.998 --max-rocks-per-env 0
+
+# 2. resets, from the 22.9% checkpoint
+scripts/train_sac_isaac.py --only-stage ramp_35m --steps-per-stage 300000 \
+    --checkpoint-every 50000 --out-dir out/sac_v35_resets \
+    --warm-start out/sac_training_run_v24_vert/snapshots/ramp_35m_1550000_steps.zip \
+    --reset-every 50000 --reset-alpha 0.8 --reset-scope last \
+    --gamma 0.998 --max-rocks-per-env 0
+
+# 3. action-saturation charge (needs the weight switched on)
+#    --reward-weight action_saturation_k=2000
+
+# 4. buffer kept across the warm start
+#    add --save-buffer to both the run that produces the checkpoint and the one
+#    that warm-starts from it
+```
+
+Evaluate with 96 episodes on seeds not used for selection. 24 is a smoke test.
