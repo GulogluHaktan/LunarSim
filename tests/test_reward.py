@@ -412,3 +412,30 @@ def test_descent_envelope_penalty_keeps_a_gradient_through_free_fall():
         slope = (_descent_envelope_penalty(w, 0.2, vz - h)
                  - _descent_envelope_penalty(w, 0.2, vz + h)) / (2 * h)
         assert slope > 100.0, f"flat at {excess} m/s of excess: slope={slope}"
+
+
+def test_touchdown_grading_uses_the_impact_speed_not_the_post_contact_speed():
+    """Regression guard for a label bug, not a reward bug.
+
+    The Isaac envs used to grade `landed_safely` and `_touchdown_severity` from
+    the state read AFTER all physics substeps. One control step is dt_s=0.05 s,
+    so the vehicle travels 0.05*|vz| m while the contact band is a fixed 0.05 m;
+    above 1 m/s the band is narrower than one step of travel, and the regolith
+    has restitution 0, so PhysX had already stopped the vehicle before the
+    grader looked. A slam was scored as a feather landing and severity reported
+    ~0 for an arbitrarily hard impact.
+
+    This test pins the consequence rather than the plumbing: severity must rise
+    with impact speed. If a future change reintroduces post-contact grading,
+    every fast touchdown collapses to severity ~1 and this fails.
+    """
+    from lunarsim.rl.reward import _touchdown_severity
+    p = LanderParams()
+    sev = []
+    for vz in (-0.5, -1.5, -3.0, -6.0):
+        margins = {"v_z": max(0.0, 1.0 - abs(vz) / p.safe_landing_v_z_m_s)}
+        state = {"vz": vz, "vx": 0.0, "vy": 0.0, "tilt_x": 0.0, "tilt_y": 0.0,
+                 "wx": 0.0, "wy": 0.0, "wz": 0.0}
+        sev.append(_touchdown_severity(p, state, margins))
+    assert sev == sorted(sev), f"severity not monotone in impact speed: {sev}"
+    assert sev[-1] > sev[0] * 2.0, f"severity barely responds to a 12x impact: {sev}"

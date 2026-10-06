@@ -1,6 +1,6 @@
 """Fixed-scale observation normalization for the shared 16-element lander
 observation layout (position offset x/y/z, vx/vy/vz, quaternion wxyz,
-angular rate wx/wy/wz, fuel_frac, rcs_fuel_frac, leg_force_frac) used
+angular rate wx/wy/wz, fuel_frac, rcs_fuel_frac, time_remaining_frac) used
 identically by `AnalyticLanderEnv`, `IsaacLanderEnv`, `IsaacLanderVecEnv`,
 and `scripts/isaaclab_policy_eval_capture.py`'s hand-built observation.
 
@@ -41,7 +41,7 @@ OBS_SCALE = np.array([
     1.0, 1.0, 1.0, 1.0,  # quaternion wxyz -- already unit-scale
     2.0, 2.0, 2.0,  # wx, wy, wz (rad/s) -- angular_damping_per_s=0.5 keeps these small in practice
     1.0, 1.0,       # fuel_frac, rcs_fuel_frac -- already [0, 1]
-    1.0,            # leg_force_frac -- already [0, 1] (0 except at touchdown)
+    1.0,            # time_remaining_frac -- already [0, 1]; was the dead leg_force_frac slot
 ], dtype=np.float32)
 
 

@@ -393,7 +393,27 @@ class AnalyticLanderEnv(gym.Env):
             s["wx"], s["wy"], s["wz"],
             s["fuel_kg"] / p.initial_fuel_kg,
             s["rcs_fuel_kg"] / p.initial_rcs_fuel_kg,
-            0.0,  # leg_force_frac: legs aren't loaded until the terminal touchdown step
+            # TIME REMAINING, as a fraction of the episode budget.
+            #
+            # This slot used to be `leg_force_frac`, hardcoded 0.0 in all three
+            # envs -- a permanently dead input. It now carries the one quantity
+            # whose absence made this a non-Markovian problem: the env truncates
+            # at `max_episode_s`, so the value of a state genuinely depends on
+            # how much clock is left, and without it in the observation the
+            # critic is fitting mutually inconsistent targets for states that
+            # look identical. That defect is invisible to every hyperparameter,
+            # which matches the measured fact that gamma, learning rate, replay
+            # ratio, entropy coefficient and a log-std cap all failed to stop
+            # the mid-run collapse.
+            #
+            # It also matters because the margin here is thin: on ramp_35m the
+            # expert touches down at a median 22.4 s against a 25 s budget, an
+            # ~11% slack, so "how long have I got" is decision-relevant rather
+            # than academic.
+            #
+            # Reusing the dead slot keeps the observation 16-wide, so existing
+            # checkpoints still load.
+            max(0.0, 1.0 - self._t / p.max_episode_s),
         ]
         if self.use_lidar_obs:
             obs.extend(self._lidar_ranges())

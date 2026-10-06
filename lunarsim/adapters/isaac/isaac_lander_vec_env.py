@@ -308,7 +308,27 @@ class IsaacLanderVecEnv(VecEnv):
             s["wx"][i], s["wy"][i], s["wz"][i],
             s["fuel_kg"][i] / p.initial_fuel_kg,
             s["rcs_fuel_kg"][i] / p.initial_rcs_fuel_kg,
-            0.0,
+            # TIME REMAINING, as a fraction of the episode budget.
+            #
+            # This slot used to be `leg_force_frac`, hardcoded 0.0 in all three
+            # envs -- a permanently dead input. It now carries the one quantity
+            # whose absence made this a non-Markovian problem: the env truncates
+            # at `max_episode_s`, so the value of a state genuinely depends on
+            # how much clock is left, and without it in the observation the
+            # critic is fitting mutually inconsistent targets for states that
+            # look identical. That defect is invisible to every hyperparameter,
+            # which matches the measured fact that gamma, learning rate, replay
+            # ratio, entropy coefficient and a log-std cap all failed to stop
+            # the mid-run collapse.
+            #
+            # It also matters because the margin here is thin: on ramp_35m the
+            # expert touches down at a median 22.4 s against a 25 s budget, an
+            # ~11% slack, so "how long have I got" is decision-relevant rather
+            # than academic.
+            #
+            # Reusing the dead slot keeps the observation 16-wide, so existing
+            # checkpoints still load.
+            max(0.0, 1.0 - float(self._t[i]) / p.max_episode_s),
         ]
         return normalize_obs(np.array(obs, dtype=np.float32))
 
@@ -356,6 +376,39 @@ class IsaacLanderVecEnv(VecEnv):
         force_local = np.zeros((n, 3), dtype=np.float32)
         force_local[:, 2] = thrust_mag
         torque_local = np.stack([pitch_cmd * max_torque, roll_cmd * max_torque, yaw_cmd * max_torque], axis=-1).astype(np.float32)
+
+        # IMPACT STATE, snapshotted BEFORE the physics substeps run.
+        #
+        # REAL BUG (found 2026-10-06 by audit): termination was graded from the
+        # state read AFTER all `_n_substeps` substeps. One control step is
+        # dt_s=0.05 s, so the vehicle travels 0.05*|vz| m, while the contact
+        # band `TOUCHDOWN_CONTACT_EPS_M` is a fixed 0.05 m. For |vz| > 1.0 m/s
+        # the band is NARROWER than one step of travel, so contact typically
+        # happens mid-loop -- and the regolith material is authored with
+        # restitution=0.0 (heightfield.py), so PhysX has already killed the
+        # velocity by the time it is read. The grader therefore saw vz ~ 0 for
+        # an arbitrarily hard slam: `landed_safely` passed on impacts it should
+        # have failed, and `_touchdown_severity`, whose whole job is "how many
+        # times over its limit was this touchdown", reported ~0 severity above
+        # 1 m/s. Roughly 1/|vz| of fast impacts were caught honestly.
+        #
+        # That made the terminal LABEL a lottery whose odds depend on descent
+        # rate -- a defect no hyperparameter can touch, which matches gamma,
+        # learning rate, replay ratio, entropy coefficient and a log-std cap all
+        # failing to stop the mid-run collapse. The ZemZev controller was
+        # unaffected because it flies its terminal descent at 0.80 m/s, inside
+        # the honest regime, while an RL policy exploring faster descents was
+        # graded by coin flip.
+        #
+        # Grading from the pre-step state costs nothing (no extra reads) and is
+        # off by at most one step of acceleration, ~0.08 m/s here, against a
+        # 1.0 m/s limit -- versus being off by the entire impact velocity.
+        pre_vz = np.array(s["vz"], dtype=float)
+        pre_vxy = np.hypot(np.asarray(s["vx"], dtype=float), np.asarray(s["vy"], dtype=float))
+        pre_tilt = np.hypot(np.asarray(s["tilt_x"], dtype=float), np.asarray(s["tilt_y"], dtype=float))
+        pre_w = np.sqrt(np.asarray(s["wx"], dtype=float) ** 2
+                        + np.asarray(s["wy"], dtype=float) ** 2
+                        + np.asarray(s["wz"], dtype=float) ** 2)
 
         damping_per_substep = max(0.0, 1.0 - p.angular_damping_per_s * self._physics_dt)
         for _ in range(self._n_substeps):
@@ -410,19 +463,23 @@ class IsaacLanderVecEnv(VecEnv):
             leg_force_n = 0.0
             leg_force_max_n = 1.0
             if touched_down and not lost_control:
-                v_xy = float(np.hypot(s["vx"][i], s["vy"][i]))
-                tilt = float(np.hypot(s["tilt_x"][i], s["tilt_y"][i]))
-                w = float(np.sqrt(s["wx"][i] ** 2 + s["wy"][i] ** 2 + s["wz"][i] ** 2))
+                # graded from the PRE-SUBSTEP state -- see the note above the
+                # substep loop for why the post-substep state reads ~0 velocity
+                # on a hard impact.
+                v_z = float(pre_vz[i])
+                v_xy = float(pre_vxy[i])
+                tilt = float(pre_tilt[i])
+                w = float(pre_w[i])
                 leg_diff = self._footpad_height_diff_m(i, s["x"][i], s["y"][i])
                 landed_safely = bool(
-                    abs(s["vz"][i]) <= p.safe_landing_v_z_m_s
+                    abs(v_z) <= p.safe_landing_v_z_m_s
                     and v_xy <= p.safe_landing_v_xy_m_s
                     and tilt <= p.safe_landing_tilt_rad
                     and w <= p.safe_landing_w_rad_s
                     and leg_diff <= p.safe_landing_max_leg_height_diff_m
                 )
                 landing_margins = {
-                    "v_z": float(np.clip(1.0 - abs(s["vz"][i]) / max(p.safe_landing_v_z_m_s, 1e-6), 0.0, 1.0)),
+                    "v_z": float(np.clip(1.0 - abs(v_z) / max(p.safe_landing_v_z_m_s, 1e-6), 0.0, 1.0)),
                     "v_xy": float(np.clip(1.0 - v_xy / max(p.safe_landing_v_xy_m_s, 1e-6), 0.0, 1.0)),
                     "tilt": float(np.clip(1.0 - tilt / max(p.safe_landing_tilt_rad, 1e-6), 0.0, 1.0)),
                     "w": float(np.clip(1.0 - w / max(p.safe_landing_w_rad_s, 1e-6), 0.0, 1.0)),
@@ -436,13 +493,20 @@ class IsaacLanderVecEnv(VecEnv):
                         1.0 - leg_diff / max(p.safe_landing_max_leg_height_diff_m, 1e-6), 0.0, 1.0)),
                 }
                 _, leg_force_max_n = leg_force_bounds_n(self._specs, mass_kg_all[i], p.safe_landing_v_z_m_s, p.gravity_m_s2)
-                ke_j = 0.5 * mass_kg_all[i] * s["vz"][i] ** 2
+                ke_j = 0.5 * mass_kg_all[i] * v_z ** 2  # impact speed, not the post-contact ~0
                 leg_force_n = mass_kg_all[i] * p.gravity_m_s2 / p.leg_count + ke_j / (p.leg_count * p.leg_stroke_m)
 
             info = {
                 "terminated": terminated, "truncated": truncated,
                 "landed_safely": landed_safely, "lost_control": lost_control,
                 "left_tile": left_tile,
+                # the action that produced this step, so a reward term can charge
+                # for it. `_action_saturation_penalty` in reward.py read
+                # `info["action"]` and NOTHING ever wrote it, which made that
+                # term identically zero and silently voided the experiment that
+                # was meant to test it (out/train_v34_actsat.log measured a
+                # disabled penalty).
+                "action": np.asarray(a[i], dtype=float).copy(),
                 "landing_margins": landing_margins,
                 # real clearance of the collider's lowest point above the
                 # ground it can rest on; reaches 0 exactly at touchdown.
