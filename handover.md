@@ -3039,3 +3039,46 @@ different problem (42% teacher, 20 episodes, longer horizon).
      persisted next to checkpoints, so older runs are unauditable.
   6. `env_spacing_m` is sized off the largest stage, so env 15 sits at
      x ~ 37.8 km where float32 spacing is 3.9 mm -- 8% of the contact band.
+
+## DAgger WORKS: 31% on ramp_35m, 6x the best RL policy
+
+All three measured on the same 96 episodes (seed0=41000) under the CORRECTED
+touchdown grading:
+
+```
+plain BC clone (collinear expert data)      4/96 =  4%
+best RL policy (v24, the ex-"22.9%")        5/96 =  5%
+DAgger clone (3 iterations)                30/96 = 31%
+ZemZev controller                          41/48 = 85%   (measured under the OLD
+                                                          grading -- being redone)
+```
+
+This is the first artefact in the project that substantially works, and the
+margin over RL is not a hyperparameter — it is data geometry. Plain cloning
+learned the SIGN of the vertical feedback gain wrong (+0.306 against the
+teacher's -0.98) because expert trajectories are collinear (corr(alt,vz) = -0.98,
+no ascending state anywhere) and MSE on that manifold is nearly indifferent to
+the sign. DAgger breaks the collinearity by asking the teacher what to do in the
+states the CLONE visits; the gain goes to -0.96..-1.54 and the rate goes 4% ->
+31%.
+
+Checkpoint: `out/bc_ramp35_dagger.zip`. Reproduce with
+
+```
+.venv/bin/python scripts/train_bc_from_demos.py \
+    --demos out/zemzev_ramp35_demos.npz --stage ramp_35m \
+    --epochs 400 --dagger-iters 3 --dagger-episodes 24 \
+    --out out/bc_ramp35_dagger.zip
+```
+
+Caveat, from the harness audit: this is a SINGLE-TERRAIN measurement (the eval
+script reuses one tile at `--terrain-seed 7` for every episode), so read it as
+"31% on seed 7", not as an estimate over the training distribution.
+
+Two things this makes possible that were not possible before:
+  1. A warm start whose critic can actually see landings. Every RL run so far
+     started from a policy that lands 5% of the time, so the critic almost never
+     sampled a success. 31% changes that materially.
+  2. A clean isolation of the RL question. If RL started from this and still
+     collapsed, "the policy was bad to begin with" would no longer be available
+     as an explanation.
