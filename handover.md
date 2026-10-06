@@ -3120,3 +3120,64 @@ else in the same measurement. `--legacy-obs15` exists so a pre-change checkpoint
 can be scored on the input it was trained with; use it for every checkpoint
 produced before 2026-10-06, and note that every demo set on disk also carries
 0.0 in slot 15.
+
+## Where things actually stand, measured honestly (2026-10-06, post-audit)
+
+All on 96 episodes, seed0=41000, ramp_35m, FIXED grading, correct observation
+vintage (`--legacy-obs15` for every pre-change checkpoint), exclusive counters:
+
+```
+                          landed        crash   timeout
+best RL policy (v24)    21/96 = 22%       53      22
+DAgger clone            36/96 = 38%       47      13
+ZemZev controller       22/24 = 92%        2       0    (24 eps, same grading)
+```
+
+CRASH dominates the failures everywhere, which the old summary line could not
+show. The project spent today reading "the policy will not descend" off a
+counter that hid two thirds of the outcomes; it descends and misses on precision.
+
+And the reference ceiling is NOT 100%. Isaac controller baselines, post-fix,
+24 episodes each:
+
+```
+ramp_20m 96%   ramp_20m_fast 71%   ramp_35m 92%   ramp_50m 100%
+ramp_100m 100%  ramp_150m 100%     orbit_descent 46%
+```
+
+Every one of the 23 failures across that whole sweep is the same mode: a
+correctly-executed touchdown rejected on lateral speed. `safe_landing_v_xy_m_s`
+is 1.2 and the controller's terminal v_xy sits at 0.5-1.3, straddling it. So an
+RL rate on ramp_20m_fast should be read against 71%, and on orbit_descent
+against 46%, not against 100%.
+
+## Today's three curriculum changes: confirmed in Isaac, plus three more fixed
+
+The Isaac re-validation measured the PRE-change configuration rather than
+inferring, and the kinematic reasoning transferred exactly: ramp_100m at T=40
+gave 0/24 with 24 timeouts at 4.27 m of final clearance against the analytic
+prediction of 4.45 m. ramp_150m likewise (4.58 m). ramp_20m_fast at the old
+(2.0, 5.0) scored 4/24, not the 1/24 the analytic audit reported -- so
+"impossible" was overstated, but 17% is unusable as a rung and the direction and
+magnitude of the change were both right.
+
+Three further defects, now fixed:
+  - **ramp_50m had ZERO budget slack.** Over 48 controller episodes touchdown
+    times were 29.6 s median with a max of EXACTLY 30.0 s and 9 of 48 at
+    >= 29.8 s -- one landed in the final control step. `spawn_v_z_m_s`
+    -3.0 -> -3.4.
+  - **ramp_100m's tile was 4.1 m from its own truncation boundary** (311.2 m
+    measured track against 315.3 m). It was the only stage never re-derived from
+    a measured track; every other carries 2.1-2.5x. 640 -> 800 m.
+  - **ramp_20m_fast's tile was ~5x oversized** after its lateral release was cut,
+    and because `terrain_grid_n` is global that gave it 3.25 m cells against
+    ramp_20m's 1.5 m -- the stage meant to add ONE dimension was also flattening
+    the terrain. 260 -> 120 m.
+
+**The reachability rule in this file was too lax by ~1.9x.** Worst-case touchdown
+time is a tight multiple of the free-coast time at every stage (h0/|vz0| vs
+t_td_max: 1.69, 1.70, 1.82, 1.79, 1.83, 1.87), so the usable form is
+`T >= ~1.9 * h0/|vz0|`. The "~2x h0/T" heuristic already used for
+`spawn_v_z_m_s` was right; the bare `>= h0/T` written elsewhere in the comments
+is what let an unreachable stage through. All seven stages satisfy the corrected
+rule now.

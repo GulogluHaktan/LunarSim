@@ -169,7 +169,16 @@ STAGES = [
         # went to 5 m/s: usable lateral room 45.3 m against 100 m of drift
         # over a 20 s episode. The 42% measured on it was scored under that
         # handicap.
-        tile_size_m=260.0,
+        # 260 -> 120 m (2026-10-06). The 260 m was sized for this stage's old
+        # 5 m/s lateral release; at (1.5, 2.5) the controller's measured ground
+        # track in Isaac is 23.3 m, so 260 m was ~5x oversized. That is not
+        # merely wasteful: `terrain_grid_n` is global, so a 260 m tile has 3.25 m
+        # cells against ramp_20m's 1.5 m, and the stage meant to introduce
+        # lateral speed at ramp_20m's altitude was also silently flattening the
+        # terrain relative to the stage it follows. 120 m restores the
+        # one-dimension-at-a-time property and still leaves 5x the measured
+        # track.
+        tile_size_m=120.0,
         params=LanderParams(
             spawn_altitude_m=20.0, spawn_xy_radius_m=10.0,
             # (2.0, 5.0) -> (1.5, 2.5) (2026-10-06). This stage was not hard,
@@ -253,13 +262,42 @@ STAGES = [
             # 50 m, 7.80 at 100), so an episode does not start in penalty.
             # orbit_descent keeps 0.0: it is the real scenario, an orbital
             # release, and by then the policy has to descend on its own.
-            spawn_v_z_m_s=-3.0, spawn_horizontal_speed_m_s=(2.0, 8.0),
+            # -3.0 -> -3.4 (2026-10-06, measured in REAL Isaac). This stage
+            # had ZERO budget slack and was one step from the defect that made
+            # ramp_100m and ramp_150m unsolvable. Over 48 controller episodes
+            # touchdown times were 29.6 s median with a max of EXACTLY 30.0 s
+            # and 9 of 48 at >= 29.8 s -- one episode landed in the final
+            # control step of the clock. Anything slightly slower than the
+            # reference controller (a trained policy, a rougher draw, a heavier
+            # lateral correction) times out at ~1 m of clearance and is graded a
+            # failure.
+            #
+            # The same Isaac sweep also corrected the reachability rule this
+            # file states. Worst-case touchdown time is a tight multiple of the
+            # free-coast time across every stage:
+            #   h0/|vz0| vs t_td_max -> 1.69, 1.70, 1.82, 1.79, 1.83, 1.87
+            # so the usable form is `T >= ~1.9 * h0/|vz0|`, equivalently
+            # `|vz0| >= 1.9 * h0/T` -- the "~2x h0/T" heuristic used for
+            # spawn_v_z_m_s was right, and the bare `>= h0/T` written elsewhere
+            # in these comments is what permits an unreachable stage. By the
+            # 1.9x rule this stage needed |vz0| >= 3.33; it had 3.0.
+            spawn_v_z_m_s=-3.4, spawn_horizontal_speed_m_s=(2.0, 8.0),
             max_episode_s=30.0,
         ),
     ),
     Stage(
         name="ramp_100m",
-        tile_size_m=640.0,
+        # 640 -> 800 m (2026-10-06, measured in REAL Isaac). This is the only
+        # stage whose tile was never re-derived from a measured ground track.
+        # The controller's max radius here is 311.2 m against a truncation
+        # boundary of 315.3 m (half_extent - footpad_span/2) -- 4.1 m of margin
+        # over 24 episodes. Every other stage carries 2.1-2.5x: ramp_150m is
+        # 1200 m for a 561 m track, orbit_descent 1680 for 684 m. The analytic
+        # figure the old comment cited (293.7 m) was both smaller than Isaac's
+        # and compared against the half-extent rather than the half-extent
+        # minus the footpad margin. Cost of the fix: grid stays at 80, cells go
+        # 8 -> 10 m.
+        tile_size_m=800.0,
         params=LanderParams(
             spawn_altitude_m=100.0, spawn_xy_radius_m=50.0,
             # Bootstrap descent, sized at ~2x h0/max_episode_s (2026-10-06).
