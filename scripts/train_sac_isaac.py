@@ -99,6 +99,24 @@ parser.add_argument("--ent-coef", type=str, default="0.05",
                           "without exploration noise -- the wrong side to err on for a task whose "
                           "standing failure is never sampling a landing. Accepts a float, or "
                           "'auto'/'auto_<init>' to hand control back to the tuner.")
+parser.add_argument("--bc-anchor", type=float, default=None,
+                     help="keep the actor in a trust region around the policy it was "
+                          "warm started from, by pulling parameters back toward it by "
+                          "this fraction after every update. The proximal form of the "
+                          "BC-regularised actor loss used by TD3+BC and AWAC. Needed "
+                          "here because competence depends on a ~96%% saturated policy, "
+                          "so a small parameter move is a huge behavioural one: a 47%% "
+                          "policy dies in ONE 10k-step window under Adam and under SGD "
+                          "alike, because nothing holds it anywhere.")
+parser.add_argument("--actor-sgd", type=float, default=None,
+                     help="use SGD at this learning rate for the ACTOR instead of Adam. "
+                          "Adam sets the step size from its own running statistics, so a "
+                          "step is ~lr regardless of the gradient -- and for a ~96%% "
+                          "saturated tanh policy the gradient through `1 - a^2` is "
+                          "near-zero and noise-dominated, which Adam rescales back to "
+                          "full size. A 47%% policy dies within 10k steps (10k updates) "
+                          "at every learning rate tried, which is what step size set by "
+                          "the optimizer rather than the gradient looks like.")
 parser.add_argument("--policy-delay", type=int, default=1,
                      help="update the actor once every N critic steps (TD3's "
                           "policy_delay). This is the two-timescale condition as a RATE "
@@ -723,6 +741,12 @@ def main():
                 save_path=f"{args.out_dir}/snapshots",
                 name_prefix=f"{stage.name}",
                 save_replay_buffer=args.save_buffer))
+        if args.bc_anchor is not None:
+            from lunarsim.rl.plasticity import BCAnchorCallback
+            cbs.append(BCAnchorCallback(args.bc_anchor))
+        if args.actor_sgd is not None:
+            from lunarsim.rl.plasticity import ActorSGDCallback
+            cbs.append(ActorSGDCallback(args.actor_sgd))
         if args.policy_delay > 1:
             from lunarsim.rl.plasticity import PolicyDelayCallback
             cbs.append(PolicyDelayCallback(args.policy_delay))

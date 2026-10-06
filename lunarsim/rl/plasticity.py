@@ -399,3 +399,105 @@ class PolicyDelayCallback(BaseCallback):  # type: ignore[misc]
 
     def _on_step(self) -> bool:
         return True
+
+
+class ActorSGDCallback(BaseCallback):  # type: ignore[misc]
+    """Swap the actor's optimizer from Adam to SGD.
+
+    Adam normalises by the gradient's running magnitude, so a step is about
+    `lr` in parameter space whatever the gradient actually is. For a SATURATED
+    tanh policy that is exactly wrong: at |a| -> 1 the Jacobian `1 - a^2`
+    vanishes, so the gradient reaching the pre-tanh mean is tiny and dominated
+    by noise -- and Adam rescales that noise back up to a full-size step. The
+    policy then random-walks at `lr` per update regardless of whether there is
+    any signal.
+
+    Measured on this project: the policies here are ~96% saturated, and a 47-52%
+    policy is destroyed within one 10k-step window of releasing the actor --
+    which is 10,000 updates. It happens at every learning rate tried, which is
+    the signature of step size being set by the optimizer rather than by the
+    gradient. With SGD a vanishing gradient means a vanishing step.
+
+    The optimizer object itself is not pickled by SB3 (only its state_dict), so
+    replacing it is safe across checkpoints.
+    """
+
+    def __init__(self, lr: float, momentum: float = 0.0, verbose: int = 1):
+        super().__init__(verbose)
+        self.lr = float(lr)
+        self.momentum = float(momentum)
+        self._installed = False
+
+    def _on_training_start(self) -> None:
+        if self._installed:
+            return
+        self.model.actor.optimizer = torch.optim.SGD(
+            self.model.actor.parameters(), lr=self.lr, momentum=self.momentum)
+        self._installed = True
+        if self.verbose:
+            print(f"[actor-sgd] actor optimizer -> SGD(lr={self.lr:.1e}, "
+                  f"momentum={self.momentum})", flush=True)
+
+    def _on_step(self) -> bool:
+        return True
+
+
+class BCAnchorCallback(BaseCallback):  # type: ignore[misc]
+    """Keep the actor in a trust region around the policy it started from.
+
+    This is the proximal form of the BC-regularised actor loss that
+    offline-to-online methods use (TD3+BC's `-Q + alpha*(pi(s) - a_data)^2`,
+    AWAC's advantage-weighted constraint): instead of adding a term to the loss,
+    pull the parameters back toward the anchor after each update,
+    `theta <- theta + beta*(theta_0 - theta)`. Both implement "improve, but do
+    not leave the region the demonstrations cover"; the proximal version needs
+    no surgery on SB3's train().
+
+    Why this project needs it, measured. The policies here are ~96% saturated,
+    so competence depends on the pre-tanh mean being large: moving it from ~5 to
+    ~1 takes actions from 1.0 to 0.76, an enormous behavioural change for a
+    small parameter change. A 47-52% policy therefore dies in ONE 10k-step
+    window after the actor is released -- and it does so identically under Adam
+    and SGD, at every learning rate, with a bounded critic and with a diverging
+    one. Nineteen interventions failed to stop it because none of them held the
+    policy anywhere; they only changed how fast it left.
+
+    `beta` is per actor update. With 10k updates per window, beta=1e-3 gives a
+    pull half-life of ~700 updates, so the policy can move but cannot run.
+    """
+
+    def __init__(self, beta: float, verbose: int = 1):
+        super().__init__(verbose)
+        self.beta = float(beta)
+        self._anchor = None
+        self._installed = False
+
+    def _on_training_start(self) -> None:
+        if self._installed:
+            return
+        self._anchor = {k: v.detach().clone()
+                        for k, v in self.model.actor.state_dict().items()}
+        opt = self.model.actor.optimizer
+        original_step = opt.step
+        anchor = self._anchor
+        actor = self.model.actor
+        beta = self.beta
+
+        def step(*a, **kw):
+            out = original_step(*a, **kw)
+            with torch.no_grad():
+                for k, v in actor.state_dict().items():
+                    ref = anchor.get(k)
+                    if ref is not None and v.dtype.is_floating_point:
+                        v.mul_(1.0 - beta).add_(ref, alpha=beta)
+            return out
+
+        opt.step = step
+        self._installed = True
+        if self.verbose:
+            half = (0.693 / beta) if beta > 0 else float("inf")
+            print(f"[bc-anchor] pulling actor toward its start, beta={beta:.1e} "
+                  f"(half-life ~{half:.0f} updates)", flush=True)
+
+    def _on_step(self) -> bool:
+        return True
