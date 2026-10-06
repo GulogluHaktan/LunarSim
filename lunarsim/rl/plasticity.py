@@ -282,3 +282,68 @@ class ActorFreezeCallback(BaseCallback):  # type: ignore[misc]
                 print(f"[freeze] actor released at step "
                       f"{self.model.num_timesteps}", flush=True)
         return True
+
+
+class ActorLearningRateCallback(BaseCallback):  # type: ignore[misc]
+    """Give the actor its own, slower learning rate than the critic.
+
+    SAC drives both networks from one `lr_schedule`, so actor and critic move on
+    the SAME timescale. Actor-critic convergence results assume the opposite:
+    the actor must be the slower of the two (two-timescale stochastic
+    approximation -- Borkar; Konda & Tsitsiklis), so that it ascends a value
+    function which has had time to settle rather than chasing a moving one.
+
+    Measured on this project: after 60k steps of CRITIC-ONLY training the critic
+    still valued a landing policy at Q ~ -14, when its true return is positive
+    and in the hundreds. Releasing the actor then flipped Q to +100 while the
+    landing rate went from 52% to 0% within a single 10k-step window -- the
+    actor found what the critic overvalued, and the critic followed it there.
+    Lowering the single shared rate to protect the policy had been crippling the
+    critic at the same time, which is why neither direction helped.
+
+    Setting the param groups from a callback does NOT work, and this is the same
+    trap that made an earlier actor-freeze silently do nothing: SB3 calls
+    `_update_learning_rate` at the TOP of every `train()`, after every callback
+    hook has already fired, and writes `lr_schedule`'s value into every group.
+    So the override is installed by wrapping that method -- SB3 sets both rates,
+    then the wrapper puts the actor's back.
+    """
+
+    def __init__(self, actor_lr: float, verbose: int = 1):
+        super().__init__(verbose)
+        self.actor_lr = float(actor_lr)
+        self._installed = False
+
+    def _on_training_start(self) -> None:
+        if self._installed:
+            return
+        # Patch the CLASS, not the instance. Assigning a closure to
+        # `model._update_learning_rate` puts it in the model's __dict__, and
+        # SB3's save() pickles that -- which fails with
+        # "cannot pickle 'omni.kit.app._app.IApp'" because the closure reaches
+        # the Isaac app through the env. That killed a run at its first
+        # checkpoint. The instance carries only a float, which pickles fine.
+        cls = type(self.model)
+        self.model._actor_lr_override = self.actor_lr
+        if not getattr(cls, "_actor_lr_patched", False):
+            original = cls._update_learning_rate
+
+            def patched(self_model, optimizers):
+                original(self_model, optimizers)
+                lr = getattr(self_model, "_actor_lr_override", None)
+                if lr is not None:
+                    for g in self_model.actor.optimizer.param_groups:
+                        g["lr"] = lr
+
+            cls._update_learning_rate = patched
+            cls._actor_lr_patched = True
+        self._installed = True
+        if self.verbose:
+            crit = self.model.lr_schedule(1.0)
+            print(f"[two-timescale] critic lr {crit:.2e}, actor lr "
+                  f"{self.actor_lr:.2e} "
+                  f"(actor is {crit / max(self.actor_lr, 1e-12):.0f}x slower)",
+                  flush=True)
+
+    def _on_step(self) -> bool:
+        return True

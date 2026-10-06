@@ -99,6 +99,18 @@ parser.add_argument("--ent-coef", type=str, default="0.05",
                           "without exploration noise -- the wrong side to err on for a task whose "
                           "standing failure is never sampling a landing. Accepts a float, or "
                           "'auto'/'auto_<init>' to hand control back to the tuner.")
+parser.add_argument("--actor-lr", type=float, default=None,
+                     help="separate learning rate for the ACTOR. SAC uses one rate for "
+                          "both networks, which violates the two-timescale condition "
+                          "that actor-critic convergence rests on (Borkar; Konda & "
+                          "Tsitsiklis): the actor must move on a SLOWER timescale than "
+                          "the critic, otherwise it chases a value function that has not "
+                          "settled. Measured here: with 60k steps of critic-only training "
+                          "the critic still sat at Q ~ -14 for a policy whose true value "
+                          "is positive and in the hundreds, and the moment the actor was "
+                          "released Q flipped to +100 while the landing rate went 52%% -> "
+                          "0%% in one window. Lowering the shared rate to protect the "
+                          "policy had also been crippling the critic.")
 parser.add_argument("--critic-only-steps", type=int, default=0,
                      help="hold the ACTOR frozen for this many env steps after training "
                           "begins, so the critic can fit before the policy starts "
@@ -527,6 +539,12 @@ def main():
                 # would keep the loaded rate while the attribute lied about it.
                 model.learning_rate = args.learning_rate
                 model.lr_schedule = FloatSchedule(args.learning_rate)
+                if args.actor_lr is not None:
+                    # the actor keeps its own optimizer, so a separate rate only
+                    # needs its param groups set -- but SB3 rewrites them from
+                    # `lr_schedule` at the top of every train(), so this is
+                    # re-applied by the callback below rather than once here.
+                    pass
                 _ec = _parse_ent_coef(args.ent_coef)
                 if not isinstance(_ec, str):
                     import torch as _t
@@ -695,6 +713,9 @@ def main():
                 save_path=f"{args.out_dir}/snapshots",
                 name_prefix=f"{stage.name}",
                 save_replay_buffer=args.save_buffer))
+        if args.actor_lr is not None:
+            from lunarsim.rl.plasticity import ActorLearningRateCallback
+            cbs.append(ActorLearningRateCallback(args.actor_lr))
         if args.critic_only_steps > 0 and args.warm_start and first_model_creation:
             from lunarsim.rl.plasticity import ActorFreezeCallback
             cbs.append(ActorFreezeCallback(args.critic_only_steps))
