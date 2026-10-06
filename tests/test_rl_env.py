@@ -240,3 +240,37 @@ def test_lidar_obs_changes_dimensionality():
     obs2, _ = env_lidar.reset(seed=0)
     assert obs1.shape[0] == 16
     assert obs2.shape[0] == 22
+
+
+def test_yaw_rotates_the_thrust_direction():
+    """Yaw must rotate which way a tilt pushes.
+
+    The analytic thrust direction used to be `(T sin(tilt_y), -T sin(tilt_x))`
+    with no yaw term, so in this env yawing could not affect translation at all,
+    while Isaac applies the force body-local and PhysX rotates it by the full
+    attitude. Measured error at 15 deg of tilt: 11.4 deg of direction with 45 deg
+    of yaw, 21.1 deg with 90 deg -- 0.65 m/s^2 of lateral acceleration pointing
+    somewhere the model said it could not. It mattered because yaw is cheap
+    (alpha_yaw is 2.4x the tilt axes) and no reward term reads yaw angle, so a
+    policy could yaw for free here and then find its lateral control plane
+    rotated in Isaac.
+    """
+    params = LanderParams(spawn_altitude_m=50.0, spawn_v_z_m_s=0.0,
+                          spawn_xy_radius_m=0.0, max_episode_s=60.0)
+    accels = {}
+    for yaw in (0.0, np.pi / 2):
+        env = AnalyticLanderEnv(_flat_tile(), params=params, seed=0)
+        env.reset(seed=0)
+        env.state.update({"tilt_x": 0.2, "tilt_y": 0.0, "yaw": yaw,
+                          "wx": 0.0, "wy": 0.0, "wz": 0.0,
+                          "vx": 0.0, "vy": 0.0})
+        env.step(np.array([throttle_to_action(0.6), 0.0, 0.0, 0.0]))
+        accels[yaw] = (env.state["vx"], env.state["vy"])
+
+    # a +0.2 rad roll with yaw=0 pushes along -y; yawed 90 deg it must push +x
+    assert abs(accels[0.0][1]) > 10 * abs(accels[0.0][0]), accels
+    assert abs(accels[np.pi / 2][0]) > 10 * abs(accels[np.pi / 2][1]), accels
+    # and the MAGNITUDE must be unchanged -- yaw rotates the thrust, not its size
+    m0 = np.hypot(*accels[0.0])
+    m90 = np.hypot(*accels[np.pi / 2])
+    assert m0 == pytest.approx(m90, rel=1e-6), (m0, m90)

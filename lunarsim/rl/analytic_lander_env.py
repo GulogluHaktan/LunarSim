@@ -300,9 +300,28 @@ class AnalyticLanderEnv(gym.Env):
 
         lost_control = bool(np.hypot(s["tilt_x"], s["tilt_y"]) > p.loss_of_control_tilt_rad)
 
-        # body tilt (from RCS), not gimbal, redirects the fixed-direction DPS thrust
-        thrust_x = thrust_mag * np.sin(s["tilt_y"])
-        thrust_y = -thrust_mag * np.sin(s["tilt_x"])
+        # body tilt (from RCS), not gimbal, redirects the fixed-direction DPS
+        # thrust -- and the body's YAW rotates which way that tilt points.
+        #
+        # REAL BUG (found 2026-10-06 by audit): yaw was absent from these three
+        # lines, so in this env yawing could not affect translation at all,
+        # while Isaac applies the force body-local and PhysX rotates it by the
+        # full attitude. Measured direction error: 11.4 deg at 15 deg tilt with
+        # 45 deg of yaw, 21.1 deg at 90 deg of yaw -- 0.65 m/s^2 of lateral
+        # acceleration pointing somewhere the model said it could not.
+        #
+        # It is load-bearing because yaw is cheap and unpriced: alpha_yaw is
+        # 2.4x the tilt axes, 25 s of saturated yaw covers ~120 deg, and no
+        # reward term reads yaw ANGLE. So a policy could yaw freely here for
+        # free and then find its lateral control plane rotated in Isaac, where
+        # action[1] and action[2] no longer mean what it learned. Everything
+        # validated in this env inherited the error, including the controller
+        # feasibility results and the DAgger rollouts.
+        cy, sy = np.cos(s["yaw"]), np.sin(s["yaw"])
+        tilt_fwd = thrust_mag * np.sin(s["tilt_y"])          # body +x before yaw
+        tilt_lat = -thrust_mag * np.sin(s["tilt_x"])         # body +y before yaw
+        thrust_x = cy * tilt_fwd - sy * tilt_lat
+        thrust_y = sy * tilt_fwd + cy * tilt_lat
         thrust_z = thrust_mag * np.cos(s["tilt_x"]) * np.cos(s["tilt_y"])
 
         ax = thrust_x / mass_kg

@@ -3082,3 +3082,41 @@ Two things this makes possible that were not possible before:
   2. A clean isolation of the RL question. If RL started from this and still
      collapsed, "the policy was bad to begin with" would no longer be available
      as an explanation.
+
+## CORRECTION: the "22.9% -> 5%" headline was wrong, and the cause was my own confound
+
+Two changes landed in the same commit -- the touchdown-grading fix AND the
+repurposing of observation slot 15 from a dead constant 0.0 to time-remaining --
+and the v24 re-measurement attributed the whole drop to the grading. It was the
+other one. Isolated with `--legacy-obs15`:
+
+```
+                                                        landed
+old grading, old observation                            22/96 = 23%
+FIXED grading, old observation (--legacy-obs15)         21/96 = 22%
+FIXED grading, NEW observation                           5/96 =  5%
+```
+
+**The grading fix moved exactly one episode.** The 17-episode collapse was a
+trained policy being fed a 1.0 -> 0.0 ramp in a slot it had only ever seen as
+zero, which it loads without complaint because the vector stayed 16-wide.
+
+So:
+  - the ~22% ramp_35m baseline STANDS
+  - today's hyperparameter comparisons are NOT invalidated by the grading fix,
+    contrary to what the previous section claimed
+  - the touchdown label bug was real as a mechanism, provable by computation,
+    and its effect on THIS checkpoint's measured rate was negligible, because
+    its successful landings were already slow. It will matter for a policy that
+    arrives fast, and the reward-side consequence (severity flat above 1 m/s,
+    making a slam cheaper than a timeout) was severe regardless of the rate.
+
+The error was mine and it is the ordinary one: two variables, one measurement,
+one explanation. It was caught only because the harness audit flagged the
+observation-vintage trap independently.
+
+**Standing rule from this:** never change the observation layout and anything
+else in the same measurement. `--legacy-obs15` exists so a pre-change checkpoint
+can be scored on the input it was trained with; use it for every checkpoint
+produced before 2026-10-06, and note that every demo set on disk also carries
+0.0 in slot 15.
