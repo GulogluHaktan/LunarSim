@@ -3181,3 +3181,102 @@ t_td_max: 1.69, 1.70, 1.82, 1.79, 1.83, 1.87), so the usable form is
 `spawn_v_z_m_s` was right; the bare `>= h0/T` written elsewhere in the comments
 is what let an unreachable stage through. All seven stages satisfy the corrected
 rule now.
+
+# ================================================================
+# THE RECIPE THAT WORKS (2026-10-07)
+# ================================================================
+
+After twenty interventions that each failed in the same way, the problem turned
+out not to be learning rate, critic quality, exploration, reward shape or
+optimiser. It was that **nothing held the policy anywhere**. Every intervention
+changed how fast a warm-started policy left the good region; none changed
+whether it left.
+
+Mechanism, measured: these policies are ~96% saturated, so competence depends on
+the pre-tanh mean being large. Moving it from ~5 to ~1 takes actions from 1.0 to
+0.76 -- tiny in parameter space, catastrophic in behaviour -- and any optimiser
+covers that distance in the 10,000 updates that fit in one 10k-step window. The
+collapse was identical under Adam and SGD, at every learning rate, with a
+bounded critic and a diverging one, across a 100x range of reward scales.
+
+The fix is the standard offline-to-online constraint (TD3+BC, AWAC), applied as
+a proximal pull rather than a loss term so SB3's `train()` needs no surgery.
+
+## Working configuration on ramp_35m
+
+```
+scripts/train_sac_isaac.py --only-stage ramp_35m \
+    --steps-per-stage 400000 --checkpoint-every 50000 \
+    --out-dir out/<name> \
+    --warm-start out/bc_ramp35_dagger_cov.zip \
+    --gamma 0.99 --max-rocks-per-env 0 --ent-coef 0.005 \
+    --learning-rate 3e-4 --actor-lr 3e-5 --bc-anchor 1e-2 \
+    --reward-weight reward_total_scale=0.1 \
+    --log-std-max 0.0 --onpolicy-warmup --critic-only-steps 40000 \
+    --proxy-log-every 10000
+```
+
+Training-time landing rate (stochastic, so the deterministic figure is higher):
+
+```
+release           47.4%
+ 60k               5.6%   <- the dip the anchor cannot prevent, only survive
+ 70k-110k      20-30%
+140k              61.5%   <- above the policy it started from
+380k-390k      58-62%
+```
+
+Each flag earns its place, and the ones that do NOT appear were measured and
+dropped:
+
+  --bc-anchor 1e-2     THE one that matters. At 1e-3 the policy still dips to 0%
+                       and only climbs back to ~13%; at 1e-2 it recovers past its
+                       own start.
+  --gamma 0.99         ends the critic divergence outright (Q stayed in [-14,+6]
+                       where every other setting ran away: +100, -171, +1972,
+                       +109). Reachable only because the shaping ranks landing
+                       above stalling on its own (+2.64 shaping-only), so the
+                       terminal is allowed to discount away.
+  reward_total_scale   0.1. At 1.0 returns are O(400) and the critic diverges; at
+                       0.01, combined with gamma 0.99, the value range collapses
+                       to ~1 and the gradient is noise.
+  --critic-only-steps  lets the critic fit before the actor chases it. Necessary
+                       but nowhere near sufficient on its own.
+  --onpolicy-warmup    SB3 samples uniformly at random below `learning_starts`,
+                       so without this a warm start refits its critic on pure
+                       random-policy data.
+  --log-std-max 0.0    stops entropy pressure re-inflating the std into tanh
+                       saturation.
+
+## Pipeline from scratch for a new stage
+
+```
+# 1. controller demos IN ISAAC (not the analytic env -- they disagree)
+scripts/collect_zemzev_demos.py --stage <stage> --episodes 48 --seed0 41000 \
+    --out out/zemzev_<stage>_demos.npz
+
+# 2. clone with DAgger and the gain check (both are load-bearing)
+.venv/bin/python scripts/train_bc_from_demos.py \
+    --demos out/zemzev_<stage>_demos.npz --stage <stage> \
+    --epochs 400 --dagger-iters 3 --out out/bc_<stage>_dagger.zip
+
+# 3. RL with the configuration above, --warm-start out/bc_<stage>_dagger.zip
+```
+
+Step 2 is not optional. Plain cloning learns the SIGN of the vertical feedback
+gain wrong (+0.306 against the teacher's -0.98) because expert trajectories are
+collinear, and the loss cannot see it: MSE 0.068 with a mean action error of
+0.0485 coexisted with a 4% landing rate. DAgger takes the gain to -0.96..-1.54
+and the rate from 4% to 58%.
+
+## Reference ceilings, REAL Isaac, post-grading-fix
+
+```
+ramp_20m 96%   ramp_20m_fast 71%   ramp_35m 92%   ramp_50m 100%
+ramp_100m 100% ramp_150m 100%      orbit_descent 46%
+```
+
+Every one of the 23 controller failures across all seven stages is a correct
+touchdown rejected on lateral speed, with its terminal v_xy straddling the
+1.2 m/s limit. So RL rates are read against 92% on ramp_35m and 46% on
+orbit_descent, not against 100%.
