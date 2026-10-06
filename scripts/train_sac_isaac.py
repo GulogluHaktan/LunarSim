@@ -99,6 +99,16 @@ parser.add_argument("--ent-coef", type=str, default="0.05",
                           "without exploration noise -- the wrong side to err on for a task whose "
                           "standing failure is never sampling a landing. Accepts a float, or "
                           "'auto'/'auto_<init>' to hand control back to the tuner.")
+parser.add_argument("--log-std-max", type=float, default=None,
+                     help="cap the policy's PRE-TANH log std (SB3's own cap is 2.0, i.e. "
+                          "std up to 7.4). This is the knob --ent-coef cannot reach. "
+                          "Measured on this project's policies, which are ~96%% "
+                          "saturated: at pre-tanh std 4.5 the sampled action has std "
+                          "0.853 and 33%% of samples FLIP SIGN -- exploration is a coin "
+                          "flip between full-on and full-off, not a jitter. Lowering "
+                          "ent_coef 0.05 -> 0.005 only moved std 4.5 -> 3.2, i.e. flips "
+                          "33%% -> 26.5%%, which is why it changed nothing. log_std_max=0 "
+                          "(std <= 1.0) cuts flips to 2.2%%.")
 parser.add_argument("--proxy-log-every", type=int, default=10_000,
                      help="log the shaped return (the PROXY) and the landed_safely rate "
                           "(the TRUE objective) side by side every N steps, plus the "
@@ -250,6 +260,28 @@ from lunarsim.adapters.isaac.isaac_lander_vec_env import IsaacLanderVecEnv  # no
 from lunarsim.rl.curriculum import STAGES, STAGES_BY_NAME, make_tile_fn  # noqa: E402
 from lunarsim.rl.reward import RewardWeights  # noqa: E402
 
+def _apply_log_std_cap(value):
+    """Tighten SAC's pre-tanh log-std cap.
+
+    `LOG_STD_MAX` is a module-level global in stable_baselines3.sac.policies and
+    `Actor.get_action_dist_params` reads it as a global on every forward pass, so
+    rebinding it here applies to models created or loaded afterwards.
+
+    Why this and not --ent-coef: with a saturated policy the two are not
+    interchangeable. Entropy pressure sets how wide the pre-tanh Gaussian is, but
+    what reaches the environment is tanh of it, and once the mean sits near the
+    bound a wide Gaussian does not jitter the action -- it flips which bound the
+    action snaps to. Measured: pre-tanh std 4.5 gives 33% sign flips, 3.2 gives
+    26.5%, 1.0 gives 2.2%. So the entropy coefficient could be lowered 10x
+    (v31 did) and barely touch the behaviour the critic actually learns from.
+    """
+    from stable_baselines3.sac import policies as _sac_policies
+    old = _sac_policies.LOG_STD_MAX
+    _sac_policies.LOG_STD_MAX = float(value)
+    print(f"[log-std] cap {old} -> {value} "
+          f"(max pre-tanh std {float(np.exp(value)):.2f})", flush=True)
+
+
 def _reward_fn_from_args(args):
     """The reward this run trains on, with any --reward-weight overrides.
 
@@ -400,6 +432,8 @@ def sanity_rollout(model, venv, stage: Stage, args, max_steps: int = 2000) -> No
 
 
 def main():
+    if args.log_std_max is not None:
+        _apply_log_std_cap(args.log_std_max)
     if args.only_stage is None:
         stages = list(STAGES)
     else:
