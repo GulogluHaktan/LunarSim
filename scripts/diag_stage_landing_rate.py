@@ -30,6 +30,14 @@ parser.add_argument("--terrain-seed", type=int, default=7)
 parser.add_argument("--terrain-grid-n", type=int, default=80,
                      help="must match the --terrain-grid-n the checkpoint was trained with")
 parser.add_argument("--seed0", type=int, default=7000)
+parser.add_argument("--legacy-obs15", action="store_true",
+                     help="feed observation slot 15 the constant 0.0 it held before it "
+                          "was repurposed to carry time-remaining. Required to evaluate "
+                          "a checkpoint trained before that change: the vector stayed "
+                          "16-wide so it LOADS without complaint, but the policy has "
+                          "arbitrary weights on a slot it only ever saw as zero, and a "
+                          "measured difference would otherwise be attributed to whatever "
+                          "else changed.")
 parser.add_argument("--stochastic", action="store_true",
                      help="sample from the policy instead of taking its mean. Training "
                           "collects data this way while evaluation is deterministic, so a "
@@ -56,6 +64,36 @@ from lunarsim.rl.reward import default_reward_fn  # noqa: E402
 # hand to stay in step with the trainer).
 
 
+
+def _overshoot_ratios(state, info, params) -> dict:
+    """How far over its limit each `landed_safely` criterion actually is.
+
+    The clipped margins cannot answer this -- they saturate at 0.00 the moment a
+    limit is exceeded, so they rank nothing and hide magnitude. Read the impact
+    state the env publishes where available, for the same reason the env grades
+    from it: after contact the post-substep velocity is ~0.
+    """
+    import numpy as _np
+    s = info.get("impact_state") or state
+    vz = abs(float(s.get("vz", 0.0)))
+    vxy = float(_np.hypot(float(s.get("vx", 0.0)), float(s.get("vy", 0.0))))
+    tilt = float(_np.hypot(float(s.get("tilt_x", 0.0)), float(s.get("tilt_y", 0.0))))
+    w = float(_np.linalg.norm([float(s.get("wx", 0.0)), float(s.get("wy", 0.0)),
+                               float(s.get("wz", 0.0))]))
+    margins = info.get("landing_margins") or {}
+    out = {
+        "v_z": vz / max(params.safe_landing_v_z_m_s, 1e-6),
+        "v_xy": vxy / max(params.safe_landing_v_xy_m_s, 1e-6),
+        "tilt": tilt / max(params.safe_landing_tilt_rad, 1e-6),
+        "w": w / max(params.safe_landing_w_rad_s, 1e-6),
+    }
+    # leg_diff is not recoverable from the state, so invert its margin
+    if "leg_diff" in margins:
+        m = float(margins["leg_diff"])
+        out["leg_diff"] = (1.0 - m) if m > 0.0 else 1.0
+    return out
+
+
 def main():
     if args.stage not in STAGES_BY_NAME:
         raise SystemExit(f"no stage named {args.stage!r}; choices: {list(STAGES_BY_NAME)}")
@@ -63,11 +101,12 @@ def main():
     params = stage.params
     tile = generate_tile(terrain_config(stage, args.terrain_seed, args.terrain_grid_n))
     env = IsaacLanderEnv(tile=tile, params=params, reward_fn=default_reward_fn,
-                          seed=args.seed0, lunarsim_root=args.lunarsim_root)
+                          seed=args.seed0, lunarsim_root=args.lunarsim_root,
+                          legacy_obs15=args.legacy_obs15)
     model = SAC.load(args.checkpoint, device="cpu")
     max_steps = int(params.max_episode_s / params.dt_s) + 5
 
-    n_safe = n_lost = n_timeout = n_left = 0
+    n_safe = n_lost = n_timeout = n_left = n_crash = 0
     rows = []
     for ep in range(args.episodes):
         seed = args.seed0 + ep
@@ -87,10 +126,26 @@ def main():
         # when it is actually an undersized tile.
         left = bool(info.get("left_tile"))
         timed_out = truncated and not terminated and not left
-        n_safe += landed
-        n_lost += lost
-        n_timeout += timed_out
-        n_left += left
+        # EXCLUSIVE accounting. The four original counters were not
+        # exhaustive: an episode that touched down, stayed upright and missed a
+        # `landed_safely` criterion incremented nothing and appeared only as a
+        # CRASH tag in the per-episode rows. Measured over this project's own
+        # logs that was the DOMINANT outcome -- across four v21 snapshots the
+        # exclusive tags were CRASH 45, TIMEOUT 42, LANDED 9, while the summary
+        # line reported 9 + 42 + 0 + 0 and left 45 episodes invisible. Reading
+        # those summaries, "the policy will not commit to descending" was the
+        # natural diagnosis when in fact it committed every time and missed on
+        # precision.
+        if landed:
+            n_safe += 1
+        elif lost:
+            n_lost += 1
+        elif left:
+            n_left += 1
+        elif timed_out:
+            n_timeout += 1
+        else:
+            n_crash += 1
         s = env.state
         v_xy = float(np.hypot(s["vx"], s["vy"]))
         tilt_deg = float(np.degrees(np.hypot(s["tilt_x"], s["tilt_y"])))
@@ -108,18 +163,37 @@ def main():
         # the clearance, |w|, and whichever margins the env actually
         # computed, and name the binding criterion outright.
         margins = info.get("landing_margins") or {}
-        worst = min(margins, key=margins.get) if margins else None
-        detail = (f"  margins={{" + ", ".join(f"{k}={v:.2f}" for k, v in margins.items()) + "}"
-                  + (f" worst={worst}" if worst else "")) if margins else ""
+        # `min(margins, key=margins.get)` was WRONG and quietly so: every margin
+        # is `clip(1 - x/limit, 0, 1)`, so any criterion that EXCEEDS its limit
+        # saturates to exactly 0.00 and all violated criteria tie at the floor.
+        # `min` then returned whichever came first in the dict, which is `v_z`.
+        # Measured over 183 real touchdown rows: 50 had two or more criteria at
+        # 0.00 and 44 of those 50 reported `worst=v_z` by accident, i.e. 24% of
+        # all touchdown rows named a criterion at random. Conclusions about which
+        # criterion binds were drawn from this.
+        #
+        # Rank by how far OVER the limit each criterion actually is, which the
+        # clipped margin cannot express (1.001x over and 12x over are both 0.00).
+        over = _overshoot_ratios(env.state, info, params)
+        worst = max(over, key=over.get) if over else None
+        detail = ((f"  margins={{" + ", ".join(f"{k}={v:.2f}" for k, v in margins.items()) + "}"
+                   + (f" worst={worst}({over[worst]:.2f}x)" if worst else ""))
+                  if margins else "")
         rows.append(f"[ep {ep}] {tag:12s} t_s={info.get('t_s', float('nan')):5.1f}  "
                      f"alt={info.get('altitude_m', float('nan')):6.3f}  "
                      f"vz={s['vz']:7.2f}  vxy={v_xy:6.2f}  tilt={tilt_deg:5.1f}  w={w_mag:5.2f}{detail}")
         print(rows[-1])
 
-    print(f"\n=== {args.stage}: {n_safe}/{args.episodes} landed_safely ({100*n_safe/args.episodes:.0f}%), "
-          f"{n_lost}/{args.episodes} lost_control, {n_timeout}/{args.episodes} timeout, "
-          f"{n_left}/{args.episodes} left_tile "
-          f"-- checkpoint={args.checkpoint} ===")
+    # counters are exclusive and sum to --episodes; the assert is the point
+    assert n_safe + n_lost + n_left + n_timeout + n_crash == args.episodes
+    print(f"\n=== {args.stage}: {n_safe}/{args.episodes} landed_safely "
+          f"({100*n_safe/args.episodes:.0f}%), {n_crash} crash, {n_timeout} timeout, "
+          f"{n_lost} lost_control, {n_left} left_tile "
+          f"(sum={n_safe + n_lost + n_left + n_timeout + n_crash}) "
+          f"-- checkpoint={args.checkpoint} stage={args.stage} "
+          f"episodes={args.episodes} seed0={args.seed0} "
+          f"terrain_seed={args.terrain_seed} grid_n={args.terrain_grid_n} "
+          f"stochastic={args.stochastic} legacy_obs15={args.legacy_obs15} ===")
 
 
 if __name__ == "__main__":

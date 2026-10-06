@@ -252,9 +252,20 @@ class IsaacLanderEnv(gym.Env):
         reward_fn: Optional[RewardFn] = None,
         seed: int | None = None,
         lunarsim_root: str | Path | None = None,
+        legacy_obs15: bool = False,
     ):
         super().__init__()
         self.tile = tile
+        # OBSERVATION VINTAGE. Slot 15 was `leg_force_frac`, hardcoded 0.0 in
+        # every env -- a dead input. It now carries time-remaining. That keeps
+        # the vector 16-wide so old checkpoints LOAD, which is convenient and
+        # also a trap: a policy trained when the slot was always 0 has arbitrary
+        # weights on it, and feeding it a 1.0 -> 0.0 ramp changes its behaviour
+        # with no warning and no space-check failure. Set this to evaluate a
+        # pre-change checkpoint on the input it was actually trained with, so a
+        # measured difference can be attributed to the thing under test rather
+        # than to the slot.
+        self.legacy_obs15 = bool(legacy_obs15)
         self.params = params or LanderParams()
         if reward_fn is None:
             from lunarsim.rl.reward import default_reward_fn
@@ -616,7 +627,7 @@ class IsaacLanderEnv(gym.Env):
             #
             # Reusing the dead slot keeps the observation 16-wide, so existing
             # checkpoints still load.
-            max(0.0, 1.0 - self._t / p.max_episode_s),
+            0.0 if self.legacy_obs15 else max(0.0, 1.0 - self._t / p.max_episode_s),
         ]
         return normalize_obs(np.array(obs, dtype=np.float32))
 
