@@ -288,3 +288,127 @@ def test_angular_rate_penalty_counts_all_three_axes_equally():
     per_axis = [_angular_rate_penalty(w, *axis, limit) for axis in
                 ((0.4, 0.0, 0.0), (0.0, 0.4, 0.0), (0.0, 0.0, 0.4))]
     assert per_axis[0] == pytest.approx(per_axis[1]) == pytest.approx(per_axis[2])
+
+
+def test_lateral_penalty_keeps_a_gradient_at_the_speeds_that_actually_fail():
+    """The lateral term must never go flat NEAR THE GROUND.
+
+    The old hard cap was sized against the release speeds, where the ground
+    weight is tiny, and so bound at 7.07 m/s once the weight reached 1.0 --
+    inside the operating range. Measured on the best ramp_35m checkpoint,
+    both low-altitude timeouts sat in that flat zone (v_xy 12.68 at 2.75 m
+    and 13.62 at 0.45 m), skimming the surface and getting no signal to
+    bleed the speed off.
+    """
+    from lunarsim.rl.reward import _horizontal_speed_penalty
+
+    w = RewardWeights()
+    for v_xy, alt in ((13.62, 0.45), (12.68, 2.75), (14.47, 0.02), (6.5, 0.04)):
+        h = 1e-4
+        slope = (_horizontal_speed_penalty(w, v_xy + h, alt)
+                 - _horizontal_speed_penalty(w, v_xy - h, alt)) / (2 * h)
+        assert slope > 100.0, f"flat at v_xy={v_xy} alt={alt}: slope={slope}"
+
+
+def test_lateral_penalty_is_unchanged_below_the_knee():
+    """The knee only changes the fast tail, never the proven regime.
+
+    ramp_20m reached 83% with touchdown v_xy between 0.13 and 1.17, so
+    everything below the knee has to stay exactly the plain quadratic --
+    not merely equal to within rounding, since this guards a measured
+    result.
+    """
+    from lunarsim.rl.reward import _horizontal_speed_penalty
+
+    w = RewardWeights()
+    for v_xy in (0.13, 0.35, 1.03, 1.12, 1.17, w.kxy_knee_m_s):
+        for alt in (0.0, 0.5, 2.0, 4.0, 20.0, 35.0):
+            ground_weight = 1.0 / (1.0 + alt / w.kxy_alt_ref_m)
+            assert _horizontal_speed_penalty(w, v_xy, alt) == (
+                w.kxy * v_xy * v_xy * ground_weight)
+
+
+def test_lateral_penalty_alone_cannot_clip_the_whole_shaping_sum():
+    """`shaping_clip_abs` is a safety net, and has to stay one.
+
+    At kxy=400 the lateral term alone reached 8100 at v_xy=4.5 near the
+    ground, which clipped the summed shaping by itself and flattened the
+    descent-envelope, tilt, omega and progress gradients at the same time.
+    """
+    from lunarsim.rl.reward import _horizontal_speed_penalty
+
+    w = RewardWeights()
+    worst_other_terms = w.profile_cap + w.tilt_cutoff_cap + w.omega_penalty_cap + w.time_k
+    for v_xy in (3.0, 4.5, 6.5, 14.0):
+        total = _horizontal_speed_penalty(w, v_xy, 0.0) + worst_other_terms
+        assert total < w.shaping_clip_abs, (
+            f"v_xy={v_xy} m/s clips the sum ({total} >= {w.shaping_clip_abs})")
+
+
+def test_descent_envelope_floor_matches_the_real_touchdown_limit():
+    """The envelope AT CONTACT is what touchdown speed the reward demands.
+
+    `profile_alt_floor_m` sets it, and at 0.25 m it demanded 0.39 m/s
+    against a `safe_landing_v_z_m_s` of 1.0 -- 2.5x gentler than the vehicle
+    requires. It must sit just under the real limit, not far under it.
+    """
+    from lunarsim.rl.reward import descent_envelope_m_s
+    w = RewardWeights()
+    limit = LanderParams().safe_landing_v_z_m_s
+    floor = descent_envelope_m_s(w, 0.0)
+    assert 0.6 * limit <= floor < limit, f"envelope floor {floor} vs limit {limit}"
+
+
+def test_vertical_and_lateral_channels_have_comparable_authority():
+    """Neither channel may be so weak the policy can ignore it.
+
+    Measured on the best ramp_35m checkpoint: with profile_k=35 the charge
+    separating a landing from a crash was 63.7/step vertically against
+    792.4/step laterally, 12.4x apart, and v_z duly became the binding
+    criterion on 3 of the 4 remaining crashes.
+    """
+    from lunarsim.rl.reward import _descent_envelope_penalty, _horizontal_speed_penalty
+    w = RewardWeights()
+    alt = 0.2
+    vertical = (_descent_envelope_penalty(w, alt, -1.8)
+                - _descent_envelope_penalty(w, alt, -0.8))
+    lateral = (_horizontal_speed_penalty(w, 1.7, alt)
+               - _horizontal_speed_penalty(w, 0.9, alt))
+    ratio = vertical / lateral
+    assert 0.25 < ratio < 4.0, f"channels {ratio:.2f}x apart (vertical={vertical}, lateral={lateral})"
+
+
+def test_exceeding_the_descent_envelope_is_never_profitable():
+    """Descending faster than allowed must not pay, at any altitude.
+
+    The progress reward is capped AT the envelope precisely so that the only
+    thing extra speed can do is incur the envelope penalty.
+    """
+    from lunarsim.rl.reward import (descent_envelope_m_s, _descent_envelope_penalty,
+                                    _descent_progress_reward)
+    w = RewardWeights()
+    for alt in (10.0, 5.0, 2.0, 1.0, 0.2):
+        env = descent_envelope_m_s(w, alt)
+        for excess in (0.5, 1.0, 3.0):
+            gain = (_descent_progress_reward(w, alt, -(env + excess), 35.0)
+                    - _descent_progress_reward(w, alt, -env, 35.0))
+            cost = (_descent_envelope_penalty(w, alt, -(env + excess))
+                    - _descent_envelope_penalty(w, alt, -env))
+            assert gain - cost < 0.0, f"diving pays at alt={alt}, excess={excess}"
+
+
+def test_descent_envelope_penalty_keeps_a_gradient_through_free_fall():
+    """A near-ground free-fall arrival is ~8 m/s against a <1 m/s envelope.
+
+    `profile_cap` has to stay clear of that whole range; at profile_k=400 a
+    cap of 3000 would have saturated at 2.74 m/s of excess and recreated,
+    vertically, the defect just removed from the lateral term.
+    """
+    from lunarsim.rl.reward import descent_envelope_m_s, _descent_envelope_penalty
+    w = RewardWeights()
+    for excess in (1.0, 3.0, 5.0, 7.0):
+        vz = -(descent_envelope_m_s(w, 0.2) + excess)
+        h = 1e-4
+        slope = (_descent_envelope_penalty(w, 0.2, vz - h)
+                 - _descent_envelope_penalty(w, 0.2, vz + h)) / (2 * h)
+        assert slope > 100.0, f"flat at {excess} m/s of excess: slope={slope}"

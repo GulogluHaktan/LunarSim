@@ -98,6 +98,13 @@ parser.add_argument("--ent-coef", type=str, default="0.05",
                           "without exploration noise -- the wrong side to err on for a task whose "
                           "standing failure is never sampling a landing. Accepts a float, or "
                           "'auto'/'auto_<init>' to hand control back to the tuner.")
+parser.add_argument("--reward-weight", type=str, action="append", default=None,
+                     metavar="NAME=VALUE",
+                     help="override one RewardWeights field, repeatable. Exists so a "
+                          "reward A/B is a reproducible command rather than an edit to "
+                          "the source: e.g. --reward-weight profile_k=35 "
+                          "--reward-weight kxy_knee_m_s=1e9 reverts the vertical and "
+                          "lateral fixes without touching reward.py.")
 parser.add_argument("--checkpoint-every", type=int, default=0,
                      help="also save a checkpoint every N timesteps, not just at stage end. "
                           "MEASURED reason this exists: performance across runs goes up then "
@@ -138,6 +145,32 @@ from lunarsim.adapters.isaac.isaac_lander_vec_env import IsaacLanderVecEnv  # no
 # copies that motivated it.
 from lunarsim.rl.curriculum import STAGES, STAGES_BY_NAME, make_tile_fn  # noqa: E402
 from lunarsim.rl.reward import RewardWeights  # noqa: E402
+
+def _reward_fn_from_args(args):
+    """The reward this run trains on, with any --reward-weight overrides.
+
+    Returns None when nothing is overridden so the env keeps using its own
+    default and this stays a no-op on the normal path.
+    """
+    if not args.reward_weight:
+        return None
+    from dataclasses import fields
+
+    from lunarsim.rl.reward import make_apollo_reward_fn
+
+    valid = {f.name: f.type for f in fields(RewardWeights)}
+    overrides = {}
+    for item in args.reward_weight:
+        if "=" not in item:
+            raise SystemExit(f"--reward-weight wants NAME=VALUE, got {item!r}")
+        name, _, raw = item.partition("=")
+        name = name.strip()
+        if name not in valid:
+            raise SystemExit(f"no RewardWeights field named {name!r}")
+        overrides[name] = float(raw)
+    print(f"[reward] overriding {overrides}", flush=True)
+    return make_apollo_reward_fn(RewardWeights(**overrides))
+
 
 
 def _seed_replay_buffer_from_demos(model: "SAC", demo_path: str, n_envs: int, n_repeats: int = 1) -> None:
@@ -290,6 +323,7 @@ def main():
                 num_envs=args.n_envs, tile_fn=tile_fn, params=stage.params,
                 env_spacing_m=max_tile * 1.5, seed=args.terrain_seed,
                 max_rocks_per_env=args.max_rocks_per_env,
+                reward_fn=_reward_fn_from_args(args),
             )
         else:
             venv.params = stage.params

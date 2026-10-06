@@ -1822,3 +1822,462 @@ parsed it as an unclosed tag. The `--file` tail path escaped `& < >`, the
 -- which is full of those characters -- the fix is to escape everything that is
 not the `<pre>` wrapper the HTML mode is there for. Added `_esc()` and applied
 it to both paths.
+
+### gamma 0.997 does slow the Q growth (v22 vs v21, aligned by step)
+
+Same stage, same warm start, same 200k budget, only gamma differs:
+
+```
+step        v21 (g=0.998)   v22 (g=0.997)
+1.504M          127             134
+1.522M          166             157
+1.546M          181             175
+1.559M          201             173
+```
+
+v21's Q grew 127 -> 329 over its 200k steps (2.6x) -- that is the
+overestimation signature in plain sight. v22 tracks ~14% lower at the same
+step. Direction is right; whether it converts into landing rate is what the
+snapshot evaluation decides.
+
+(v22's first logged critic_loss is 452 against v21's 32.6. That is the
+warm-start transient, not instability: reloading a critic trained at g=0.998
+and continuing at 0.997 makes every stored value slightly wrong for the new
+horizon, so the loss spikes and then recovers -- it was back to 66 within a
+few hundred steps.)
+
+### gamma 0.997 does NOT improve landing rate (v22) -- gamma is not the lever
+
+```
+snapshot    v21 (g=0.998)   v22 (g=0.997)
+1.55M            8%              8%
+1.60M            4%              0%
+1.65M           21%              4%
+1.70M            4%             12%
+total         9/96            6/96
+```
+
+6 vs 9 successes out of 96 is inside the noise. So the 14% reduction in Q
+growth that v22 demonstrably achieved did NOT convert into landing rate, and
+the "Q inflation -> poor performance" link I assumed is not confirmed. Do not
+retry gamma as the fix.
+
+The mechanism is coherent and worth keeping: lowering gamma sets two effects
+against each other. Compounding of the critic's bootstrap shrinks (good), but
+the distant landing bonus is also discounted harder relative to near-term
+shaping, so STALLING becomes relatively more attractive (bad). v22's timeout
+counts (6/12/8/9 of 24) are consistent with the second effect. The earlier
+sweep that showed landing still ahead at 0.997 measured a fixed pair of
+trajectories; it could not see the policy shifting toward the stall.
+
+### The dominant failure mode is not stalling -- it is missing a criterion at touchdown
+
+From the v22 breakdown, e.g. the 1.55M snapshot: of 24 episodes, 2 landed,
+6 timed out, and **16 touched down but failed one of the five
+`landed_safely` criteria**. So two thirds of episodes get the vehicle to the
+ground and lose on precision, not on willingness to descend. That makes the
+binding criterion the thing to measure next, rather than another
+hyperparameter.
+
+### Two saturation defects in the lateral term, both measured, both fixed
+
+Per-episode margins on the best ramp_35m checkpoint (21%, v21 1.65M) gave the
+first clear picture of HOW it fails. Of 24 episodes: 5 landed, 5 timed out,
+**14 touched down and missed a criterion**. The binding criterion is lateral
+speed, not vertical:
+
+```
+v_xy at or over its limit:  13 of the 14 crashes
+v_z  at or over its limit:   7 of the 14
+landed  v_xy: 0.35 1.03 1.05 1.12 1.17      (limit ~1.2 m/s)
+crashed v_xy: 1.26 1.57 1.59 1.88 1.94 1.95 2.21 2.53 3.15 3.37 4.70 6.50 14.47
+```
+
+Most failures are NEAR misses. And the reward was flat in exactly that region,
+for two independent reasons:
+
+**1. `kxy_cap` saturated near the ground.** The cap was sized against the
+release speeds, where the ground weight is tiny (orbit_descent at 200 m:
+weight 0.0196, so the cap bound at 50 m/s -- correct). At ground level the
+weight is 1.0 and the same cap bound at `sqrt(20000/400)` = **7.07 m/s**,
+inside the operating range. Both low-altitude timeouts lived there:
+
+```
+ep13  alt=2.75  v_xy=12.68   (saturation at that altitude: 9.18)
+ep15  alt=0.45  v_xy=13.62   (saturation at that altitude: 7.46)
+```
+
+Both were skimming the surface at ~13 m/s and refusing to land, with
+`d(penalty)/d(v_xy) = 0` -- nothing anywhere told them to slow down.
+
+**2. `shaping_clip_abs` was being filled by the lateral term alone.** Its
+comment estimated the worst sum at 7400 including "kxy 1200", a figure from
+before kxy was raised 12 -> 400. At 400 the lateral term alone reaches 8100 at
+v_xy=4.5 near the ground, so it clipped the whole sum by itself and flattened
+the descent-envelope, tilt, omega AND progress gradients at the same time. The
+crashes at v_xy 4.70, 6.50 and 14.47 were all in that state.
+
+**The fix** is a knee, not a bigger cap: quadratic below `kxy_knee_m_s=2.0`,
+linear above (`knee**2 + 2*knee*(v_xy - knee)`), which is value- and
+slope-continuous at the knee. It keeps the magnitude and restores the slope:
+
+```
+state                     old       new     d/dv_xy old   new
+ep15 skim 13.62@0.45    20000     18150            0.0   1438
+ep13 skim 12.68@2.75    20000     11074            0.0    948
+ep19 crash 14.47@0.02   20000     21445            0.0   1592
+ep18 crash  1.26@0.00     635       635           1008   1008
+```
+
+`kxy_cap` 20000 -> 60000 and `shaping_clip_abs` 8000 -> 60000, both now true
+safety nets that no stage's release speed reaches.
+
+Verified before training:
+  - below the knee the term is **bit-identical** to the old quadratic (54/54
+    sampled points over the whole ramp_20m touchdown range), so the proven 83%
+    regime is untouched; the multiplication order is deliberately preserved to
+    make that exact rather than equal-to-within-rounding
+  - the proven ZemZev landing still beats the failure modes by a wide margin
+    (+288 discounted, was +311), and its OWN score rose 141.7 -> 151.5,
+    because the controller unavoidably carries >2 m/s laterally early in the
+    descent and the knee stops over-taxing it
+  - three regression tests added for the defect class (gradient present at the
+    speeds that actually fail; sub-knee values unchanged; lateral term alone
+    cannot fill the clip). 17 reward tests pass, suite at baseline.
+
+v23 is the A/B: same stage, same warm start, gamma 0.998, 200k, snapshots --
+directly against v21's 21%.
+
+### v23: the knee works, and it moved the binding criterion to v_z
+
+```
+snapshot    v21 (old)   v22 (gamma)   v23 (knee)
+1.55M          8%           8%            4%
+1.60M          4%           0%           12%
+1.65M         21%           4%           25%   <- best
+1.70M          4%          12%           17%
+total       9/96         6/96         14/96
+```
+
+14 vs 9 successes out of 96 is about 1 sd, so the aggregate is NOT significant
+on its own. The mechanistic evidence is much stronger than the rate, and it is
+what matters:
+
+```
+                      v21 best (21%)                         v23 best (25%)
+landed  v_xy    0.35 1.03 1.05 1.12 1.17          0.50 0.73 0.86 0.88 0.91 0.95
+crashed v_xy    1.26 ... 3.37 4.70 6.50 14.47     1.47 1.55 1.65 1.67
+crashes         14                                4
+binding         v_xy on 13 of 14                  v_z on 3 of 4
+```
+
+The 2-14 m/s touchdown tail is gone and the binding criterion has moved to the
+vertical channel. That is exactly what the change was aimed at.
+
+Cost: timeouts rose 5 -> 14, in two distinct populations. Eight sit at 0.8-3.6 m
+with v_xy 2.7-8.1, i.e. they now correctly refuse to touch down fast but cannot
+null the lateral speed inside the 25 s budget. Six never descend at all
+(15-22 m, vz at or above zero) -- v21 had 3 of those, so at n=24 that part is
+inside the noise.
+
+### The vertical channel was 12x weaker than the lateral one
+
+Measured per step at alt=0.2 m, the charge separating a landing from a crash:
+
+```
+vertical, vz  -0.8 -> -1.8 :   63.7
+lateral,  vxy  0.9 ->  1.7 :  792.4     (12.4x)
+```
+
+Same defect as kxy=12, same fix: `profile_k` 35 -> 400 brings it to 416/step,
+a 0.53 ratio against the lateral channel instead of 0.08.
+
+A correction to an earlier reading of this: exceeding the envelope was NOT
+profitable, at any altitude -- the progress reward is capped at the envelope, so
+extra speed earns nothing and only incurs the penalty. What was wrong was the
+MAGNITUDE: 0.5 m/s of excess cost 8.8/step, which against lateral terms of
+several hundred per step was noise. It now costs 100/step, and a free-fall
+arrival costs 20851 instead of 2027. The sign was always right; it just did not
+matter.
+
+Two coupled numbers had to move with it:
+  - `profile_cap` 3000 -> 25000. At k=400 a cap of 3000 saturates at 2.74 m/s
+    of excess, which is inside the range a near-ground free-fall arrival
+    reaches (~8 m/s) -- i.e. it would have recreated vertically the exact
+    defect just removed laterally. The block's own comment demands the term
+    stay unsaturated out to ~7 m/s.
+  - `profile_climb_k` 70 -> 800, holding the 2x ratio to profile_k that was
+    measured to stop the climb-away exploit. v23 still timed out 6 of 24 at
+    15-22 m with vz at or above zero, so that relationship is still carrying
+    load and must not become relatively free.
+  - `shaping_clip_abs` 60000 -> 80000 to keep the clip a safety net.
+
+### `profile_alt_floor_m` was documented as "not a tunable" and was the most load-bearing number in the block
+
+It floors the altitude inside the sqrt, which means it sets the envelope AT
+CONTACT -- the touchdown speed the reward demands. At 0.25 m that was
+`0.78*sqrt(0.25)` = **0.39 m/s against a `safe_landing_v_z_m_s` of 1.0**: the
+reward was asking for a touchdown 2.5x gentler than the vehicle needs, and
+(before profile_k rose) had no authority to enforce even that. Raised to 1.0 m,
+giving a 0.78 m/s floor, a 22% margin under the real limit.
+
+This also attacks the hover-just-above-the-ground population directly, because
+the progress reward is capped at the envelope: at alt=0.2 m the rate it pays
+for goes 0.39 -> 0.78 m/s, doubling the reward for descending the last metre
+(267 -> 535 per step) rather than hanging there.
+
+Verified: the proven ramp_20m touchdown regime (vz -0.04..-0.95) still pays
+essentially nothing (0.0/0.0/0.2/11.6 per step at alt=0.2, against
+0.0/0.4/5.9/11.0 before); the proven ZemZev landing still beats the failure
+modes by +295 discounted and its own score rose again; no saturation out to
+7 m/s of excess; 4 more regression tests (envelope floor vs the real limit,
+channel balance, diving never pays, no flat spot through free fall). Suite:
+163 passed, 7 pre-existing failures.
+
+v24 is the A/B: same stage, same warm start, gamma 0.998, 200k, snapshots.
+
+### v24: the vertical fix lands it. ramp_35m 6% -> 29% over the night.
+
+```
+run                 snapshots (24 eps each, seed0=31000)   best   total
+v21  old reward      8,  4, 21,  4                          21%    9/96
+v22  gamma 0.997     8,  0,  4, 12                          12%    6/96
+v23  lateral knee    4, 12, 25, 17                          25%   14/96
+v24  + vertical     29,  4, 17, 21                          29%   17/96
+```
+
+Statistically honest: 17/96 vs 9/96 is a two-proportion z of 1.69, p ~ 0.09.
+Not significant at 0.05 -- a trend. The evidence that matters is mechanistic:
+each intervention made a specific prediction about the margins and each
+prediction held.
+
+```
+                 landed v_xy median    crashed v_xy max    timeouts at best
+v21                    1.05                 14.47                5
+v23                    0.87                  1.67               14
+v24                    0.49                  4.22                4
+```
+
+The predicted side effect of raising `profile_alt_floor_m` -- doubling the
+reward for descending the last metre -- shows up exactly where it should:
+v23's 14 timeouts at its best snapshot fall to 4 in v24.
+
+**The reward is now balanced, and that is the real result.** The binding
+criterion on v24's remaining failures is spread across v_xy (7), v_z (5),
+tilt (3) and |w| (1) instead of being one criterion on 13 of 14. A single
+criterion dominating was the signature of a reward defect; a spread means
+further progress needs capability or training time, not more reshaping. The
+remaining crashes are near misses -- ep12 touched down at v_xy=1.29 against a
+1.2 limit, i.e. it missed by 0.09 m/s.
+
+So: stop reshaping the reward. The three defects found tonight (lateral
+saturation, clip filled by one term, vertical channel 12x too weak) were all
+real and all measured; there is no evidence of a fourth.
+
+### Next: rebuild the ladder on the corrected reward, from the bottom
+
+v24's best snapshot is its EARLIEST (1.55M, 50k steps in), then 4%, 17%, 21%.
+The warm-started policy is already near its best under the new reward and
+training initially makes it worse. So more ramp_35m steps is the wrong spend;
+the earlier rungs are, because every later stage inherits them.
+
+Note the measured rates of the existing checkpoints do NOT change with the
+reward -- the reward only affects what training does, not what a trained policy
+achieves. ramp_20m stays 83% and ramp_20m_fast stays 46%. What changes is where
+further training from them can get to.
+
+v25 retrains ramp_20m_fast (the 46% rung) under the corrected reward, warm
+started from v9's 83% ramp_20m.
+
+### v25: restarting a rung from below loses to the rung's own checkpoint
+
+Retrained ramp_20m_fast under the corrected reward, warm started from v9's 83%
+ramp_20m, 200k steps:
+
+```
+1.05M  25%      v16's existing ramp_20m_fast checkpoint, re-measured on the
+1.10M  33%      IDENTICAL sample (24 eps, seed0=31000): 11/24 = 46%
+1.15M  12%
+1.20M  33%   <- best
+```
+
+So 33% against a 46% incumbent. This is NOT evidence that the new reward is
+worse, and it must not be read that way: v25 had only 200k steps on this stage
+while v16's checkpoint carries a much longer history, and the two started from
+different policies. What it measures is that 200k steps cannot reproduce that
+history.
+
+The planning error is mine and worth recording: "rebuild the ladder from the
+bottom on the corrected reward" throws away training history for no reason.
+The reward only changes what FURTHER training does, so the right move is to
+continue each rung from its own best checkpoint, not to restart it from the
+rung below. v26 does that -- ramp_20m_fast from v16 itself, 200k, new reward,
+against v16's own 46%.
+
+### v26: continuing ramp_20m_fast from its OWN best checkpoint also degrades it
+
+```
+1.55M  17%
+1.60M  21%
+1.65M  29%   <- best
+1.70M   0%
+```
+
+v16's own checkpoint measures 46% on the same 24 episodes. So 200k more steps
+from it, under the corrected reward, took the stage DOWN from 46% to 29%.
+
+This contradicts the assumption I had been working under all night -- that the
+reward was the lever. Two readings fit:
+  (a) the new reward helps ramp_35m (21 -> 29%) and hurts ramp_20m_fast
+      (46 -> 29%)
+  (b) further training degrades the stage regardless of reward, and v16's 46%
+      was a peak that any continuation destroys
+
+(b) is consistent with the mid-run collapse this file already documents, and it
+would mean the reward conclusions drawn tonight are confounded. The two are
+distinguishable with one control: continue from v16 for 200k under the OLD
+weights. v27 is that run.
+
+### `--reward-weight NAME=VALUE` added to the trainer
+
+Repeatable override on any RewardWeights field, so a reward A/B is a
+reproducible command instead of an edit to reward.py that has to be remembered
+and undone. Verified it reproduces the old reward exactly: with
+`kxy_knee_m_s=1e9 kxy_cap=20000`, the lateral charge at v_xy=13.62 / alt=0.45
+is 20000 again, i.e. the old saturated value. Passing no override returns None
+and the env keeps its own default, so the normal path is untouched.
+
+### THE CONTROL SETTLES IT: continuation degrades the stage under EITHER reward
+
+```
+run (200k from v16's ramp_20m_fast)   snapshots        best   total
+v16 incumbent                          --               46%     --
+v27  OLD reward (via --reward-weight)  17, 33, 21, 21   33%   22/96
+v26  NEW reward                        17, 21, 29,  0   29%   17/96
+```
+
+So reading (b) is the right one: **further training takes the stage down
+regardless of reward.** v16's 46% was a peak and any continuation destroys it.
+On this stage old and new reward are indistinguishable (22 vs 17 of 96, sd of
+the difference ~6.2).
+
+This does NOT invalidate the ramp_35m reward comparison, and it is worth being
+precise about why: v21/v23/v24 all had the same structure -- same warm start,
+same 200k budget, differing only in reward -- so the degradation pressure was
+equal in every arm and the comparison stays controlled. What it changes is the
+interpretation of the headline. "ramp_35m 6% -> 29%" is two separate effects:
+snapshot-picking (6 -> 21) and the reward fixes (21 -> 29).
+
+That the reward fixes do nothing on ramp_20m_fast is consistent rather than
+contradictory: both defects were SATURATION defects, and saturation only binds
+at speed. ramp_20m_fast is the gentlest rung (release 2-5 m/s from 20 m), so
+there was little for them to do there.
+
+**The dominant problem is no longer the reward. It is that training degrades
+the policy**, and every "best checkpoint" in this file is a peak that the run
+then walked away from. Stop spending 200k continuations expecting improvement
+until this is addressed.
+
+First candidate, from the list already in this file: the replay ratio. With
+n_envs=16 and `--gradient-steps -1` SB3 does one gradient step per env step,
+i.e. 16 updates per vec step -- a lot of updates per unique transition, which
+is the classic driver of critic overfitting. `--gradient-steps` is already
+exposed. v28 tests 1:4.
+
+## MEASUREMENT ERROR: 24 episodes cannot rank checkpoints, and "degradation" was an artifact
+
+v28 (replay ratio 1:4) came back at best 29%, 17/96 -- identical to 1:1. So
+gamma, reward (on this stage) and replay ratio have all been refuted as causes
+of the apparent decline. At that point the right move was to question the
+measurement rather than find a fourth cause, and that was the answer:
+
+```
+checkpoint        seed 31000   seed 52000   seed 73000   pooled
+v16                   46%           8%          33%      21/72 = 29%
+v27 best              33%          21%          29%      20/72 = 28%
+```
+
+**v16's 46% is a sampling artifact.** The same policy scores 8% on another 24
+episodes. Pooled over 72 episodes v16 and v27's best are indistinguishable,
+so there was never a 46% to degrade from.
+
+The error was mine and it is a textbook one: v16 was SELECTED as the best
+ramp_20m_fast checkpoint using the seed0=31000 sample, and then the decline was
+measured on that same sample. That is selection and comparison on identical
+data, so regression to the mean reads as degradation.
+
+### What this invalidates
+
+The spread on 24 episodes is roughly +/-15 points -- one policy ranged 8% to
+46%. So every single-sample figure in this file carries that much noise, and
+these conclusions are NOT established:
+
+  - ramp_35m "21% -> 25% -> 29%" across v21/v23/v24. Single sample each; the
+    progression is within noise.
+  - ramp_20m's 83% and every other per-stage headline rate.
+  - "performance peaks mid-run and collapses", and the non-monotonic snapshot
+    curves (8/4/21/4 and the rest). Much of that oscillation is measurement
+    noise, not the policy changing. The underlying claim may still be true but
+    it is not established by those numbers.
+
+### What survives
+
+Nothing that depends on a 24-episode rate. These do not:
+
+  - The two saturation defects, which are properties of the reward function
+    proven by direct computation -- the lateral term was provably flat above
+    7.07 m/s near the ground, the clip was provably filled by one term, and the
+    vertical channel was provably 12x weaker than the lateral one.
+  - The margin distributions, which aggregate every episode of a run rather
+    than resting on a success count: crashes 14 -> 4, worst crash v_xy
+    14.47 -> 1.67, median landed v_xy 1.05 -> 0.49, and the binding criterion
+    going from one criterion on 13 of 14 failures to a spread across four.
+
+### The standard from here
+
+`--episodes 24` is for a smoke test, never for a comparison. At a ~30% rate,
++/-5 points needs n ~ 84, so a real comparison is 96+ episodes, and a
+checkpoint must never be selected and then judged on the same seeds.
+
+## THE RESULT, properly measured: the reward fixes roughly double the landing rate
+
+96 episodes, seed0=41000 -- a sample never used to select either checkpoint:
+
+```
+checkpoint                              landed     timeout
+v21 best (OLD reward)                 11/96 = 11.5%    26
+v24 best (NEW reward)                 22/96 = 22.9%    22
+```
+
+Two-proportion z = 2.09, **p ~ 0.037**. Significant, and the improvement is not
+bought with timeouts (26 -> 22).
+
+Both checkpoints were picked as the best of four snapshots on the seed0=31000
+sample, so both carry the same selection advantage and the fresh sample makes
+the DIFFERENCE trustworthy even though it inflated both absolute figures.
+
+So the corrected headline for the night: **ramp_35m went from 11.5% to 22.9%**,
+not 6% to 29%. The earlier numbers were inflated by a lucky 24-episode sample.
+The improvement is real and about 2x; the absolute level is lower than reported.
+
+### Settled, in order of confidence
+
+1. Three saturation defects in the reward were real, proven by direct
+   computation, and fixing them roughly doubles the landing rate (p~0.037).
+2. The margin distributions shifted exactly as each fix predicted (crashes
+   14 -> 4, worst crash v_xy 14.47 -> 1.67, binding criterion spread from one
+   to four).
+3. 24 episodes cannot rank checkpoints (one policy spanned 8-46%). Comparisons
+   need 96+, on seeds not used for selection.
+4. The apparent mid-run collapse and the "degradation on continuation" were
+   largely this measurement error. Not disproven, but not established either.
+
+### Open
+
+- ramp_20m_fast, ramp_20m, ramp_50m rates are all unmeasured to this standard.
+  ramp_20m_fast pools to ~29% over 72 episodes, well below its reported 46%.
+- Whether training degrades a policy at all is now an open question, and the
+  honest answer is that the evidence gathered for it does not survive.
+- ramp_50m and beyond still need the random-policy reachability probe and the
+  `usable lateral room > episode drift` check before training. That rule came
+  out of seven failed runs and still stands.

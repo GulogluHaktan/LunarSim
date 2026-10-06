@@ -89,18 +89,58 @@ class RewardWeights:
     # flight the term has lost its gradient, which is exactly the defect
     # the old braking envelope had (it saturated within a tiny range and
     # then said nothing about whether braking harder helped).
-    profile_k: float = 35.0
+    #
+    # RAISED 35 -> 400 (2026-10-06). Once the lateral channel was fixed the
+    # binding criterion moved to v_z -- 3 of the 4 remaining crashes on the
+    # best ramp_35m checkpoint, at vz -1.30/-1.74/-1.83 against a 1.0 m/s
+    # limit. Measured per step at alt=0.2 m, the charge separating a
+    # landing from a crash was:
+    #   vertical, vz -0.8 -> -1.8 :   63.7
+    #   lateral,  vxy 0.9 -> 1.7  :  792.4   (12.4x more authority)
+    # Worse, arriving fast was PROFITABLE: at alt=2 m, going from vz=-0.8
+    # to -1.3 earned +207.8 of descent progress against +1.4 of envelope
+    # penalty, a net +206 for diving. 400 puts the two channels on the same
+    # order (416/step vs 792/step at the same states), which is what it has
+    # to be for them to trade off instead of one being ignored -- the same
+    # reasoning, and the same number, as kxy 12 -> 400.
+    profile_k: float = 400.0
     # Climbing is outside the envelope too, and needs its own gradient: with
     # a flat time cost, a climb and a hover cost the SAME per step, so
     # nothing locally opposes the climb-away exploit this project measured
     # before (sustained full-throttle climbs to 680-1372 m). Penalising
     # positive vz directly restores that gradient without reintroducing an
     # altitude integral -- the thing the rewrite exists to remove.
-    profile_climb_k: float = 70.0
-    profile_cap: float = 3000.0
-    # floors the altitude inside the sqrt: a divide-by-zero/degenerate
-    # guard at contact, not a tunable.
-    profile_alt_floor_m: float = 0.25
+    # Kept at 2x profile_k, the ratio that was measured to stop the
+    # climb-away exploit. v23 still timed out 6 of 24 episodes at 15-22 m
+    # with vz at or above zero (+0.63, +1.06, +1.12), so this relationship
+    # is still load-bearing and scales with profile_k rather than staying
+    # put and becoming relatively free.
+    profile_climb_k: float = 800.0
+    # Scaled with profile_k to preserve the property the comment above
+    # demands: unsaturated out to ~7 m/s of excess, which a near-ground
+    # free-fall arrival actually reaches. At k=400 that needs 400*49 =
+    # 19600, so 3000 would have saturated at just 2.74 m/s of excess and
+    # recreated, in the vertical channel, the exact defect just removed
+    # from the lateral one.
+    profile_cap: float = 25000.0
+    # Floors the altitude inside the sqrt. Described here as "a
+    # divide-by-zero guard, not a tunable", which was wrong: it sets the
+    # envelope's value AT CONTACT, i.e. the touchdown speed the reward
+    # demands, so it is the most load-bearing number in this block.
+    #
+    # 0.25 -> 1.0 (2026-10-06). At 0.25 the floor was 0.78*sqrt(0.25) =
+    # 0.39 m/s against a `safe_landing_v_z_m_s` limit of 1.0 -- the reward
+    # was demanding a touchdown 2.5x gentler than the vehicle actually
+    # requires, and (before profile_k was raised) had no authority to
+    # enforce even that. At 1.0 the floor is 0.78 m/s, a 22% margin under
+    # the real limit.
+    #
+    # This also attacks the hover-just-above-the-ground failure directly,
+    # because the descent-progress reward is capped AT the envelope: at
+    # alt=0.2 m the rate it will pay for goes 0.39 -> 0.78 m/s, which
+    # doubles the reward for descending the last metre (267 -> 535 per
+    # step) instead of hanging there.
+    profile_alt_floor_m: float = 1.0
 
     # ---------------------------------------------------------------- #
     # Progress toward the ground, CAPPED AT THE ENVELOPE SPEED.
@@ -197,13 +237,34 @@ class RewardWeights:
     # still 5x near the ground, which is the correct priority there) and
     # ramp_20m's balance is unchanged.
     kxy_alt_ref_m: float = 4.0
-    # Raised with kxy, and sized so the term does NOT saturate at the
-    # release speeds the later stages use: at 4000 the penalty at
-    # orbit_descent's release was 0.909/step at 10 m/s and a capped
-    # 1.0/step at 30, i.e. almost flat across the whole range it is
-    # supposed to shape. Saturation inside the operating range is the
-    # defect that cost this project two separate terms already.
-    kxy_cap: float = 20000.0
+    # Above this lateral speed the charge grows LINEARLY instead of
+    # quadratically: `knee**2 + 2*knee*(v_xy - knee)`, which is value- and
+    # slope-continuous at the knee, so everything below it is bit-identical
+    # to the plain quadratic and only the fast tail changes.
+    #
+    # This replaces a hard cap that saturated exactly where it mattered
+    # most. The old `kxy_cap=20000` was sized against the RELEASE speeds,
+    # where the ground weight is tiny (at orbit_descent's 200 m the weight
+    # is 0.0196, so the cap only bound above 50 m/s -- correct). Near the
+    # ground the weight is 1.0 and the same cap bound at
+    # sqrt(20000/400) = 7.07 m/s, i.e. inside the operating range, leaving
+    # the reward FLAT in v_xy above it. Measured on the best ramp_35m
+    # checkpoint (21%), both low-altitude timeouts lived in that flat zone:
+    #   ep13  alt=2.75  v_xy=12.68   (saturation there: 9.18)
+    #   ep15  alt=0.45  v_xy=13.62   (saturation there: 7.46)
+    # Both were skimming the surface at ~13 m/s and refusing to touch down,
+    # with no gradient anywhere telling them to bleed it off.
+    #
+    # The knee keeps the MAGNITUDE and restores the SLOPE: at ep15's state
+    # the charge goes 20000 (capped, flat) -> 18152 (with a gradient).
+    # Picked at 2.0 m/s, just above the 1.2 m/s `landed_safely` limit, so
+    # the whole proven regime stays quadratic.
+    kxy_knee_m_s: float = 2.0
+    # Now a true safety net rather than part of the shaping: at the fastest
+    # release any stage uses (30 m/s) the knee form gives 46400 at ground
+    # weight 1, so this only binds above ~38 m/s at zero altitude, which no
+    # stage reaches.
+    kxy_cap: float = 60000.0
 
     # ---------------------------------------------------------------- #
     # Carried over unchanged, with their original measured justifications.
@@ -253,10 +314,18 @@ class RewardWeights:
     timeout_penalty: float = 105.0
 
     # Defensive clip on the summed per-step shaping, excluding the
-    # terminal. A safety net, not a constraint: worst plausible
-    # simultaneous sum is profile 3000 + kxy 1200 + tilt 2000 + omega 800
-    # + time 400 = 7400.
-    shaping_clip_abs: float = 8000.0
+    # terminal. A safety net, not a constraint -- and it had stopped being
+    # one. The estimate below it ("kxy 1200") was computed before kxy was
+    # raised 12 -> 400; at 400 the lateral term alone reaches 8100 at
+    # v_xy=4.5 near the ground, so it CLIPPED THE WHOLE SUM by itself and
+    # took the descent-envelope, tilt, omega and progress gradients down
+    # with it. Measured on the same 24 episodes, the crashes at v_xy 4.70,
+    # 6.50 and 14.47 were all in that state: every term flat at once.
+    # Worst plausible now: profile 25000 + tilt 2000 + omega 800 + time 400
+    # + kxy 46400 (30 m/s at ground weight 1) = 74600.
+    # This is a no-op for the proven ramp_20m regime, where touchdown v_xy
+    # is 0.13-1.17 and the sum never came near either value.
+    shaping_clip_abs: float = 80000.0
 
     # Applied to the shaping sum ONLY. The terminal is added after, at its
     # own scale, because it has to outweigh the SUM of hundreds of shaping
@@ -295,7 +364,15 @@ def _descent_progress_reward(w: RewardWeights, alt_m: float, v_z: float,
 
 def _horizontal_speed_penalty(w: RewardWeights, v_xy: float, alt_m: float = 0.0) -> float:
     ground_weight = 1.0 / (1.0 + max(alt_m, 0.0) / max(w.kxy_alt_ref_m, 1e-6))
-    return min(w.kxy * v_xy * v_xy * ground_weight, w.kxy_cap)
+    knee = max(w.kxy_knee_m_s, 1e-6)
+    if v_xy <= knee:
+        # multiplication order kept exactly as the plain quadratic had it,
+        # so the proven sub-knee regime is bit-identical and not merely
+        # equal to within rounding
+        return min(w.kxy * v_xy * v_xy * ground_weight, w.kxy_cap)
+    # value- and slope-continuous with the quadratic at `knee`
+    charge = knee * knee + 2.0 * knee * (v_xy - knee)
+    return min(w.kxy * charge * ground_weight, w.kxy_cap)
 
 
 def _tilt_cutoff_penalty(w: RewardWeights, tilt_x: float, tilt_y: float,
