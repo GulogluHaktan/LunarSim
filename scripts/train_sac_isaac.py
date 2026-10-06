@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pathlib
 import sys
 from dataclasses import asdict
 
@@ -98,6 +99,13 @@ parser.add_argument("--ent-coef", type=str, default="0.05",
                           "without exploration noise -- the wrong side to err on for a task whose "
                           "standing failure is never sampling a landing. Accepts a float, or "
                           "'auto'/'auto_<init>' to hand control back to the tuner.")
+parser.add_argument("--proxy-log-every", type=int, default=10_000,
+                     help="log the shaped return (the PROXY) and the landed_safely rate "
+                          "(the TRUE objective) side by side every N steps, plus the "
+                          "worst-decile return. Until this existed nothing recorded "
+                          "either curve during a run, so proxy/true divergence -- the "
+                          "shaped return climbing while the success rate falls -- was "
+                          "invisible. 0 disables.")
 parser.add_argument("--layer-norm", action="store_true",
                      help="weave LayerNorm into the actor and critic trunks. The "
                           "Klein et al. (2024) plasticity survey finds general "
@@ -435,7 +443,7 @@ def main():
                 # SAC.load does NOT restore a replay buffer, so without this the
                 # critic starts from an empty one and refits off a narrow early
                 # window every single warm start.
-                _buf = Path(args.warm_start).with_suffix(".buffer.pkl")
+                _buf = pathlib.Path(args.warm_start).with_suffix(".buffer.pkl")
                 if args.save_buffer and _buf.is_file():
                     model.load_replay_buffer(str(_buf))
                     print(f"[buffer] restored {model.replay_buffer.size()} "
@@ -594,6 +602,11 @@ def main():
                 save_path=f"{args.out_dir}/snapshots",
                 name_prefix=f"{stage.name}",
                 save_replay_buffer=args.save_buffer))
+        if args.proxy_log_every > 0:
+            from lunarsim.rl.monitoring import ProxyVsTrueCallback
+            cbs.append(ProxyVsTrueCallback(
+                log_every=args.proxy_log_every,
+                csv_path=f"{args.out_dir}/proxy_vs_true_{stage.name}.csv"))
         if args.reset_every > 0:
             from lunarsim.rl.plasticity import PeriodicResetCallback
             cbs.append(PeriodicResetCallback(

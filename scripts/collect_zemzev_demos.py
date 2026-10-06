@@ -152,6 +152,7 @@ def main():
 
     obs_l, next_obs_l, act_l, rew_l, done_l, trunc_l, ends = [], [], [], [], [], [], []
     n_safe = n_lost = n_left = 0
+    landed_flags = []
     for ep in range(args.episodes):
         seed = args.seed0 + ep
         obs, _ = env.reset(seed=seed)
@@ -177,6 +178,7 @@ def main():
         lost = bool(info.get("lost_control"))
         left = bool(info.get("left_tile"))
         n_safe += landed
+        landed_flags.append(landed)
         n_lost += lost
         n_left += left
         print(f"[demo ep {ep}] landed_safely={landed} lost_control={lost} left_tile={left} "
@@ -204,6 +206,11 @@ def main():
         dones=dones,
         truncated=np.array(trunc_l, dtype=bool),
         episode_ends=np.array(ends, dtype=np.int64),
+        # whether each episode actually LANDED. Added 2026-10-06: without it a
+        # consumer has to infer success from the sign of the terminal reward,
+        # and behaviour cloning that forgets to filter trains on the failures
+        # too -- the controller only lands 20 of 48 here.
+        landed=np.array(landed_flags, dtype=bool),
         # fingerprint of the reward function that produced `rewards`, so the
         # loader can refuse a stale file (see module docstring).
         reward_weights=np.array(json.dumps(asdict(RewardWeights()), sort_keys=True)),

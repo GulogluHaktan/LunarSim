@@ -9,9 +9,16 @@ the problem that has cost this project every run so far: a policy measured at
 22.9% went to 0/24 after 600k more SAC steps, invariant to gamma, learning
 rate, entropy coefficient and replay ratio (see handover.md).
 
-We have a controller that lands 22/24 on orbit_descent. Cloning it is the
-field's main road, and it produces a working artefact to build on rather than
-asking SAC to rediscover the same solution.
+We have a controller that lands 20/48 (42%) on orbit_descent in real Isaac.
+Cloning it is the field's main road, and it produces a working artefact to build
+on rather than asking SAC to rediscover the same solution.
+
+Mind which simulator a controller number came from. The 22/24 (92%) figure this
+file first quoted was measured in AnalyticLanderEnv, a simpler dynamics model
+than the Isaac/PhysX one we train and evaluate in; collect_zemzev_demos.py's own
+docstring had already recorded the gap ("75% on the analytic env but only
+~40-50% on real Isaac"). 42% is therefore the ceiling a pure clone of this
+controller can approach, and the 75% target needs more than imitation.
 
 The output is a REAL SAC checkpoint (`.zip`), not a bare torch file, so
 everything downstream -- diag_stage_landing_rate.py, --warm-start, the snapshot
@@ -48,6 +55,12 @@ parser.add_argument("--epochs", type=int, default=200)
 parser.add_argument("--batch-size", type=int, default=256)
 parser.add_argument("--learning-rate", type=float, default=1e-3)
 parser.add_argument("--val-frac", type=float, default=0.1)
+parser.add_argument("--include-failures", action="store_true",
+                    help="clone EVERY demo episode, including the ones that crashed. "
+                         "Off by default, and that default matters: the ZemZev "
+                         "controller lands 20 of 48 on orbit_descent in real Isaac "
+                         "(42%%), so an unfiltered dataset teaches the policy 28 "
+                         "crashes alongside 20 landings.")
 parser.add_argument("--device", type=str, default="cpu")
 parser.add_argument("--seed", type=int, default=0)
 args = parser.parse_args()
@@ -65,12 +78,38 @@ def main():
     obs_l, act_l = [], []
     for path in args.demos:
         d = np.load(path)
-        obs_l.append(np.asarray(d["obs"], dtype=np.float32))
-        act_l.append(np.asarray(d["actions"], dtype=np.float32))
-        print(f"[bc] {path}: {len(d['obs'])} transitions, "
-              f"{len(d['episode_ends'])} episodes")
+        o = np.asarray(d["obs"], dtype=np.float32)
+        a = np.asarray(d["actions"], dtype=np.float32)
+        ends = np.asarray(d["episode_ends"])
+        n_ep = len(ends)
+        kept_ep = n_ep
+        if not args.include_failures:
+            # Which episodes landed. Newer datasets record it; older ones do not,
+            # so fall back to the sign of the terminal reward. That inference is
+            # safe here and was checked: on v4 the terminal rewards fall into two
+            # clean clusters, 28 at -94..-86 and 20 at +322..+393, and the 20
+            # positives match the collector's own "20/48 landed_safely" line
+            # exactly.
+            if "landed" in d.files:
+                landed = np.asarray(d["landed"], dtype=bool)
+            else:
+                r = np.asarray(d["rewards"])
+                landed = np.array([r[e - 1] > 0.0 for e in ends])
+            starts = np.concatenate(([0], ends[:-1]))
+            mask = np.zeros(len(o), dtype=bool)
+            for st, en, ok in zip(starts, ends, landed):
+                if ok:
+                    mask[st:en] = True
+            o, a = o[mask], a[mask]
+            kept_ep = int(landed.sum())
+        obs_l.append(o)
+        act_l.append(a)
+        print(f"[bc] {path}: {len(o)} transitions from {kept_ep}/{n_ep} episodes"
+              f"{'' if args.include_failures else ' (landings only)'}")
     obs = np.concatenate(obs_l)
     act = np.concatenate(act_l)
+    if len(obs) == 0:
+        raise SystemExit("no transitions left after filtering -- no demo episode landed")
 
     # The demo actions were recorded in the env's action space, so they are
     # already in [-1, 1]; clipping guards a boundary value that would make
