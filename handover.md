@@ -2644,3 +2644,45 @@ scripts/telegram_control.py  command dispatcher, one chat_id, fixed whitelist
 
 Tests: 163 passed, 7 pre-existing failures (test_apollo_lm_asset.py needs the
 Isaac python, not the venv one).
+
+## v33: from scratch with a 5-critic ensemble (user's call)
+
+Launched 2026-10-06 12:06, `out/sac_training_run_v33_scratch5`:
+
+```
+scripts/train_sac_isaac.py --steps-per-stage 200000 --checkpoint-every 50000 \
+  --out-dir out/sac_training_run_v33_scratch5 \
+  --n-critics 5 --gamma 0.998 --max-rocks-per-env 0
+```
+
+No `--only-stage`, so it walks the whole corrected ladder from ramp_20m. Seven
+stages at 200k is ~1.4M steps, roughly 2.5 h. Learning rate stays at the 3e-4
+default -- 5e-5 is for fine-tuning an already-good policy and would be far too
+slow from random init.
+
+To be explicit about what this is: the four experiments above exonerate
+overestimation, which is the mechanism more critics address, so this is not
+expected on the evidence to fix the collapse. It is being run because the user
+chose to, and because the 22.9% it would otherwise preserve is far enough below
+the 75% target not to be worth protecting.
+
+**If it was interrupted**, resume from the last snapshot in
+`out/sac_training_run_v33_scratch5/snapshots/` with the SAME `--n-critics 5`
+(a 5-critic checkpoint will not load into the 2-critic default):
+
+```
+--warm-start out/sac_training_run_v33_scratch5/snapshots/<last>.zip \
+--only-stage <the stage it was on> --n-critics 5
+```
+
+### `--n-critics` and `_expand_critic_ensemble`
+
+The flag also supports growing the ensemble on a warm start WITHOUT discarding
+a trained policy, which is the path to prefer if this is ever revisited with a
+policy worth keeping. `SAC.load` cannot restore a 2-critic checkpoint into a
+5-critic model, so the helper copies the actor exactly and CLONES the trained
+critics into the new slots with a 1% perturbation. The cloning is the point:
+SAC takes the min over the ensemble, so a randomly initialised critic would
+dominate that min with untrained garbage and bootstrap it into the target. The
+perturbation keeps the clones from being exact duplicates, which would leave the
+min unchanged and the extra critics redundant.

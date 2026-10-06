@@ -98,6 +98,16 @@ parser.add_argument("--ent-coef", type=str, default="0.05",
                           "without exploration noise -- the wrong side to err on for a task whose "
                           "standing failure is never sampling a landing. Accepts a float, or "
                           "'auto'/'auto_<init>' to hand control back to the tuner.")
+parser.add_argument("--n-critics", type=int, default=2,
+                     help="size of the SAC critic ensemble. SB3's default is 2 and it "
+                          "takes the min, which already damps overestimation; more "
+                          "critics damp it further (REDQ uses 5-10). NOTE: four "
+                          "experiments in handover.md exonerate overestimation as the "
+                          "cause of the mid-run collapse, so this is a last resort, not "
+                          "the obvious next knob. Changing it reshapes the critic, so a "
+                          "warm start cannot load directly -- see _expand_critic_ensemble, "
+                          "which keeps the trained actor and clones the trained critics "
+                          "rather than starting from scratch.")
 parser.add_argument("--learning-rate", type=float, default=3e-4,
                      help="SB3's default is 3e-4, which is sized for training from "
                           "scratch. Fine-tuning an already-good policy at that rate "
@@ -146,6 +156,63 @@ sys.path.insert(0, args.lunarsim_root)
 
 from stable_baselines3 import SAC
 from stable_baselines3.common.utils import FloatSchedule  # noqa: E402
+
+def _expand_critic_ensemble(old_model, venv, args, n_critics):
+    """Warm start into a LARGER critic ensemble without losing the actor.
+
+    Changing `n_critics` reshapes the critic, so `SAC.load` cannot restore a
+    2-critic checkpoint into a 5-critic model. Training from scratch instead
+    would throw away the only policy this project has that lands (22.9% on
+    ramp_35m), which is not necessary: the actor is shape-compatible, and the
+    extra critics can be CLONED from the trained ones rather than initialised
+    randomly.
+
+    Cloning matters. SAC takes the MIN over the ensemble, so a freshly
+    initialised critic would dominate that min with untrained garbage and
+    bootstrap it into the target -- the new critics have to start out agreeing
+    with the trained ones and diversify through training. Each clone gets a
+    small multiplicative perturbation so they are not exact duplicates (which
+    would make the extra critics redundant and the min unchanged).
+    """
+    import torch
+
+    model = SAC("MlpPolicy", venv, verbose=1, device=args.torch_device,
+                gamma=args.gamma, gradient_steps=args.gradient_steps,
+                tau=args.tau, ent_coef=_parse_ent_coef(args.ent_coef),
+                learning_rate=args.learning_rate,
+                policy_kwargs={"n_critics": n_critics})
+
+    model.actor.load_state_dict(old_model.actor.state_dict())
+    model.actor_target.load_state_dict(old_model.actor.state_dict())         if hasattr(model, "actor_target") else None
+
+    old_n = len(old_model.critic.q_networks)
+    gen = torch.Generator().manual_seed(args.terrain_seed)
+    for attr in ("critic", "critic_target"):
+        src = getattr(old_model, attr).state_dict()
+        dst = {}
+        for key, val in getattr(model, attr).state_dict().items():
+            idx = int(key.split(".", 1)[0][2:])          # "qf3.0.weight" -> 3
+            rest = key.split(".", 1)[1]
+            src_val = src[f"qf{idx % old_n}.{rest}"]
+            if idx < old_n:
+                dst[key] = src_val.clone()
+            else:
+                noise = 1.0 + 0.01 * torch.randn(src_val.shape, generator=gen)
+                dst[key] = src_val * noise.to(src_val.dtype)
+        getattr(model, attr).load_state_dict(dst)
+
+    if hasattr(old_model, "log_ent_coef") and old_model.log_ent_coef is not None \
+            and getattr(model, "log_ent_coef", None) is not None:
+        with torch.no_grad():
+            model.log_ent_coef.copy_(old_model.log_ent_coef)
+
+    model.num_timesteps = old_model.num_timesteps
+    model._total_timesteps = old_model._total_timesteps
+    print(f"[critic] expanded ensemble {old_n} -> {n_critics}; actor copied exactly, "
+          f"extra critics cloned from the trained ones with 1% perturbation",
+          flush=True)
+    return model
+
 
 from lunarsim.adapters.isaac.isaac_lander_vec_env import IsaacLanderVecEnv  # noqa: E402
 # the stage table, the terrain config and the tile_fn all live in ONE place
@@ -342,6 +409,8 @@ def main():
         if model is None:
             if args.warm_start:
                 model = SAC.load(args.warm_start, env=venv, device=args.torch_device)
+                if len(model.critic.q_networks) != args.n_critics:
+                    model = _expand_critic_ensemble(model, venv, args, args.n_critics)
                 # a checkpoint saved before --gradient-steps existed carries
                 # SB3's default of 1; honour the CLI either way (see the
                 # REAL BUG note on the fresh-model branch below).
@@ -459,7 +528,8 @@ def main():
                 model = SAC("MlpPolicy", venv, verbose=1, device=args.torch_device,
                              gamma=args.gamma, gradient_steps=args.gradient_steps,
                              tau=args.tau, ent_coef=_parse_ent_coef(args.ent_coef),
-                             learning_rate=args.learning_rate)
+                             learning_rate=args.learning_rate,
+                             policy_kwargs={"n_critics": args.n_critics})
         else:
             model.set_env(venv)
             if not args.keep_buffer:
