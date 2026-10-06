@@ -2281,3 +2281,120 @@ The improvement is real and about 2x; the absolute level is lower than reported.
 - ramp_50m and beyond still need the random-policy reachability probe and the
   `usable lateral room > episode drift` check before training. That rule came
   out of seven failed runs and still stands.
+
+### Stage precondition audit, re-run 2026-10-06
+
+Both rules from this file, applied to every stage as configured now:
+
+```
+stage            vz0   h0/T needed  vert   drift(vxy*T)  tile needed   tile now
+ramp_20m         2.0      1.00       ok          40          120         120  ok
+ramp_20m_fast    2.0      1.00       ok         100          260         260  ok
+ramp_35m         2.8      1.40       ok         125          289         320  ok
+ramp_50m         3.0      1.67       ok         240          539         600  ok
+ramp_100m        4.0      2.50       ok         640         1389         640  TOO SMALL
+ramp_150m        5.0      3.00       ok        1200         2539        1200  TOO SMALL
+orbit_descent    0.0      3.33       --        1800         3769        1680  TOO SMALL
+```
+
+The vertical rule is satisfied everywhere it applies. orbit_descent's vz0=0.0
+is deliberate and correct -- the comment in curriculum.py says so: it is the
+real scenario, and the policy arriving there is not random but trained through
+ramp_150m, so the reachability argument that justified vz0=-2.0 on ramp_20m
+does not transfer. Flagging it as a failure would be a false positive.
+
+The lateral blocker is real on the last three and remains the thing to fix
+before any of them can be trained. But the number should not be picked from a
+model:
+
+  - `drift = vxy * T` assumes the vehicle never brakes. That is right for the
+    RANDOM-policy probe, and it is what validated ramp_35m's 320 m tile.
+  - A policy inherited from ramp_50m does brake, and the corrected reward now
+    pushes hard on exactly that. If lateral speed bleeds to zero over about
+    half the episode, the requirement drops a lot: 800 / 1400 / 2000 instead
+    of 1440 / 2560 / 3840.
+
+The two differ by 2x on orbit_descent, and the conservative number is not free:
+`terrain_grid_n` is global (default 80), so a 3840 m tile is 48 m per cell,
+coarse enough to matter for a landing. Measure before choosing -- run the
+probe on ramp_100m at the current tile and read the left_tile count, exactly
+as the rule in this file prescribes.
+
+## THE CURRICULUM WAS NOT MONOTONIC IN DIFFICULTY -- three rungs were unsolvable
+
+Flew the ZemZev controller -- the reference for a healthy landing, and a far
+better reachability test than a random policy -- over all seven stages:
+
+```
+stage            T      controller   drift max / usable room
+ramp_20m         20 s     24/24          14.7 /  60
+ramp_20m_fast    20 s      1/24  <--     49.3 / 130
+ramp_35m         25 s     21/24          54.1 / 160
+ramp_50m         30 s     24/24         102.1 / 300
+ramp_100m        40 s      0/24  <--    293.7 / 320
+ramp_150m        50 s      0/24  <--    529.3 / 600
+orbit_descent    60 s     22/24         638.1 / 840
+```
+
+The FINAL stage was easier than three of the rungs below it. The policy was
+being asked to climb through stages that the reference controller cannot pass.
+
+**Two distinct defects, both measured:**
+
+`ramp_100m` and `ramp_150m` were SHORT ON CLOCK, not hard. Every failure was
+identical and showed the vehicle doing everything right:
+
+```
+ramp_100m  TIMEOUT  t=40.0  alt=4.45  vz=-0.80  vxy=0.56
+ramp_150m  TIMEOUT  t=50.0  alt=4.65  vz=-0.80  vxy=0.48
+```
+
+Lateral speed already nulled, descending at the controller's 0.80 m/s terminal
+rate, and the clock ran out 4.5 m above the ground -- 5.6 s short. Fixed:
+40 -> 48 s and 50 -> 60 s. Both go to **24/24**, and drift does not grow with
+the extra time because it is spent in the terminal descent at ~0.5 m/s lateral
+(293.7 -> 292.2 m).
+
+`ramp_20m_fast` was IMPOSSIBLE, and more clock does not fix it: 1/24 at every
+budget from 20 s to 34 s. 20 m of altitude is not enough to bleed off 5 m/s of
+lateral speed -- the vehicle reaches the ground before it finishes braking, at
+v_xy 0.87-2.50 against a 1.2 limit. Measured envelope at 20 m:
+
+```
+v_xy (2.0, 5.0)   1/24        v_xy (1.5, 2.5)  16/24
+v_xy (2.0, 3.5)   1/24        v_xy (2.0, 2.5)  11/24
+v_xy (2.0, 3.0)   1/24
+raising altitude instead: h0=28 -> 17/24, h0=30 -> 22/24 (= ramp_35m again)
+```
+
+Fixed to (1.5, 2.5) -> 16/24. **Every rate ever measured on this stage (42%,
+46%, 29%) was scored on the impossible version**, including last night's
+"ramp_20m_fast degrades from 46%" work.
+
+### The tile question is settled, and the answer is "change nothing"
+
+The conservative model (`drift = vxy * T`, never brakes) said the last three
+tiles were 2-3x too small. Measured drift from a controller that actually
+lands says otherwise -- every current tile already fits:
+
+```
+stage           measured max drift   tile half   models said (no-brake / brake)
+ramp_35m               54.1            160          125 /  62
+ramp_50m              102.1            300          240 / 120
+ramp_100m             292.2            320          640 / 320
+ramp_150m             527.9            600         1200 / 600
+orbit_descent         638.1            840         1800 / 900
+```
+
+The worst-case model is right for a RANDOM-policy probe and wrong for sizing a
+tile a competent policy will fly in. No tile changes needed, and the coarse
+48 m/cell terrain that a 3840 m orbit_descent tile would have forced is avoided.
+
+### Ladder after the fixes -- every rung solvable by the reference
+
+```
+ramp_20m 24/24 | ramp_20m_fast 16/24 | ramp_35m 21/24 | ramp_50m 24/24
+ramp_100m 24/24 | ramp_150m 24/24 | orbit_descent 22/24
+```
+
+### Target agreed with the user: 75% landing rate, given a safe site exists

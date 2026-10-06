@@ -98,6 +98,13 @@ parser.add_argument("--ent-coef", type=str, default="0.05",
                           "without exploration noise -- the wrong side to err on for a task whose "
                           "standing failure is never sampling a landing. Accepts a float, or "
                           "'auto'/'auto_<init>' to hand control back to the tuner.")
+parser.add_argument("--learning-rate", type=float, default=3e-4,
+                     help="SB3's default is 3e-4, which is sized for training from "
+                          "scratch. Fine-tuning an already-good policy at that rate "
+                          "destroyed one: 600k steps from a checkpoint measured at "
+                          "22.9%% (96 episodes) ended at 0/24 on five consecutive "
+                          "snapshots, with Q inflating 151 -> 403 and critic_loss "
+                          "14 -> 298. Lower it when continuing from a good policy.")
 parser.add_argument("--reward-weight", type=str, action="append", default=None,
                      metavar="NAME=VALUE",
                      help="override one RewardWeights field, repeatable. Exists so a "
@@ -137,7 +144,8 @@ simulation_app = SimulationApp({"headless": args.headless})
 
 sys.path.insert(0, args.lunarsim_root)
 
-from stable_baselines3 import SAC  # noqa: E402
+from stable_baselines3 import SAC
+from stable_baselines3.common.utils import FloatSchedule  # noqa: E402
 
 from lunarsim.adapters.isaac.isaac_lander_vec_env import IsaacLanderVecEnv  # noqa: E402
 # the stage table, the terrain config and the tile_fn all live in ONE place
@@ -353,6 +361,13 @@ def main():
                 # tau too: a checkpoint restores its own, and SB3's 0.005
                 # default is wrong for gamma=0.999 (see the --tau help).
                 model.tau = args.tau
+                # and the learning rate, for the same reason -- a checkpoint
+                # carries the rate it was saved with. Setting the attribute
+                # alone is NOT enough: SB3's `_update_learning_rate` reads
+                # `self.lr_schedule` on every train() call, so the optimizers
+                # would keep the loaded rate while the attribute lied about it.
+                model.learning_rate = args.learning_rate
+                model.lr_schedule = FloatSchedule(args.learning_rate)
                 _ec = _parse_ent_coef(args.ent_coef)
                 if not isinstance(_ec, str):
                     import torch as _t
@@ -443,7 +458,8 @@ def main():
                 # runaway and pinning alpha does not address it.
                 model = SAC("MlpPolicy", venv, verbose=1, device=args.torch_device,
                              gamma=args.gamma, gradient_steps=args.gradient_steps,
-                             tau=args.tau, ent_coef=_parse_ent_coef(args.ent_coef))
+                             tau=args.tau, ent_coef=_parse_ent_coef(args.ent_coef),
+                             learning_rate=args.learning_rate)
         else:
             model.set_env(venv)
             if not args.keep_buffer:

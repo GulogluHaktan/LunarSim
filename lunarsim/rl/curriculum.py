@@ -172,7 +172,28 @@ STAGES = [
         tile_size_m=260.0,
         params=LanderParams(
             spawn_altitude_m=20.0, spawn_xy_radius_m=10.0,
-            spawn_v_z_m_s=-2.0, spawn_horizontal_speed_m_s=(2.0, 5.0),
+            # (2.0, 5.0) -> (1.5, 2.5) (2026-10-06). This stage was not hard,
+            # it was IMPOSSIBLE, and for a different reason than ramp_100m's
+            # short budget: 20 m of altitude is not enough to bleed off 5 m/s
+            # of lateral speed. Flown by the ZemZev controller it scored
+            # 1/24, touching down at t~17 s with v_xy still at 0.87-2.50
+            # against a 1.2 m/s limit. Raising the budget does NOT help --
+            # 1/24 at every budget from 20 s to 34 s -- because the vehicle
+            # reaches the ground before it can finish braking, not before the
+            # clock runs out.
+            # Measured envelope at 20 m, controller over 24 episodes:
+            #   v_xy (2.0, 5.0)   1/24      v_xy (1.5, 2.5)  16/24
+            #   v_xy (2.0, 3.5)   1/24      v_xy (2.0, 2.5)  11/24
+            #   v_xy (2.0, 3.0)   1/24
+            # and raising altitude instead: h0=28 -> 17/24, h0=30 -> 22/24,
+            # which is just ramp_35m again (35 m, 2-5 m/s, 21/24). So at this
+            # altitude the feasible range caps near 2.5 m/s, and the stage's
+            # job -- introduce lateral speed at ramp_20m's altitude -- has to
+            # fit inside it. 16/24 for the reference controller makes this a
+            # real step up from ramp_20m's 24/24 while staying solvable.
+            # NOTE: every rate ever measured on this stage (42%, 46%, 29%)
+            # was scored on the impossible version.
+            spawn_v_z_m_s=-2.0, spawn_horizontal_speed_m_s=(1.5, 2.5),
             max_episode_s=20.0,
         ),
     ),
@@ -260,8 +281,25 @@ STAGES = [
             # 50 m, 7.80 at 100), so an episode does not start in penalty.
             # orbit_descent keeps 0.0: it is the real scenario, an orbital
             # release, and by then the policy has to descend on its own.
+            # 40 -> 48 s (2026-10-06). The budget, not the difficulty, was
+            # what made this stage impossible. Flown by the ZemZev
+            # controller -- the reference for a healthy landing -- this
+            # stage scored 0/24, and every failure looked identical:
+            #   ep0 TIMEOUT t=40.0 alt=4.45 vz=-0.80 vxy=0.56
+            #   ep1 TIMEOUT t=40.0 alt=4.45 vz=-0.80 vxy=0.41
+            #   ep2 TIMEOUT t=40.0 alt=4.47 vz=-0.80 vxy=0.02
+            # The vehicle had already nulled its lateral speed and was
+            # descending correctly at its 0.80 m/s terminal rate -- it
+            # simply ran out of clock 4.5 m above the ground, which is
+            # 5.6 s short. Measured: at T=46 the controller goes to 24/24,
+            # and the extra time is spent in the terminal descent where
+            # lateral speed is ~0.5 m/s, so drift does NOT grow with it
+            # (293.7 -> 292.2 m against 320 m of usable room).
+            # This is why the ladder was not monotonic in difficulty: the
+            # controller landed 21/24 on ramp_35m and 22/24 on the FINAL
+            # orbit_descent stage, but 0/24 on this one and ramp_150m.
             spawn_v_z_m_s=-4.0, spawn_horizontal_speed_m_s=(6.0, 16.0),
-            max_episode_s=40.0,
+            max_episode_s=48.0,
         ),
     ),
     Stage(
@@ -288,8 +326,13 @@ STAGES = [
             # 50 m, 7.80 at 100), so an episode does not start in penalty.
             # orbit_descent keeps 0.0: it is the real scenario, an orbital
             # release, and by then the policy has to descend on its own.
+            # 50 -> 60 s (2026-10-06). Same defect as ramp_100m, same
+            # signature: 0/24 with the ZemZev controller, every episode
+            # timing out at alt 4.6 m with vz=-0.80 and vxy already down to
+            # 0.5 m/s. 5.8 s short. At T=56 the controller goes to 24/24 and
+            # drift is unchanged (529.3 -> 527.9 m against 600 m of room).
             spawn_v_z_m_s=-5.0, spawn_horizontal_speed_m_s=(10.0, 24.0),
-            max_episode_s=50.0,
+            max_episode_s=60.0,
         ),
     ),
     # "yorunge" stage: an uncontrolled-release-scale altitude/horizontal-
