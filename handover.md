@@ -2455,3 +2455,192 @@ the Q inflation).
 Training collects data by sampling the policy while evaluation takes its mean,
 so the gap between the two is worth being able to measure. Here it is zero,
 which is itself the finding.
+
+## ent_coef is not it either -- FOUR knobs now refuted
+
+v31 (ent_coef 0.005, lr 5e-5): **21% at 75k steps in, 4% at 150k** (19 of 24
+timing out). Same collapse, same shape.
+
+```
+knob                    what it did to the symptom      landing rate
+gamma 0.998 -> 0.997    Q -14%                          no change
+replay ratio 1:1 -> 1:4 --                              no change
+lr 3e-4 -> 5e-5         Q inflation stopped outright     still collapses
+ent_coef 0.05 -> 0.005  pre-tanh std 4.5 -> 3.2          still collapses
+```
+
+### Correction: bang-bang saturation is NOT the collapse mechanism
+
+I reported the saturated policy as the cause. It is not. Saturation is the same
+in the GOOD policy:
+
+```
+                        pre-tanh std        saturated actions
+v24 best (22.9%)        4.54 - 4.62              95.0%
+v30 last (0%)           4.50 - 5.70              95.8%
+v31 (ent 0.005)         2.75 - 3.51              96.8%
+```
+
+95% saturated and it lands 22.9% of the time, so bang-bang is the normal
+operating mode of these policies, not a defect -- which makes sense at 20 Hz,
+where switching the throttle gives a PWM-like average thrust. Lowering the
+entropy coefficient did move the std exactly as predicted and did nothing to
+saturation or to the collapse. The saturation measurement stands; the causal
+claim does not.
+
+### What the collapse is invariant to, and what that points at
+
+It happens within ~100k steps of every warm start, at every gamma, learning
+rate, entropy coefficient, replay ratio and under both rewards. The one thing
+common to all of them that has NOT been tested: **the replay buffer is reset on
+every warm start and the critic is refit from a narrow, on-policy distribution.**
+
+`--keep-buffer` cannot test this -- `SAC.load` does not restore a buffer, so the
+flag only skips the reset of an already-empty one. Testing it needs
+`save_replay_buffer` / `load_replay_buffer` wired into the checkpoint path.
+**That is the next experiment**, and it is the one candidate the four refuted
+knobs do not touch.
+
+Second candidate, cheaper to try: freeze the actor for the first N steps after a
+warm start so the critic can re-fit before the policy starts chasing it.
+
+## v32: the direct jump to orbit_descent does not transfer
+
+Warm started from the best ramp_35m policy (22.9%), 200k steps, lr 5e-5, new
+reward:
+
+```
+snapshot    landed   lost_control   left_tile   (16 episodes each)
+1.60M        0/16        4/16          2/16
+1.65M        0/16        4/16          0/16
+1.70M        0/16        5/16          0/16
+1.75M        0/16        5/16          1/16
+```
+
+0/16 throughout, and the failure mode is DIFFERENT from ramp_35m's: the vehicle
+tumbles (lost_control) and crashes rather than hovering. The 35 m / 5 m/s ->
+200 m / 30 m/s jump is too large for the policy to carry, which matches the
+earlier attempt this file records. Worth trying -- the stage is now verified
+reachable, since the reference controller lands 22/24 there -- but the answer is
+no, not in one step.
+
+(16 episodes is a smoke test, not a ranking measurement. It does not need to be
+better than that: 0/16 four times over is not a sampling question.)
+
+# ================================================================
+# HANDOVER -- state at 2026-10-06 12:00
+# ================================================================
+
+## Where the project actually is
+
+```
+stage            best verified rate   checkpoint
+ramp_35m              22.9%           out/sac_training_run_v24_vert/snapshots/
+                 (22/96, seed0=41000)   ramp_35m_1550000_steps.zip
+orbit_descent          0%             not reachable by training yet
+```
+
+That 22.9% is the only number in this project measured to the standard below.
+Treat every other rate in this file as provisional.
+
+Target agreed with the user: **75%**, given a safe landing site exists.
+For reference, the ZemZev controller lands 22/24 (92%) on orbit_descent, so the
+target is physically achievable -- the gap is in training, not in the vehicle,
+the reward, or the stage.
+
+## The measurement standard -- read this before trusting any number
+
+24 episodes CANNOT rank checkpoints. One policy scored 8%, 33% and 46% on three
+different 24-episode samples. Comparisons need 96+ episodes, and a checkpoint
+must never be selected and then judged on the same seeds -- doing that is what
+produced a phantom "training degrades the policy" result earlier in this file.
+
+```
+smoke test      --episodes 16 or 24
+comparison      --episodes 96, on seeds not used for selection (e.g. 41000)
+```
+
+## What is settled
+
+1. **Three saturation defects in the reward, all proven by direct computation
+   and worth ~2x the landing rate** (11.5% -> 22.9%, p~0.037 on 96 held-out
+   episodes): `kxy_cap` saturating at 7.07 m/s near the ground, the shaping clip
+   being filled by the lateral term alone, and the vertical channel being 12x
+   weaker than the lateral one. Details above; seven regression tests guard them.
+
+2. **The curriculum had three unsolvable rungs.** Flying the ZemZev controller
+   over all seven stages -- a far better reachability test than a random policy
+   -- showed the FINAL stage was easier than three rungs below it. ramp_100m and
+   ramp_150m were 6 s short on clock; ramp_20m_fast was geometrically impossible
+   (20 m is not enough altitude to bleed 5 m/s of lateral speed, and no budget
+   fixes it). All three fixed and verified. Every rate ever measured on
+   ramp_20m_fast was scored on the impossible version.
+
+3. **Tile sizes need no change.** Measured drift from a controller that lands is
+   inside every current tile (orbit_descent: 638 m against 840 m of room). The
+   `drift = vxy * T` bound is right for a random-policy probe and wrong for
+   sizing a tile a competent policy flies in.
+
+4. **The collapse is real** -- a checkpoint measured at 22.9% on 96 episodes
+   goes to 0/24 on five consecutive snapshots after 600k more steps -- **and it
+   is not overestimation.** Four knobs refuted: gamma, replay ratio, learning
+   rate (which stopped the Q inflation outright and changed nothing), entropy
+   coefficient.
+
+## The next experiment, and why it is the right one
+
+The collapse happens within ~100k steps of EVERY warm start, at every gamma,
+learning rate, entropy coefficient and replay ratio, under both rewards. That
+invariance is the clue. The one thing common to all of them that has never been
+tested:
+
+**the replay buffer is reset on every warm start, so the critic is refit from a
+narrow on-policy distribution.**
+
+`--keep-buffer` cannot test this: `SAC.load` does not restore a buffer, so the
+flag only skips the reset of an already-empty one. The test needs
+`save_replay_buffer` / `load_replay_buffer` wired into the checkpoint and
+warm-start paths. Concretely:
+
+```python
+# where the CheckpointCallback saves, also:
+model.save_replay_buffer(path.with_suffix(".buffer.pkl"))
+# on the warm-start path, after SAC.load and BEFORE the reset:
+if buf.exists(): model.load_replay_buffer(buf)   # and skip replay_buffer.reset()
+```
+
+Second candidate, cheaper: freeze the actor for the first N steps after a warm
+start so the critic can re-fit before the policy starts chasing it.
+
+Do NOT spend hours on `n_critics` / training from scratch. It is the textbook
+answer for overestimation and the four experiments above exonerate that
+mechanism. The user has approved it, but it should stay a last resort.
+
+## The ladder, as it now stands (reference controller, 24 episodes)
+
+```
+ramp_20m 24/24 | ramp_20m_fast 16/24 | ramp_35m 21/24 | ramp_50m 24/24
+ramp_100m 24/24 | ramp_150m 24/24 | orbit_descent 22/24
+```
+
+Every rung is solvable by the reference. The direct ramp_35m -> orbit_descent
+jump does not transfer (v32, 0/16), so the intermediate rungs have to be walked
+-- but they are only worth walking once the collapse is fixed, because today any
+200k continuation loses what it started with.
+
+## Tooling added this session
+
+```
+--reward-weight NAME=VALUE   trainer: reward A/B as a reproducible command
+--learning-rate              trainer: forced on the warm-start path too, because
+                             SB3 reads lr_schedule and would silently keep the
+                             checkpoint's rate
+--stochastic                 diag_stage_landing_rate: sampled vs mean policy
+lunarsim/rl/action_map.py    the ONE action[0] -> throttle map and its inverse
+scripts/notify_telegram.py   run output to Telegram (creds only in
+                             ~/.config/lunarsim/telegram.env, never the repo)
+scripts/telegram_control.py  command dispatcher, one chat_id, fixed whitelist
+```
+
+Tests: 163 passed, 7 pre-existing failures (test_apollo_lm_asset.py needs the
+Isaac python, not the venv one).
