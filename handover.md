@@ -2686,3 +2686,108 @@ SAC takes the min over the ensemble, so a randomly initialised critic would
 dominate that min with untrained garbage and bootstrap it into the target. The
 perturbation keeps the clones from being exact duplicates, which would leave the
 min unchanged and the extra critics redundant.
+
+## Literature review + two new measurements: it is neither overestimation NOR plasticity loss
+
+Full review: `rl-cokus-literatur-taramasi.md` (30 papers, arXiv + OpenAlex MCP).
+
+### What the literature reframed
+
+Klein et al. (2024), *Plasticity Loss in Deep RL: A Survey*, states plainly that
+loss of plasticity "contributes to scaling failures, **overestimation bias**, and
+insufficient exploration". So Q inflation is a SYMPTOM in that framework, not the
+disease -- which is exactly why gamma and (predictably) n_critics do nothing, and
+why lowering the learning rate stopped the Q inflation without stopping the
+collapse. Our whole diagnostic frame was the 2018-2021 one.
+
+Our setup is also a textbook primacy-bias generator (Nikishin et al. 2022): we
+reset the replay buffer on every warm start, so the critic refits from a narrow
+early window; the policies we warm-start from have 1.5M steps on them (cf.
+*Policy Plasticity Matters in Offline-to-Online RL*, 2026); and the curriculum is
+deliberate non-stationarity (Abbas et al. 2023).
+
+### But the plasticity hypothesis does not survive measurement either
+
+Dormant neuron fraction (ReDo's metric, tau=0.025):
+
+```
+checkpoint              actor dormant   critic dormant
+v24 BEST   (22.9%)          26.0%           12.5%
+v29 COLLAPSED (0%)          28.9%           12.8%
+v30 COLLAPSED (0%)          25.6%           13.4%
+v31 COLLAPSED (4%)          25.0%           13.0%
+```
+
+Identical. (Caveat: measured on random Gaussian observations rather than real
+rollout batches, which is how ReDo defines it -- worth redoing on real data, but
+a 3-point spread is not going to become a 2x one.)
+
+Weight norms and feature rank:
+
+```
+checkpoint              actor |W|   critic |W|   feat rank   srank(0.99)
+v24 BEST   (22.9%)         190.7       484.8      137/256        29
+v29 COLLAPSED (0%)         223.5       598.3      130/256        24
+v30 COLLAPSED (0%)         192.2       486.8      144/256        31
+```
+
+**v30 is the decisive counterexample.** v29 does show the classic plasticity
+signature (norm growth, rank drop), but v30 collapsed to 0% with its weight norm
+essentially unchanged, its feature rank HIGHER than the good checkpoint's, and its
+dormant fraction flat. A network whose statistics barely moved lost all of its
+performance.
+
+### The synthesis that survives: the policy is brittle because it sits on the bound
+
+v30 went from 22.9% to 0% while its actor norm moved 190.7 -> 192.2. A tiny
+parameter change produced a total behavioural change. That is what a SATURATED
+policy does: at `|a| = 1` the parameter-to-behaviour map is a step function, so
+small gradient steps flip discrete action choices instead of refining them.
+
+This puts the bang-bang measurement back in the picture, correctly this time --
+not as the CAUSE of the collapse, but as the reason training is a random walk in
+behaviour space rather than an improvement process. The literature has the
+mechanism: Shamass (2026), *Unthrottling the Tanh Jacobian in SAC*, notes
+`da/du = 1 - a^2` vanishes as `|a| -> 1`, "starv[ing] the actor of critic signal
+exactly where extreme actions are optimal".
+
+**And that paper is a warning, not a recipe.** It tried to restore the missing
+gradient and the result was negative: the ungated version drove the policy to 99%
+saturation and collapsed return from -31.6 to -195.5. Its closing line applies
+to us directly: *"Saturating a bound is not the same as solving a problem whose
+optimum lives on that bound."* So do not "fix" the Jacobian.
+
+### What the landing literature actually does -- we are on the hard road
+
+Of the lunar-landing guidance work found, the large majority does NOT use RL. It
+trains networks SUPERVISED on optimal trajectories: Wang/Chen/Li (2024) generate
+the dataset from Pontryagin's Minimum Principle; Origer & Izzo (2024) build
+Guidance & Control Networks that represent an optimal control policy; Wang (2026)
+does Optimality-Informed NNs; Shen et al. (2022) pair convex optimisation with a
+network. The RL branch is mostly one group (Gaudet/Linares/Furfaro 2018, 2021),
+and SAC specifically is near-absent.
+
+We have a ZemZev controller that lands 22/24 (92%) on orbit_descent. The
+literature-standard move is to imitate it (behaviour cloning / DAgger / G&CNET
+style) and RL-finetune if needed. The user has explicitly chosen not to seed the
+buffer with demos ("kendi bulsun"), which is a legitimate call -- but it is worth
+re-raising as a decision, because it is the field's main road.
+
+### Revised next steps, cheapest first
+
+```
+1  LayerNorm in policy_kwargs, one run.        Klein+24: general regularisation
+                                              beats domain-specific fixes;
+                                              Lyle+24: also fights overestimation
+2  Periodic partial resets with snapshots.     Nikishin+22; Calibrated Partial
+                                              Resets (2026) targets "policy
+                                              collapse" by name
+3  Narrow / re-scale the action box so the      our own v30 measurement: the
+   operating point is interior rather than      policy is brittle because it
+   on the tanh bound                            lives on the bound
+4  Keep the replay buffer across warm starts.   demoted from #1 by this review
+5  Behaviour cloning from ZemZev + RL finetune. the landing field's main road
+```
+
+Do NOT: unthrottle the tanh Jacobian (published negative result), or spend more
+on n_critics (two independent lines of evidence against it now).
