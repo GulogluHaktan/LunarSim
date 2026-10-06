@@ -99,6 +99,24 @@ parser.add_argument("--ent-coef", type=str, default="0.05",
                           "without exploration noise -- the wrong side to err on for a task whose "
                           "standing failure is never sampling a landing. Accepts a float, or "
                           "'auto'/'auto_<init>' to hand control back to the tuner.")
+parser.add_argument("--critic-only-steps", type=int, default=0,
+                     help="hold the ACTOR frozen for this many env steps after training "
+                          "begins, so the critic can fit before the policy starts "
+                          "following it. A warm start pairs a good actor with a RANDOM "
+                          "critic whose Q is ~0 while the true value range spans "
+                          "hundreds, so the actor is gradient-ascended on noise from the "
+                          "first update. Measured without it: policies landing 31%%, 38%% "
+                          "and 58%% each collapsed to 0.0%% in EVERY window, within the "
+                          "first 10k steps.")
+parser.add_argument("--onpolicy-warmup", action="store_true",
+                     help="fill the replay buffer with the LOADED POLICY'S own rollouts "
+                          "instead of uniform-random actions before the first gradient "
+                          "step. SB3 samples randomly below `learning_starts`, so a warm "
+                          "start from a competent policy refits its critic on pure "
+                          "random-policy data while the actor is good -- a textbook "
+                          "distribution-shift wipe. Measured: a clone landing 31-38%% "
+                          "was warm-started and scored 0.0%% in EVERY one of 30 windows "
+                          "over 300k steps, never landing once.")
 parser.add_argument("--log-std-max", type=float, default=None,
                      help="cap the policy's PRE-TANH log std (SB3's own cap is 2.0, i.e. "
                           "std up to 7.4). This is the knob --ent-coef cannot reach. "
@@ -625,6 +643,47 @@ def main():
         # warmup the first one gets.
         model.learning_starts = model.num_timesteps + args.stage_warmup_steps
 
+        # ON-POLICY WARMUP. The line above is correct for a FRESH stage -- it
+        # stops SB3 training on a near-empty buffer -- but on a warm start from
+        # a competent policy it is actively destructive, because SB3's
+        # `_sample_action` returns `action_space.sample()` for every step below
+        # `learning_starts`. So the critic's first fit is on uniform-random
+        # data describing a state distribution the loaded actor never visits,
+        # and the actor is then gradient-ascended on that critic.
+        #
+        # Measured: a behaviour clone landing 31-38% of the time was warm
+        # started this way and scored 0.0% in EVERY one of 30 windows across
+        # 300k steps -- roughly 800 training episodes without a single landing,
+        # collapsing inside the first 10k steps and never recovering.
+        #
+        # Filling the same buffer from the policy itself removes the random
+        # phase entirely: the critic starts from data the actor actually
+        # produces.
+        if args.onpolicy_warmup and args.warm_start and first_model_creation:
+            n_warm = max(args.stage_warmup_steps, args.n_envs)
+            print(f"[warmup] collecting {n_warm} ON-POLICY transitions "
+                  f"(no random phase)", flush=True)
+            obs_w = venv.reset()
+            collected = 0
+            while collected < n_warm:
+                act_w, _ = model.predict(obs_w, deterministic=False)
+                new_obs_w, rew_w, done_w, infos_w = venv.step(act_w)
+                # store exactly as SB3 does, including the terminal observation
+                # substitution, so these rows are indistinguishable from the
+                # ones collect_rollouts would have written
+                real_next = new_obs_w.copy()
+                for i, d in enumerate(done_w):
+                    if d and infos_w[i].get("terminal_observation") is not None:
+                        real_next[i] = infos_w[i]["terminal_observation"]
+                model.replay_buffer.add(obs_w, real_next, act_w, rew_w, done_w, infos_w)
+                obs_w = new_obs_w
+                collected += args.n_envs
+            model.num_timesteps += collected
+            # no random phase: start learning immediately on this data
+            model.learning_starts = model.num_timesteps
+            print(f"[warmup] buffer holds {model.replay_buffer.size()} rows; "
+                  f"learning starts now", flush=True)
+
         if args.demo_path and first_model_creation:
             _seed_replay_buffer_from_demos(model, args.demo_path, args.n_envs, args.demo_repeat)
 
@@ -636,6 +695,9 @@ def main():
                 save_path=f"{args.out_dir}/snapshots",
                 name_prefix=f"{stage.name}",
                 save_replay_buffer=args.save_buffer))
+        if args.critic_only_steps > 0 and args.warm_start and first_model_creation:
+            from lunarsim.rl.plasticity import ActorFreezeCallback
+            cbs.append(ActorFreezeCallback(args.critic_only_steps))
         if args.proxy_log_every > 0:
             from lunarsim.rl.monitoring import ProxyVsTrueCallback
             cbs.append(ProxyVsTrueCallback(

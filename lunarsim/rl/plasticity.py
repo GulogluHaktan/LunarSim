@@ -227,3 +227,58 @@ try:
 
 except Exception:  # pragma: no cover - SB3 absent (e.g. the docs venv)
     PeriodicResetCallback = None  # type: ignore
+
+
+class ActorFreezeCallback(BaseCallback):  # type: ignore[misc]
+    """Hold the actor still for the first `steps` env steps of training.
+
+    A warm start pairs a COMPETENT actor with a RANDOMLY INITIALISED critic. The
+    critic outputs ~0 while the true value range spans hundreds (terminal
+    rewards here are -360..+450 against per-step shaping of ~0.5), so its first
+    TD targets are enormous and its early Q-landscape is noise. SAC updates the
+    actor against that critic from the very first gradient step, so a good
+    policy is gradient-ascended on noise before the critic knows anything.
+
+    Measured on this project: clones landing 31%, 38% and 58% were each warm
+    started into SAC and each hit 0.0% in EVERY logged window, collapsing inside
+    the first 10k steps. Neither an on-policy buffer warmup nor restoring the
+    policy's action coverage prevented it.
+
+    Freezing sets `requires_grad=False` on the actor's parameters. Zeroing the
+    actor optimizer's learning rate does NOT work and silently does nothing:
+    SB3 calls `_update_learning_rate` at the top of every `train()` call, which
+    writes the schedule's value back into every param group, and a callback can
+    only re-zero it between ENV steps -- so all `gradient_steps` updates in
+    between run at the normal rate. A "frozen" run done that way is not frozen,
+    which cost one experiment here before it was caught.
+    """
+
+    def __init__(self, steps: int, verbose: int = 1):
+        super().__init__(verbose)
+        self.steps = int(steps)
+        self._until = None
+        self._frozen = False
+        self._saved_lr_schedule = None
+
+    def _on_training_start(self) -> None:
+        self._until = self.model.num_timesteps + self.steps
+
+    def _set_actor_grad(self, flag: bool) -> None:
+        for prm in self.model.actor.parameters():
+            prm.requires_grad_(flag)
+
+    def _on_step(self) -> bool:
+        if self._until is None:
+            return True
+        if not self._frozen and self.model.num_timesteps < self._until:
+            self._set_actor_grad(False)
+            self._frozen = True
+            if self.verbose:
+                print(f"[freeze] actor held until step {self._until}", flush=True)
+        elif self._frozen and self.model.num_timesteps >= self._until:
+            self._set_actor_grad(True)
+            self._frozen = False
+            if self.verbose:
+                print(f"[freeze] actor released at step "
+                      f"{self.model.num_timesteps}", flush=True)
+        return True

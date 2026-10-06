@@ -109,12 +109,26 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
             "left_tile": left,
             "other_failures": n - landed - lost - left,
         }
+        # SAC's own train/ values, which SB3 only prints via _dump_logs -- and
+        # that never fires here because the VecEnv is not Monitor-wrapped. They
+        # live in logger.name_to_value until dumped, so read them directly.
+        # Without this the critic is invisible at exactly the moment a
+        # warm-started policy collapses.
+        try:
+            lv = self.model.logger.name_to_value
+            row["critic_loss"] = float(lv.get("train/critic_loss", float("nan")))
+            row["actor_loss"] = float(lv.get("train/actor_loss", float("nan")))
+            row["ent_coef"] = float(lv.get("train/ent_coef", float("nan")))
+        except Exception:
+            row["critic_loss"] = row["actor_loss"] = row["ent_coef"] = float("nan")
+
         if self.verbose:
             print(f"[proxy-vs-true] step {row['step']:>9}  n={n:>4}  "
                   f"proxy {row['proxy_mean_return']:>9.2f} "
                   f"(worst10% {row['proxy_worst_decile']:>9.2f})  "
                   f"landed {row['true_landed_rate']:>6.1%}  "
-                  f"lost={lost} left={left} other={row['other_failures']}",
+                  f"lost={lost} left={left} other={row['other_failures']}  "
+                  f"Q~{-row['actor_loss']:.0f} critic={row['critic_loss']:.1f}",
                   flush=True)
         if self.csv_path:
             with open(self.csv_path, "a", newline="") as fh:

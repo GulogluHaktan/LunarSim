@@ -357,20 +357,51 @@ def main():
     else:
         print("[gain] OK: vertical feedback is negative in every band")
 
-    # make the saved policy deterministic-ish: a cloned policy has no reason
-    # to carry the wide exploration std SAC initialises, and a large pre-tanh
-    # std would saturate tanh and throw away the fit (handover.md measured
-    # std 4.5-5.8 producing 95% saturated actions).
+    # Set the policy's spread to its OWN FIT RESIDUAL, per action dimension.
+    #
+    # This slot previously hardcoded log_std = -3 (std 0.05) to make the clone
+    # near-deterministic. That is right for EVALUATION and wrong for RL
+    # fine-tuning, and the difference cost a whole run: a 31-38% clone warm
+    # started into SAC scored 0.0% in every one of 30 windows over 300k steps.
+    #
+    # Wagenmaker, Dong, Tsao, Finn & Levine (arXiv:2512.16911) give the reason
+    # directly: behaviour cloning that trains a policy to match the
+    # demonstrator's actions exactly "can fail to ensure COVERAGE over the
+    # demonstrator's actions, a minimal condition necessary for effective RL
+    # finetuning". A policy with std 0.05 shows the critic essentially one
+    # action per state, so there is no spread to estimate an advantage from and
+    # the policy gradient has nothing to work with. Their fix is to model the
+    # POSTERIOR over the demonstrator's behaviour rather than its point
+    # estimate; matching the fit residual is the cheap version of that -- the
+    # policy is exactly as uncertain as its own regression error.
+    #
+    # Also worth recording from the same literature search, because it closes
+    # two hypotheses this project spent runs on: a randomly initialised critic
+    # is not the problem. Dong, Polonsky, Sadigh & Finn (arXiv:2607.27203) find
+    # naive Q pretraining gives little benefit over random init, Li et al.
+    # (arXiv:2608.10473) abandon offline critic training entirely and match or
+    # beat conventional O2O, and PORL (arXiv:2505.16856) initialises Q from
+    # scratch online specifically to fine-tune BC policies.
     with torch.no_grad():
+        resid = (torch.tanh(forward_mean(x_va)) - torch.tanh(tgt_va)).std(dim=0)
+        resid = resid.clamp(min=1e-3)
+        # convert an action-space residual to the pre-tanh scale at the policy's
+        # own operating point: d(tanh)/du = 1 - tanh^2, so u_std ~ a_std / (1-a^2)
+        a_mean = torch.tanh(forward_mean(x_va)).mean(dim=0)
+        jac = (1.0 - a_mean ** 2).clamp(min=0.05)
+        pre_tanh_std = (resid / jac).clamp(0.02, 1.0)
+        target_log_std = torch.log(pre_tanh_std)
         ls = getattr(actor, "log_std", None)
         if isinstance(ls, nn.Linear):
-            # SB3 uses a state-dependent std head here, not a bare parameter:
-            # zero the weight so the std stops depending on the observation and
-            # set the bias so it is small and constant.
+            # SB3's std head is state-dependent; zero the weight so it stops
+            # varying with the observation and put the value in the bias.
             ls.weight.zero_()
-            ls.bias.fill_(-3.0)
+            ls.bias.copy_(target_log_std)
         elif ls is not None:
-            ls.fill_(-3.0)
+            ls.copy_(target_log_std)
+    print(f"[bc] policy std set from fit residual: "
+          f"{pre_tanh_std.cpu().numpy().round(4)} (pre-tanh), "
+          f"action-space residual {resid.cpu().numpy().round(4)}")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     model.save(args.out)
