@@ -3373,3 +3373,51 @@ were, without a training run.
     learning rate inside train()), two-timescale via learning rate (Adam
     normalises it away), the action-saturation penalty (`info["action"]` was never
     written), and the early ent_coef test (run with the broken touchdown label).
+
+## Two defects found by inspection, not by another run (2026-10-07)
+
+Both were found by looking at what the anchored runs CONTAIN rather than by
+trying another configuration, which is what the previous twenty attempts did.
+
+**1. The BC anchor was freezing exploration.** `BCAnchorCallback` walked the whole
+actor `state_dict()`, so the trust region included the `log_std` head. Across
+every checkpoint of two 410k-step runs:
+
+```
+                log_std.bias      head |W|     std
+  clone            -2.647          0.0000      [0.076, 0.135, 0.124, 0.020]
+  v55 260k         -2.646          0.0004      [0.076, 0.135, 0.124, 0.020]
+  v55 410k         -2.645          0.0007      [0.076, 0.135, 0.124, 0.020]
+  v53 260k         -2.645          0.0007      [0.076, 0.136, 0.124, 0.020]
+```
+
+Identical to three decimals after 410k steps. SAC's entropy term spent both runs
+pushing a parameter that could not move, and `ent_coef` collapsed 1.0 -> 0.005 in
+response. So those runs were not SAC exploring from a warm start; they were
+near-deterministic policy iteration in a small ball around the clone. Fixed: the
+anchor holds the mean network only, `--bc-anchor-log-std` opts back in.
+
+**2. Every deterministic eval used one terrain.** `--terrain-seed 7`, for all of
+them, with no rocks -- the single env cannot vary terrain and says so in its own
+docstring ("CURRENT LIMITATION: tile is a single fixed terrain"). Training draws
+a fresh terrain per episode AND spawns up to 10 collidable rocks per env.
+
+The clone-vs-RL comparison stays internally valid, since both policies met the
+same tile on the same seeds. What it MEANS changes:
+
+```
+                 varied terrain (training)    terrain 7 (eval)
+  clone                   47.4%                     58%
+  RL v55 260k             53.8%                     44%
+```
+
+RL gains where it trains and loses where it is measured. That is a
+generalisation claim, not "RL is worse than the clone", and it is the first
+explanation of the gap that predicts the SIGN of both numbers. Being measured
+across terrain seeds 7/11/23/41.
+
+**What this does NOT excuse:** the reward's resolution at the lateral limit,
+which was the hypothesis these checks were meant to serve. Computed directly: a
+touchdown at 1.19 m/s scores ~+350 and one at 1.21 m/s scores -60, a ~410-unit
+cliff at exactly the criterion. The reward is the sharpest it could be there, so
+"the shaping cannot resolve the band that decides the episodes" is refuted.
