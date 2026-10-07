@@ -97,6 +97,17 @@ class DualRewardReplayBuffer(ReplayBuffer):
 
     def _get_samples(self, batch_inds, env=None):  # type: ignore[override]
         env_indices = np.random.randint(0, high=self.n_envs, size=(len(batch_inds),))
+        return self._get_samples_pairs(batch_inds, env_indices, env)
+
+    def _get_samples_pairs(self, batch_inds, env_indices, env=None):
+        """The body above, but with the (position, env) PAIRS given rather than drawn.
+
+        A transition in this buffer is identified by a pair, not by a position: the
+        parent draws `env_indices` itself, so any subclass that wants to CHOOSE which
+        transitions to sample -- `AltitudeStratifiedReplayBuffer` does -- has to supply
+        both halves or it would re-randomise the env half and pair each terminal reward
+        with a different transition than the one it belongs to.
+        """
         if self.optimize_memory_usage:
             next_obs = self._normalize_obs(
                 self.observations[(batch_inds + 1) % self.buffer_size, env_indices, :], env)

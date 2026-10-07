@@ -131,6 +131,19 @@ parser.add_argument("--calql-ref", type=float, default=None,
                           "recorded ramp_35m episodes in training reward units. That is 26 "
                           "to 37 units of over-conservatism and it left the actor nothing "
                           "to climb. Omit for plain CQL.")
+parser.add_argument("--altitude-replay", type=float, default=0.0, metavar="FRAC",
+                     help="fraction of every critic batch drawn from BELOW "
+                          "--decisive-alt-m, instead of the ~14%% uniform sampling gives "
+                          "on a 200 m descent. Measured reason: resolved by altitude, "
+                          "the critic's action gradient points to the expert 54.3%% of "
+                          "the time in the decisive 0-2 m band and 68.6%% in the 80-150 m "
+                          "cruise -- it is wrong where the landing is graded and right "
+                          "where it is not, and the cruise is 65%% of the buffer. 0 "
+                          "(default) keeps uniform sampling, so no earlier run changes. "
+                          "Requires --dual-gamma.")
+parser.add_argument("--decisive-alt-m", type=float, default=5.0,
+                     help="the altitude below which a transition counts as decisive for "
+                          "--altitude-replay")
 parser.add_argument("--dual-gamma", type=float, nargs=2, default=None,
                      metavar=("GAMMA_SHAPING", "GAMMA_TERMINAL"),
                      help="two discount rates: a low one for the dense shaping stream and "
@@ -425,10 +438,28 @@ from stable_baselines3.common.utils import FloatSchedule  # noqa: E402
 def _dual_gamma_kwargs(args):
     """Buffer + critic kwargs for dual discounting, or empty when it is off."""
     if not getattr(args, "dual_gamma", None):
+        if getattr(args, "altitude_replay", 0.0):
+            # The stratified buffer is a DualRewardReplayBuffer subclass: it stores the
+            # terminal stream whether or not a split critic consumes it. Refusing is
+            # better than silently ignoring the flag.
+            raise SystemExit("--altitude-replay needs --dual-gamma (the stratified "
+                             "buffer is a dual-reward buffer)")
         return {}, {}
-    from lunarsim.rl.dual_gamma import DualRewardReplayBuffer
-    return ({"replay_buffer_class": DualRewardReplayBuffer},
-            {"dual_gamma": (args.dual_gamma[0], args.dual_gamma[1])})
+    frac = float(getattr(args, "altitude_replay", 0.0) or 0.0)
+    if frac > 0.0:
+        # Sample where the landing is decided. See lunarsim/rl/altitude_replay.py for
+        # the per-band gradient measurement this answers: the decisive 0-2 m band is 14%
+        # of an orbit_descent buffer and is the band the critic is wrong in.
+        from lunarsim.rl.altitude_replay import AltitudeStratifiedReplayBuffer
+        buf_kwargs = {
+            "replay_buffer_class": AltitudeStratifiedReplayBuffer,
+            "replay_buffer_kwargs": {"decisive_frac": frac,
+                                     "decisive_alt_m": float(args.decisive_alt_m)},
+        }
+    else:
+        from lunarsim.rl.dual_gamma import DualRewardReplayBuffer
+        buf_kwargs = {"replay_buffer_class": DualRewardReplayBuffer}
+    return (buf_kwargs, {"dual_gamma": (args.dual_gamma[0], args.dual_gamma[1])})
 
 
 def _sac_class(args):
@@ -911,6 +942,24 @@ def main():
                     raise SystemExit("--dual-gamma did not reach the model")
                 if args.cql_alpha > 0 and not getattr(model, "cql_alpha", 0):
                     raise SystemExit("--cql-alpha did not reach the model")
+                if getattr(args, "altitude_replay", 0.0):
+                    # A warm start that goes through SAC.load can bring its OWN buffer
+                    # class back with it, so the flag reaching `_dual_gamma_kwargs` does
+                    # not prove the buffer in the model is the stratified one. Check the
+                    # object, and check the fraction on it, not the namespace.
+                    from lunarsim.rl.altitude_replay import AltitudeStratifiedReplayBuffer
+                    rb = model.replay_buffer
+                    if not isinstance(rb, AltitudeStratifiedReplayBuffer):
+                        raise SystemExit(
+                            f"--altitude-replay asked for stratified sampling but the "
+                            f"buffer is {type(rb).__name__}; it would be silently inert.")
+                    if abs(rb.decisive_frac - float(args.altitude_replay)) > 1e-9:
+                        raise SystemExit(
+                            f"buffer decisive_frac={rb.decisive_frac} but the flag said "
+                            f"{args.altitude_replay}")
+                    print(f"[altitude-replay] {rb.decisive_frac:.0%} of each batch from "
+                          f"below {rb.decisive_alt_m:g} m (uniform sampling gives ~14%)",
+                          flush=True)
                 if args.layer_norm:
                     import torch.nn as _nn
                     if not any(isinstance(mm, _nn.LayerNorm)
