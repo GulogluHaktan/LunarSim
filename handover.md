@@ -3421,3 +3421,44 @@ which was the hypothesis these checks were meant to serve. Computed directly: a
 touchdown at 1.19 m/s scores ~+350 and one at 1.21 m/s scores -60, a ~410-unit
 cliff at exactly the criterion. The reward is the sharpest it could be there, so
 "the shaping cannot resolve the band that decides the episodes" is refuted.
+
+## CORRECTION: the "RL loses 10-14 points to the clone" gap was never measured
+
+Everything above that compares RL against a clone at **58%** is wrong, and wrong
+in a way this file already warned about. Tracing the 58% to its source: it came
+from `28/48` and `14/24` episode runs. Those are the sample sizes the standing
+warning in this very document calls unusable for ranking checkpoints, and I used
+one as the session's reference number for days.
+
+Measured properly -- 96 episodes, same stage, same terrain seed, same seed block,
+full provenance on both lines:
+
+```
+  seed0=7000, terrain_seed=7, 96 episodes, deterministic
+    clone            53/96  (55%)   mean return 182.9
+    RL v55 260k      51/96  (53%)   mean return 178.9
+```
+
+Two points apart. The standard error of that difference is ~7 points, so there is
+no measured gap at all. The 44% that anchored the "RL is far below the clone"
+story was `--seed0 41000`, a DIFFERENT held-out block from the 58%, which was
+itself from a different (and far too small) episode count. Comparing them was
+comparing two unrelated measurements.
+
+So the open problem is not "RL destroys the policy it starts from". It is "RL does
+not IMPROVE on it" -- flat, within noise. That is a different diagnosis with
+different candidate causes, and it is consistent with the log_std finding above:
+with exploration frozen at the clone's scale and the mean held in a trust region,
+a run that ends up statistically indistinguishable from its warm start is exactly
+what the configuration would produce.
+
+It also means the generalisation story committed earlier today ("RL gains where it
+trains, 47.4 -> 53.8, and loses where it is measured, 58 -> 44") is NOT supported:
+its eval-side numbers come from two different seed blocks and one of them is the
+48/24-episode artifact. The training-side pair stands; the eval-side pair does not.
+
+**The measurement rule, restated because 96 was not enough either:** a comparison
+needs both policies in the SAME run matrix -- same episode count, same seed block,
+same terrain seed -- and the provenance string printed on every line exists so
+that this can be checked. It was printed correctly the whole time. I did not read
+it.
