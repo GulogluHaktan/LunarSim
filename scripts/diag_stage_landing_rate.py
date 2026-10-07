@@ -111,7 +111,10 @@ def main():
                           seed=args.seed0, lunarsim_root=args.lunarsim_root,
                           legacy_obs15=args.legacy_obs15,
                           legacy_obs16=args.legacy_obs16)
-    model = SAC.load(args.checkpoint, device="cpu")
+    # Tolerant of critic surgery: see lunarsim/rl/eval_loader.py. A LayerNorm'd critic
+    # made SAC.load raise and turned six evaluation cells into blank lines.
+    from lunarsim.rl.eval_loader import load_actor_for_eval
+    model = load_actor_for_eval(args.checkpoint, device="cpu")
     max_steps = int(params.max_episode_s / params.dt_s) + 5
 
     n_safe = n_lost = n_timeout = n_left = n_crash = 0

@@ -82,7 +82,8 @@ class CQLSAC(SAC):
     def __init__(self, *args, cql_alpha: float = 5.0, cql_n_samples: int = 10,
                  calql_ref: float | None = None,
                  dual_gamma: tuple[float, float] | None = None,
-                 td3bc_alpha: float | None = None, **kwargs):
+                 td3bc_alpha: float | None = None,
+                 pex_temperature: float | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.cql_alpha = float(cql_alpha)
         self.cql_n_samples = int(cql_n_samples)
@@ -92,6 +93,11 @@ class CQLSAC(SAC):
         # lunarsim/rl/dual_gamma.py for the measurement that motivates it.
         self.dual_gamma = None if dual_gamma is None else (float(dual_gamma[0]),
                                                            float(dual_gamma[1]))
+        # PEX (Zhang, Xu, Yu -- arXiv:2302.00935). `pex_actor` is a FROZEN copy of the
+        # warm-start actor; `pex_temperature` is the softmax temperature for choosing
+        # between its action and the learnable actor's. None disables the whole thing.
+        self.pex_temperature = None if pex_temperature is None else float(pex_temperature)
+        self.pex_actor = None
         # TD3+BC's actor regulariser (Fujimoto & Gu, arXiv:2106.06860), in ACTION space.
         # This is the paper's ALPHA, and the direction is counter-intuitive enough that it
         # cost me a wrong test: lambda = alpha / mean|Q| scales the Q TERM, so a LARGER
@@ -296,3 +302,95 @@ class CQLSAC(SAC):
         # ---- INSERTION 2: so the penalty's size is visible in the proxy log ----
         if cql_terms:
             self.logger.record("train/cql_term", np.mean(cql_terms))
+
+
+    # ------------------------------------------------------------------ #
+    # PEX: policy expansion (arXiv:2302.00935)
+    # ------------------------------------------------------------------ #
+
+    def install_pex(self, temperature: float) -> None:
+        """Freeze a copy of the current actor as the retained offline policy.
+
+        WHY THIS SHAPE, from this project's own measurements. Every intervention that
+        stopped the warm start from being destroyed also stopped it from improving:
+
+            anchor beta=1e-2 (69-update half-life)  frozen at the clone, no learning
+            anchor beta=3e-3, 1e-3                  dead in one 10k window
+            CQL alpha=5                             no collapse, no improvement
+                                                    (49.5% against the clone's 50.5%)
+
+        That is a systematic trade-off rather than bad luck, and the cause is structural:
+        ONE network had to be both the competent fallback and the explorer. Constrain it
+        and it cannot explore; release it and an uninformative action gradient destroys it.
+        There is no setting in between because the problem is not in the knob.
+
+        PEX names this exactly -- it calls what we were doing the "Direct" method, "which
+        has the potential of destroying useful behaviors learned offline" -- and splits the
+        two roles instead: freeze pi_beta, add a learnable pi_theta, and choose between
+        their proposals per state with a categorical distribution over Q.
+
+        The reason it fits OUR measurements specifically, which is what makes it more than
+        one more method to try:
+
+            the critic's VALUE    is calibrated    Q0 vs realised discounted return ~ 0
+            the critic's GRADIENT is not           40.8% toward the expert, vs 47.6% for
+                                                   the clone's own untrained critic
+
+        Selection needs Q only to RANK two concrete actions. It never differentiates Q with
+        respect to the action. So PEX uses precisely the capability we measured ourselves to
+        have and avoids precisely the one we measured ourselves to lack -- where the anchor,
+        CQL and TD3+BC all trust grad_a Q and merely try to restrain it.
+
+        Structural consequences, none of which need tuning: the clone cannot be degraded,
+        so collapse is impossible by construction; pi_theta may be arbitrarily bad at no
+        cost because it simply is not selected; and the floor is the clone's own
+        performance. The paper's ablation confirms the freeze carries the result -- training
+        pi_beta alongside pi_theta gives "a clear performance drop".
+        """
+        import copy
+        self.pex_actor = copy.deepcopy(self.actor)
+        self.pex_actor.set_training_mode(False)
+        for prm in self.pex_actor.parameters():
+            prm.requires_grad_(False)
+        self.pex_temperature = float(temperature)
+
+    def _pex_q(self, obs: th.Tensor, act: th.Tensor) -> th.Tensor:
+        """The same scalar the actor ascends, so selection and learning agree."""
+        qs = self.critic(obs, act)
+        if self.dual_gamma is not None:
+            return (th.cat(qs[:self._n_half], dim=1).min(dim=1).values
+                    + th.cat(qs[self._n_half:], dim=1).min(dim=1).values)
+        return th.cat(qs, dim=1).min(dim=1).values
+
+    def predict(self, observation, state=None, episode_start=None, deterministic=False):
+        if self.pex_actor is None or self.pex_temperature is None:
+            return super().predict(observation, state, episode_start, deterministic)
+        # Both policies propose, the critic ranks, a categorical over Q picks. Equation (5)
+        # of the paper; `deterministic` is honoured WITHIN each member policy, and the
+        # choice between them stays stochastic because that is what lets pi_theta be tried
+        # at all. At temperature -> 0 it becomes argmax.
+        obs_t, vectorized = self.policy.obs_to_tensor(observation)
+        with th.no_grad():
+            a_beta = self.pex_actor(obs_t, deterministic=deterministic)
+            a_theta = self.actor(obs_t, deterministic=deterministic)
+            q_beta = self._pex_q(obs_t, a_beta)
+            q_theta = self._pex_q(obs_t, a_theta)
+            logits = th.stack([q_beta, q_theta], dim=1) / max(self.pex_temperature, 1e-6)
+            pick = th.distributions.Categorical(logits=logits).sample()
+            chosen = th.where(pick.unsqueeze(1).bool(), a_theta, a_beta)
+        actions = chosen.cpu().numpy().reshape((-1, *self.action_space.shape))
+        actions = np.clip(actions, self.action_space.low, self.action_space.high)
+        if not vectorized:
+            actions = actions.squeeze(axis=0)
+        return actions, state
+
+    def _excluded_save_params(self):
+        return super()._excluded_save_params()
+
+    def _get_torch_save_params(self):
+        state_dicts, tensors = super()._get_torch_save_params()
+        if self.pex_actor is not None:
+            # so a saved checkpoint is a self-contained COMPOSITE policy; without this an
+            # evaluation would silently load pi_theta alone and measure the wrong thing
+            state_dicts = list(state_dicts) + ["pex_actor"]
+        return state_dicts, tensors
