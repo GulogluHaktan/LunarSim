@@ -39,10 +39,25 @@ with the sampled set drawn half from the current policy (importance weight
 log pi(a|s)) and half uniform over the action box (log mu = -d*log 2). Cal-QL
 (arXiv:2303.05479) refines this by clamping the OOD values from below at a
 reference value so the penalty cannot become so conservative that online
-improvement stalls; that needs a reference V and is deliberately NOT implemented
-yet -- plain CQL is the cheaper test of whether this mechanism is the one, and
-over-conservatism has a recognisable signature (no collapse, but no improvement
-either) that tells us to go there next.
+improvement stalls.
+
+MEASURED OUTCOME of plain CQL here, which is why the clamp now exists. The collapse
+was solved: deterministic 96-episode rates went from 0.0%/4.2% without the term to
+49.5% pooled at alpha=5, and Q never turned positive in the release window again.
+But there was no improvement on the warm start (clone 50.5% pooled), and the reason
+was visible -- Q ended at -21 (alpha=1) and -32 (alpha=5) while the true shaped
+return was +13 to +20. The demonstrator's own discounted V(s0), over the 48 recorded
+ramp_35m episodes in training reward units (reward_total_scale=0.1, gamma=0.995), is
+mean +5.34 (median 5.94, p10 0.86, max 7.53). So CQL had pushed Q 26 to 37 units
+BELOW what the reference policy actually achieves, leaving no gradient worth
+climbing.
+
+`calql_ref` is a SCALAR, which is an approximation: the paper uses a state-dependent
+V_ref from Monte-Carlo returns. It is defensible here because the measured spread of
+V(s0) (-0.21 to 7.53) is small next to the 26-37 unit error being corrected, and a
+scalar needs no second network to go wrong. 0.0 is the conservative choice, keeping
+CQL's lower bound almost everywhere while removing the pathology; the measured mean
+5.34 is the aggressive one.
 """
 from __future__ import annotations
 
@@ -64,10 +79,13 @@ class CQLSAC(SAC):
     produced with.
     """
 
-    def __init__(self, *args, cql_alpha: float = 5.0, cql_n_samples: int = 10, **kwargs):
+    def __init__(self, *args, cql_alpha: float = 5.0, cql_n_samples: int = 10,
+                 calql_ref: float | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.cql_alpha = float(cql_alpha)
         self.cql_n_samples = int(cql_n_samples)
+        # None disables the Cal-QL clamp and leaves plain CQL(H).
+        self.calql_ref = None if calql_ref is None else float(calql_ref)
 
     def _conservative_term(self, observations, current_q_values) -> th.Tensor:
         """logsumexp over OOD actions minus Q on the buffer's own actions."""
@@ -88,6 +106,16 @@ class CQLSAC(SAC):
 
         total = th.zeros((), device=observations.device)
         for q_pi, q_unif, q_data in zip(q_pi_all, q_unif_all, current_q_values):
+            # Cal-QL: clamp the OOD values from BELOW at a reference before the
+            # logsumexp, so the penalty cannot drive them under what the reference
+            # policy actually achieves. Plain CQL drove Q to -21 and -32 here while
+            # the demonstrator's own discounted V(s0) is +5.34 (mean over 48
+            # recorded episodes, training reward units) -- 26 to 37 units of pure
+            # over-conservatism, which left the actor nothing to climb and produced
+            # exactly the measured "no collapse, no improvement" result.
+            if self.calql_ref is not None:
+                q_pi = th.clamp(q_pi, min=self.calql_ref)
+                q_unif = th.clamp(q_unif, min=self.calql_ref)
             # subtract the proposal log-density, per CQL(H)'s importance weighting
             qp = q_pi.view(batch, n) - logp_pi.view(batch, n)
             qu = q_unif.view(batch, n) - log_unif

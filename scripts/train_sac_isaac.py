@@ -120,6 +120,17 @@ parser.add_argument("--cql-alpha", type=float, default=0.0,
                           "had begun proposing. Twenty-two actor-side interventions could "
                           "not fix that because a trust region only shortens the walk; it "
                           "cannot correct what Q says at the end of it.")
+parser.add_argument("--calql-ref", type=float, default=None,
+                     help="Cal-QL (arXiv:2303.05479): clamp the out-of-distribution Q "
+                          "values from below at this reference before CQL's logsumexp, so "
+                          "the penalty cannot drive them under what the reference policy "
+                          "actually achieves. Needed because plain CQL solved the collapse "
+                          "and then stalled: Q ended at -21 (alpha=1) and -32 (alpha=5) "
+                          "while the true shaped return was +13 to +20 and the "
+                          "demonstrator's own discounted V(s0) is +5.34, measured over 48 "
+                          "recorded ramp_35m episodes in training reward units. That is 26 "
+                          "to 37 units of over-conservatism and it left the actor nothing "
+                          "to climb. Omit for plain CQL.")
 parser.add_argument("--cql-n-samples", type=int, default=10,
                      help="actions sampled per state for the CQL logsumexp, half from the "
                           "policy and half uniform over the action box.")
@@ -575,8 +586,11 @@ def main():
                     # from the class body until set here.
                     model.cql_alpha = float(args.cql_alpha)
                     model.cql_n_samples = int(args.cql_n_samples)
+                    model.calql_ref = (None if args.calql_ref is None
+                                       else float(args.calql_ref))
                     print(f"[cql] conservative critic term active, alpha={args.cql_alpha}, "
-                          f"n_samples={args.cql_n_samples}", flush=True)
+                          f"n_samples={args.cql_n_samples}, "
+                          f"calql_ref={model.calql_ref}", flush=True)
                 if len(model.critic.q_networks) != args.n_critics:
                     model = _expand_critic_ensemble(model, venv, args, args.n_critics)
                 # SAC.load does NOT restore a replay buffer, so without this the
@@ -708,7 +722,8 @@ def main():
                 # runaway and pinning alpha does not address it.
                 _cls = _sac_class(args)
                 _extra = ({"cql_alpha": args.cql_alpha,
-                           "cql_n_samples": args.cql_n_samples}
+                           "cql_n_samples": args.cql_n_samples,
+                           "calql_ref": args.calql_ref}
                           if _cls is not SAC else {})
                 model = _cls("MlpPolicy", venv, verbose=1, device=args.torch_device,
                              gamma=args.gamma, gradient_steps=args.gradient_steps,
