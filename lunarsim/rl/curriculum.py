@@ -421,7 +421,40 @@ STAGES = [
             # demos, the clone fitted to them and the 22.9% clone baseline were all measured at
             # vz=0 and are stale. The controller's own rate will shift too, so the comparison
             # stays fair only if BOTH are re-measured, which is the next step.
-            spawn_v_z_m_s=-5.5, spawn_horizontal_speed_m_s=(10.0, 30.0),
+            # REVERTED to 0.0, and the measurement that forced it back is worth keeping.
+            #
+            # Changing it to -5.5 did fix the exploration problem -- an untrained policy went
+            # from 0/20 touchdowns to 20/20 -- and broke the REFERENCE: the ZemZev controller
+            # landed 0/96 in Isaac on the changed stage, every episode running the full 1201
+            # steps. Swept on the analytic env, 16 episodes per value:
+            #
+            #     spawn vz    controller lands    random policy reaches the ground
+            #       0.0           16/16                    0/16
+            #      -1.0            0/16                    0/16
+            #      -2.0            0/16                    0/16
+            #      -3.0            0/16                    0/16
+            #      -4.0            0/16                    0/16
+            #      -5.5            0/16                   16/16
+            #
+            # There is NO value where both work. The controller is not a general guidance law
+            # for this stage -- it is tuned to vz=0 tightly enough that -1.0 already fails
+            # completely. So the choice is between a measurable reference and a stage
+            # exploration can learn in, and keeping the reference wins: the goal is defined as
+            # beating or approaching the controller, which is meaningless if the controller
+            # scores 0.
+            #
+            # What this settles rather than leaves open: from-scratch RL is genuinely off the
+            # table ON THIS STAGE, for a reason that is now measured rather than assumed -- an
+            # untrained policy samples the terminal reward zero times because
+            # thrust-to-weight at the action box centre is 1.0159, so its mean action is a
+            # hover. That is not a statement about RL.
+            #
+            # It is also an argument for the two-model split: a landing specialist trains on
+            # `land_handoff`, whose entry distribution includes vz in [-5, -1] where
+            # exploration does reach the ground, while the approach half starts from this
+            # stage's vz=0 which the controller handles. Each half gets an entry its own
+            # regime supports, instead of one stage having to serve both.
+            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(10.0, 30.0),
             max_episode_s=60.0,
         ),
     ),
