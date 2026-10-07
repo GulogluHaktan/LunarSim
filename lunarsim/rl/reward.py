@@ -103,7 +103,11 @@ class RewardWeights:
     # order (416/step vs 792/step at the same states), which is what it has
     # to be for them to trade off instead of one being ignored -- the same
     # reasoning, and the same number, as kxy 12 -> 400.
-    profile_k: float = 400.0
+    # RETIRED, kept at 0 so the term can be restored for an ablation. The velocity field
+    # subsumes it: the field names a descent rate at every altitude, so descending too
+    # slowly, too fast, or climbing are all simply tracking errors with a gradient, where
+    # this term was flat inside the envelope and a wall outside it. This was the envelope's own penalty.
+    profile_k: float = 0.0
     # Climbing is outside the envelope too, and needs its own gradient: with
     # a flat time cost, a climb and a hover cost the SAME per step, so
     # nothing locally opposes the climb-away exploit this project measured
@@ -115,7 +119,11 @@ class RewardWeights:
     # with vz at or above zero (+0.63, +1.06, +1.12), so this relationship
     # is still load-bearing and scales with profile_k rather than staying
     # put and becoming relatively free.
-    profile_climb_k: float = 800.0
+    # RETIRED, kept at 0 so the term can be restored for an ablation. The velocity field
+    # subsumes it: the field names a descent rate at every altitude, so descending too
+    # slowly, too fast, or climbing are all simply tracking errors with a gradient, where
+    # this term was flat inside the envelope and a wall outside it. Climbing is now a large tracking error.
+    profile_climb_k: float = 0.0
     # Scaled with profile_k to preserve the property the comment above
     # demands: unsaturated out to ~7 m/s of excess, which a near-ground
     # free-fall arrival actually reaches. At k=400 that needs 400*49 =
@@ -179,7 +187,11 @@ class RewardWeights:
     # descent identical at every stage (`progress_k * reward_scale / dt`
     # ~= 120 units, against a 450 landing bonus), so the term stays a
     # guide and can never pay for its own crash.
-    progress_k: float = 24000.0
+    # RETIRED, kept at 0 so the term can be restored for an ablation. The velocity field
+    # subsumes it: the field names a descent rate at every altitude, so descending too
+    # slowly, too fast, or climbing are all simply tracking errors with a gradient, where
+    # this term was flat inside the envelope and a wall outside it. Paying for altitude closed is also redundant with the field, which already demands a descent rate; the published design has no separate progress term.
+    progress_k: float = 0.0
 
     # ---------------------------------------------------------------- #
     # Time: pressure to finish, on top of the progress gradient.
@@ -192,7 +204,11 @@ class RewardWeights:
     # recklessness. Sized so a full ramp_20m episode (400 steps) costs
     # ~40 units against a 450 bonus -- enough that dawdling is clearly
     # worse than landing, far from enough to outrun the terminal.
-    time_k: float = 400.0
+    # RETIRED, kept at 0 so the term can be restored for an ablation. The velocity field
+    # subsumes it: the field names a descent rate at every altitude, so descending too
+    # slowly, too fast, or climbing are all simply tracking errors with a gradient, where
+    # this term was flat inside the envelope and a wall outside it. Replaced by `alive_bonus` with the opposite sign; see `_time_penalty`.
+    time_k: float = 0.0
 
     # ---------------------------------------------------------------- #
     # Horizontal speed.
@@ -224,7 +240,11 @@ class RewardWeights:
     # correctly ignored the latter. At 400 that difference is 0.17/step,
     # the same order as the progress term, which is what it has to be for
     # the two to trade off instead of one dominating.
-    kxy: float = 400.0
+    # RETIRED, kept at 0 so the term can be restored for an ablation. The velocity field
+    # subsumes it: the field names a descent rate at every altitude, so descending too
+    # slowly, too fast, or climbing are all simply tracking errors with a gradient, where
+    # this term was flat inside the envelope and a wall outside it. Below the switch the lateral target is 0, so lateral speed IS the tracking error -- linear rather than quadratic, which is the gentler form and avoids the saturation this project removed from three other terms.
+    kxy: float = 0.0
     # 20 -> 4 m (2026-10-05, measured when ramp_50m regressed to 0/16).
     # The ground weight sets how far UP lateral speed is charged, and 20 m
     # reached much too high once the release speed grew. Measured ratio of
@@ -393,6 +413,29 @@ class RewardWeights:
     # while a near-landing crash is still better than waiting (severity 1.05 ->
     # -6). Both orderings matter -- the first stops "commit and slam" from being
     # free, the second keeps committing better than stalling.
+    # ---- VELOCITY-FIELD DENSE CORE (arXiv:1810.08719) ----
+    # `vfield_k` is calibrated so the DENSE shaping outweighs the terminal, which is
+    # the balance the published design uses and the opposite of what this project had.
+    # Measured: their landing bonus is kappa=10 against a tracking term worth about 20
+    # over an episode, so dense/terminal ~ 2. Ours was terminal/dense = 10.8, and still
+    # 3.7 after the continuous-terminal change -- the terminal was lowered when the
+    # dense terms should have been raised. At vfield_k=500 a steady 2 m/s tracking
+    # error costs 0.125/step, ~56 over a 448-step episode, and a 4 m/s error ~112,
+    # against a terminal of 120. So a policy that tracks badly for a whole episode pays
+    # about what a landing is worth, and a policy that tracks well pays almost nothing
+    # and collects the terminal.
+    vfield_k: float = 500.0
+    vfield_cap: float = 40000.0
+    # The controller's measured descent schedule over its successful episodes:
+    # -vz = 0.547*alt^0.431, floored at 0.80 m/s. See `target_velocity` for why the
+    # envelope's own 0.78*sqrt(alt) was the wrong target (too fast by ~2x) and why the
+    # floor is needed (the controller holds a constant 0.80 m/s below 5 m).
+    vfield_vz_c: float = 0.547
+    vfield_vz_p: float = 0.431
+    vfield_vz_floor_m_s: float = 0.80
+
+    alive_bonus: float = 500.0
+
     touchdown_k: float = 120.0
     touchdown_penalty_cap: float = 480.0
 
@@ -473,7 +516,13 @@ class RewardWeights:
     # keep returns O(1-10); this was two orders of magnitude outside that.
     #
     # 1.0 reproduces every number measured before this existed.
-    reward_total_scale: float = 1.0
+    # (1-gamma)-style value normalisation, the heuristic the published design uses to
+    # keep value targets near unity ("multiplies the rewards accumulated over an episode
+    # by a factor of 1-gamma", and "it is important to ensure that the magnitude of the
+    # neural network outputs are reasonably close to unity"). Measured here rather than
+    # copied: at scale 1.0 a successful episode's discounted V(s0) is about -22, so 0.05
+    # puts it near -1. This project previously ran 0.1 with Q measured at -7 to -41.
+    reward_total_scale: float = 0.05
 
     reward_scale: float = 0.00025
 
@@ -492,8 +541,89 @@ def _descent_envelope_penalty(w: RewardWeights, alt_m: float, v_z: float) -> flo
                + w.profile_climb_k * excess_up * excess_up, w.profile_cap)
 
 
+def target_velocity(w: RewardWeights, alt_m: float, dx: float = 0.0, dy: float = 0.0):
+    """The velocity the vehicle should be holding at this altitude.
+
+    A FIELD, not an envelope. That distinction is the point: an envelope is a limit, so
+    inside it the reward is flat and the agent learns nothing about how to descend.
+    Measured on this project's own weights, at 10 m the envelope is 2.47 m/s and the
+    penalty at vz = -1.00, -2.00 and -2.47 is 0.0000, 0.0000, 0.0000 -- no gradient
+    anywhere in the working band, only a wall past it. The published design for this
+    problem class (Gaudet/Linares/Furfaro, arXiv:1810.08719) tracks a velocity field
+    instead, and that is what this returns.
+
+    TWO MEASUREMENTS set the shape, and both corrected a first attempt:
+
+    1. The vertical target is the CONTROLLER's measured descent schedule, not the
+       envelope. Using the envelope as a target was wrong by a factor of ~2 -- it asks
+       for 4.61 m/s at 35 m where the controller actually descends at 2.59, and scoring
+       the controller against it produced a mean tracking error of 4.64 m/s and a dense
+       sum of -249 for the policy that lands 92% of the time. A limit's value is not a
+       good target. Fitted over the successful demo episodes:
+
+           -vz = 0.547 * alt^0.431, floored at 0.80 m/s
+
+       The floor matters: below 5 m the controller holds a constant 0.80 m/s (p50 = 0.80
+       in every band from 0 to 5 m) while the power law decays to 0.33, so without it the
+       field would ask for a slower touchdown than the controller uses, against a
+       `safe_landing_v_z_m_s` of 1.0.
+
+    2. The lateral target is ZERO EVERYWHERE, and there is no aim point over the pad.
+       This task has no pinpoint requirement: `landed_safely` tests vz, v_xy, tilt, |w|
+       and leg height difference, and contains no position term at all. The measured
+       controller confirms it -- its offset from the target is 4.4 m (p50) at 25-36 m
+       altitude and 25.9 m at touchdown, i.e. it bleeds off its spawn lateral velocity
+       and lands wherever that leaves it. Gaudet's field aims at a point above the pad
+       because their task demands a landing ellipse under 5 m radius; importing that
+       would have been solving a problem this task does not have, and would have fought
+       the 92% policy. What we actually want from the lateral axis is "kill the lateral
+       velocity", which a target of zero states directly and with a gradient everywhere.
+
+    `dx`/`dy` are accepted and ignored, so the signature survives if a pinpoint variant
+    is ever wanted. Returns `(vx_t, vy_t, vz_t, t_go)`; `t_go` is returned because the
+    observation wants it.
+    """
+    rate = w.vfield_vz_c * (max(alt_m, 0.0) ** w.vfield_vz_p)
+    vz_t = -max(rate, w.vfield_vz_floor_m_s)
+    t_go = max(alt_m, 0.0) / max(-vz_t, 1e-6)
+    return 0.0, 0.0, float(vz_t), float(t_go)
+
+
+def _velocity_field_penalty(w: RewardWeights, alt_m: float, dx: float, dy: float,
+                             vx: float, vy: float, vz: float) -> float:
+    """`vfield_k * ||v - v_targ||`, the dense core of the reward.
+
+    Linear in the error, as in the published form (`alpha*||v - v_targ||`), not
+    quadratic: a quadratic would make a large early error dominate the whole episode
+    and go nearly flat once the error is small, which is the saturation pattern this
+    project has already had to remove from three other terms.
+    """
+    if w.vfield_k <= 0.0:
+        return 0.0
+    vx_t, vy_t, vz_t, _ = target_velocity(w, alt_m, dx, dy)
+    err = float(np.sqrt((vx - vx_t) ** 2 + (vy - vy_t) ** 2 + (vz - vz_t) ** 2))
+    return min(w.vfield_k * err, w.vfield_cap)
+
+
 def _time_penalty(w: RewardWeights) -> float:
-    return w.time_k
+    """Per-step term. NEGATIVE here historically, which is backwards.
+
+    The published design uses a small POSITIVE per-step reward and states the reason
+    plainly: with every other term negative, the agent is "incentivized to violate the
+    attitude constraint and prematurely terminate the episode to maximize the total
+    discounted rewards received starting from the initial state."
+
+    This project measured exactly that failure and treated the symptom instead of the
+    cause. A crash cost -60 against a timeout's -105, so converting a hover into a
+    crash was a +45 improvement, and the RL policy duly turned 33 of the clone's
+    timeouts into 23 crashes with the landing count unchanged. Reordering crash and
+    timeout helped; the sign of THIS term is why the pressure existed at all. Ours was
+    0.1 per step against their +0.01 -- opposite sign and ten times the magnitude.
+
+    `alive_bonus` is the positive term; `time_k` stays so the old behaviour can be
+    restored for an ablation, and defaults to 0.
+    """
+    return w.time_k - w.alive_bonus
 
 
 def _descent_progress_reward(w: RewardWeights, alt_m: float, v_z: float,
@@ -618,9 +748,13 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
         alt = float(info["altitude_m"])
         v_xy = float(np.hypot(s["vx"], s["vy"]))
 
+        dx = float(s["x"]) - float(getattr(p, "target_x", 0.0))
+        dy = float(s["y"]) - float(getattr(p, "target_y", 0.0))
         shaping = (
             -_descent_progress_reward(w, alt, float(s["vz"]), p.spawn_altitude_m)
             + _descent_envelope_penalty(w, alt, float(s["vz"]))
+            + _velocity_field_penalty(w, alt, dx, dy,
+                                       float(s["vx"]), float(s["vy"]), float(s["vz"]))
             + _time_penalty(w)
             + _horizontal_speed_penalty(w, v_xy, alt)
             + _tilt_cutoff_penalty(w, s["tilt_x"], s["tilt_y"], p.loss_of_control_tilt_rad,
@@ -664,6 +798,14 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
                 r -= w.timeout_penalty
         return float(r * w.reward_total_scale)
 
+    # Published on the closure so the ENVS can read the very weights this
+    # reward uses when they build the guidance-field slots of the observation
+    # (obs 16-19). Those slots are `target_velocity(w, ...)` evaluated at the
+    # current state, so if the env guessed a default `RewardWeights()` while
+    # the reward ran on tuned ones, the policy would be told to track one
+    # field and paid for tracking another -- a silent train-time skew of
+    # exactly the kind this project has already paid for once.
+    reward_fn.reward_weights = w
     return reward_fn
 
 

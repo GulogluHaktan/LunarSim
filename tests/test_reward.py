@@ -197,36 +197,46 @@ def _step_reward(reward_fn, params, alt_m, **state_overrides):
     })
 
 
-def test_climbing_costs_more_than_hovering_and_overspeed_costs_more_than_in_envelope():
-    """The two degenerate modes this project measured, in one test.
+def test_field_cost_is_minimal_at_the_target_rate_and_rises_both_ways():
+    """The two degenerate modes, now answered by a field instead of an envelope.
 
-    Both were real: policies that climbed away under full throttle to
-    680-1372 m, and policies that free-fell into the ground at 7.6x the
-    touchdown limit. The rewrite answers both with one envelope -- vertical
-    speed must be a descent, and no faster than `profile_c*sqrt(alt)` --
-    so the costs have to order climb > hover == in-envelope < overspeed.
-    Hovering and a legal descent being EQUAL per step is deliberate: what
-    makes the vehicle go down is the flat time cost, not an altitude term.
-    An altitude term is what made diving optimal before (corr(episode
-    length, shaping) = -0.927, i.e. it scored duration, not quality).
+    Both were measured: policies that climbed away under full throttle to 680-1372 m,
+    and policies that free-fell into the ground at 7.6x the touchdown limit. The envelope
+    answered them with a band -- zero cost anywhere inside, quadratic outside -- and the
+    old version of this test asserted `hovering == in_envelope == 0.0`, relying on a flat
+    per-step TIME cost to make the vehicle descend.
+
+    That flat interior is exactly the defect the velocity field removes, so this test now
+    asserts the OPPOSITE of what it used to on that point, deliberately: hovering must
+    cost MORE than tracking the target rate, because hovering is a tracking error. The
+    descent pressure now comes from the field itself rather than from a time penalty,
+    which is what let the time term be flipped to a positive alive bonus (see
+    `_time_penalty` -- a negative per-step term pays the agent to end the episode early,
+    and this project watched it take that deal).
     """
-    from lunarsim.rl.reward import _descent_envelope_penalty, descent_envelope_m_s
+    from lunarsim.rl.reward import _velocity_field_penalty, target_velocity
 
     w = RewardWeights()
     alt = 20.0
-    env_v = descent_envelope_m_s(w, alt)
+    _, _, vz_t, _ = target_velocity(w, alt)
 
-    climbing = _descent_envelope_penalty(w, alt, +2.0)
-    hovering = _descent_envelope_penalty(w, alt, 0.0)
-    in_envelope = _descent_envelope_penalty(w, alt, -0.5 * env_v)
-    overspeed = _descent_envelope_penalty(w, alt, -2.0 * env_v)
+    def cost(vz, v_xy=0.0):
+        return _velocity_field_penalty(w, alt, 0.0, 0.0, v_xy, 0.0, vz)
 
-    assert hovering == in_envelope == 0.0
+    on_target = cost(vz_t)
+    hovering = cost(0.0)
+    climbing = cost(+2.0)
+    too_slow = cost(0.5 * vz_t)
+    overspeed = cost(2.0 * vz_t)
+
+    # minimal where it should be, and no flat region anywhere around it
+    assert on_target == pytest.approx(0.0, abs=1e-9)
+    assert too_slow > on_target
+    assert hovering > too_slow
     assert climbing > hovering
-    assert overspeed > hovering
-    # and the faster you overshoot the envelope, the worse it gets -- the
-    # old braking term saturated instead, leaving no gradient to brake on
-    assert _descent_envelope_penalty(w, alt, -3.0 * env_v) > overspeed
+    assert overspeed > on_target
+    # and the old flat interior is gone: hovering is no longer free
+    assert hovering > 0.0
 
 
 def test_descent_envelope_follows_the_measured_controller_profile():
@@ -263,17 +273,28 @@ def test_descent_envelope_is_continuous_through_zero_vertical_speed():
     assert max(vals) - min(vals) < 1e-3
 
 
-def test_horizontal_speed_penalty_depends_on_nothing_but_horizontal_speed():
-    """The term this replaces coupled lateral speed to the vertical
-    channel through a time-to-ground estimate, which let the penalty
-    collapse to zero for a vehicle that was barely sinking. Lateral speed
-    is bad near the ground whatever the vertical channel is doing.
+def test_lateral_speed_always_increases_the_cost():
+    """Lateral speed must always be charged, with no altitude at which it is free.
+
+    NOTE A DELIBERATE DESIGN CHANGE. The retired `kxy` term was independent of the
+    vertical channel by construction, and the old version of this test asserted exactly
+    that. The field uses the Euclidean norm `||v - v_targ||`, as the published form does,
+    so the two channels are now COUPLED: a vehicle with a large vertical error has a
+    marginal lateral charge that is partly masked by the norm. That is accepted, because
+    what the task needs is that lateral speed never becomes free -- which this asserts
+    directly, at several vertical errors, instead of asserting independence.
     """
-    from lunarsim.rl.reward import _horizontal_speed_penalty
+    from lunarsim.rl.reward import _velocity_field_penalty, target_velocity
 
     w = RewardWeights()
-    assert _horizontal_speed_penalty(w, 10.0) > _horizontal_speed_penalty(w, 1.0)
-    assert _horizontal_speed_penalty(w, 0.0) == 0.0
+    for alt in (0.2, 2.0, 10.0):
+        _, _, vz_t, _ = target_velocity(w, alt)
+        for vz in (vz_t, vz_t - 2.0, 0.0):
+            lo = _velocity_field_penalty(w, alt, 0.0, 0.0, 1.0, 0.0, vz)
+            hi = _velocity_field_penalty(w, alt, 0.0, 0.0, 10.0, 0.0, vz)
+            assert hi > lo, f"lateral speed free at alt={alt}, vz={vz}"
+        zero = _velocity_field_penalty(w, alt, 0.0, 0.0, 0.0, 0.0, vz_t)
+        assert zero == pytest.approx(0.0, abs=1e-9)
 
 
 def test_climbing_away_is_never_cheaper_than_staying_put():
@@ -359,23 +380,22 @@ def test_angular_rate_penalty_counts_all_three_axes_equally():
     assert per_axis[0] == pytest.approx(per_axis[1]) == pytest.approx(per_axis[2])
 
 
-def test_lateral_penalty_keeps_a_gradient_at_the_speeds_that_actually_fail():
-    """The lateral term must never go flat NEAR THE GROUND.
+def test_field_keeps_a_lateral_gradient_at_the_speeds_that_actually_fail():
+    """The lateral channel must never go flat NEAR THE GROUND.
 
-    The old hard cap was sized against the release speeds, where the ground
-    weight is tiny, and so bound at 7.07 m/s once the weight reached 1.0 --
-    inside the operating range. Measured on the best ramp_35m checkpoint,
-    both low-altitude timeouts sat in that flat zone (v_xy 12.68 at 2.75 m
-    and 13.62 at 0.45 m), skimming the surface and getting no signal to
-    bleed the speed off.
+    Measured on the best ramp_35m checkpoint, both low-altitude timeouts sat in the old
+    term's flat zone (v_xy 12.68 at 2.75 m and 13.62 at 0.45 m), skimming the surface with
+    no signal to bleed the speed off. The field's lateral target is zero everywhere, so
+    lateral speed IS the error and the charge is linear in it -- there is no cap to reach
+    at any speed the vehicle can survive.
     """
-    from lunarsim.rl.reward import _horizontal_speed_penalty
+    from lunarsim.rl.reward import _velocity_field_penalty
 
     w = RewardWeights()
-    for v_xy, alt in ((13.62, 0.45), (12.68, 2.75), (14.47, 0.02), (6.5, 0.04)):
+    for v_xy, alt in ((13.62, 0.45), (12.68, 2.75), (14.47, 0.02), (6.5, 0.04), (1.2, 0.1)):
         h = 1e-4
-        slope = (_horizontal_speed_penalty(w, v_xy + h, alt)
-                 - _horizontal_speed_penalty(w, v_xy - h, alt)) / (2 * h)
+        slope = (_velocity_field_penalty(w, alt, 0.0, 0.0, v_xy + h, 0.0, 0.0)
+                 - _velocity_field_penalty(w, alt, 0.0, 0.0, v_xy - h, 0.0, 0.0)) / (2 * h)
         assert slope > 100.0, f"flat at v_xy={v_xy} alt={alt}: slope={slope}"
 
 
@@ -428,58 +448,66 @@ def test_descent_envelope_floor_matches_the_real_touchdown_limit():
     assert 0.6 * limit <= floor < limit, f"envelope floor {floor} vs limit {limit}"
 
 
-def test_vertical_and_lateral_channels_have_comparable_authority():
+def test_vertical_and_lateral_channels_have_equal_authority():
     """Neither channel may be so weak the policy can ignore it.
 
-    Measured on the best ramp_35m checkpoint: with profile_k=35 the charge
-    separating a landing from a crash was 63.7/step vertically against
-    792.4/step laterally, 12.4x apart, and v_z duly became the binding
-    criterion on 3 of the 4 remaining crashes.
+    Measured with the old separate terms: at profile_k=35 the charge separating a landing
+    from a crash was 63.7/step vertically against 792.4/step laterally, 12.4x apart, and
+    v_z duly became the binding criterion on 3 of the 4 remaining crashes. The old test
+    allowed a 0.25-4.0x band because two independently-weighted terms could only ever be
+    balanced by tuning.
+
+    One norm over both channels makes the authority equal by construction, so this now
+    asserts equality rather than a band -- a property that cannot drift when a weight is
+    retuned.
     """
-    from lunarsim.rl.reward import _descent_envelope_penalty, _horizontal_speed_penalty
+    from lunarsim.rl.reward import _velocity_field_penalty, target_velocity
+
     w = RewardWeights()
     alt = 0.2
-    vertical = (_descent_envelope_penalty(w, alt, -1.8)
-                - _descent_envelope_penalty(w, alt, -0.8))
-    lateral = (_horizontal_speed_penalty(w, 1.7, alt)
-               - _horizontal_speed_penalty(w, 0.9, alt))
-    ratio = vertical / lateral
-    assert 0.25 < ratio < 4.0, f"channels {ratio:.2f}x apart (vertical={vertical}, lateral={lateral})"
+    _, _, vz_t, _ = target_velocity(w, alt)
+    d = 0.8
+    vertical = _velocity_field_penalty(w, alt, 0.0, 0.0, 0.0, 0.0, vz_t - d)
+    lateral = _velocity_field_penalty(w, alt, 0.0, 0.0, d, 0.0, vz_t)
+    assert vertical == pytest.approx(lateral, rel=1e-9), (vertical, lateral)
 
 
-def test_exceeding_the_descent_envelope_is_never_profitable():
-    """Descending faster than allowed must not pay, at any altitude.
+def test_descending_faster_than_the_target_is_never_profitable():
+    """Diving must not pay, at any altitude.
 
-    The progress reward is capped AT the envelope precisely so that the only
-    thing extra speed can do is incur the envelope penalty.
+    Previously this balanced a capped progress REWARD against the envelope penalty. The
+    progress term is retired (weight 0) because the field already demands a descent rate,
+    so the only thing extra speed can now do is increase the tracking error -- which makes
+    the property structural rather than a cancellation between two tuned terms.
     """
-    from lunarsim.rl.reward import (descent_envelope_m_s, _descent_envelope_penalty,
-                                    _descent_progress_reward)
+    from lunarsim.rl.reward import _velocity_field_penalty, target_velocity
+
     w = RewardWeights()
     for alt in (10.0, 5.0, 2.0, 1.0, 0.2):
-        env = descent_envelope_m_s(w, alt)
+        _, _, vz_t, _ = target_velocity(w, alt)
+        base = _velocity_field_penalty(w, alt, 0.0, 0.0, 0.0, 0.0, vz_t)
         for excess in (0.5, 1.0, 3.0):
-            gain = (_descent_progress_reward(w, alt, -(env + excess), 35.0)
-                    - _descent_progress_reward(w, alt, -env, 35.0))
-            cost = (_descent_envelope_penalty(w, alt, -(env + excess))
-                    - _descent_envelope_penalty(w, alt, -env))
-            assert gain - cost < 0.0, f"diving pays at alt={alt}, excess={excess}"
+            faster = _velocity_field_penalty(w, alt, 0.0, 0.0, 0.0, 0.0, vz_t - excess)
+            assert faster > base, f"diving pays at alt={alt}, excess={excess}"
 
 
-def test_descent_envelope_penalty_keeps_a_gradient_through_free_fall():
-    """A near-ground free-fall arrival is ~8 m/s against a <1 m/s envelope.
+def test_field_keeps_a_gradient_through_free_fall():
+    """A near-ground free-fall arrival is ~8 m/s against a <1 m/s target.
 
-    `profile_cap` has to stay clear of that whole range; at profile_k=400 a
-    cap of 3000 would have saturated at 2.74 m/s of excess and recreated,
-    vertically, the defect just removed from the lateral term.
+    `vfield_cap` has to stay clear of that entire range. The field is LINEAR in the error
+    precisely so this cannot saturate: a quadratic would let one large early error dominate
+    an episode and then go nearly flat once the error is small, which is the pattern that
+    had to be removed from the lateral, tilt and angular-rate terms in turn.
     """
-    from lunarsim.rl.reward import descent_envelope_m_s, _descent_envelope_penalty
+    from lunarsim.rl.reward import _velocity_field_penalty, target_velocity
+
     w = RewardWeights()
-    for excess in (1.0, 3.0, 5.0, 7.0):
-        vz = -(descent_envelope_m_s(w, 0.2) + excess)
+    _, _, vz_t, _ = target_velocity(w, 0.2)
+    for excess in (1.0, 3.0, 5.0, 7.0, 12.0):
+        vz = vz_t - excess
         h = 1e-4
-        slope = (_descent_envelope_penalty(w, 0.2, vz - h)
-                 - _descent_envelope_penalty(w, 0.2, vz + h)) / (2 * h)
+        slope = (_velocity_field_penalty(w, 0.2, 0.0, 0.0, 0.0, 0.0, vz - h)
+                 - _velocity_field_penalty(w, 0.2, 0.0, 0.0, 0.0, 0.0, vz + h)) / (2 * h)
         assert slope > 100.0, f"flat at {excess} m/s of excess: slope={slope}"
 
 
