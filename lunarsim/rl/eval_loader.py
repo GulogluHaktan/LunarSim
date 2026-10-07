@@ -34,7 +34,22 @@ def load_actor_for_eval(path: str, device: str = "cpu"):
     Falls back to a normal full load when that works, so an ordinary checkpoint behaves
     exactly as before and this cannot change any existing number.
     """
-    from stable_baselines3 import SAC
+    from stable_baselines3 import PPO, SAC
+    # PPO and SAC checkpoints are not interchangeable (ActorCriticPolicy against a separate
+    # actor and critic), and loading the wrong class raises on the state dict rather than
+    # producing a wrong policy -- but the message is unhelpful, so detect it from the saved
+    # data instead of guessing from the filename.
+    from stable_baselines3.common.save_util import load_from_zip_file
+    try:
+        _data, _params, _ = load_from_zip_file(path, device=device)
+        is_ppo = any(k.startswith("action_net") or k.startswith("mlp_extractor")
+                     for k in _params.get("policy", {}))
+    except Exception:
+        is_ppo = False
+    if is_ppo:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return PPO.load(path, device=device)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

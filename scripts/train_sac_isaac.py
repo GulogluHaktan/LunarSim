@@ -780,18 +780,43 @@ def main():
             for flag, val in (("--bc-anchor", args.bc_anchor), ("--cql-alpha", args.cql_alpha),
                               ("--dual-gamma", args.dual_gamma),
                               ("--pex-temperature", args.pex_temperature),
-                              ("--td3bc-alpha", args.td3bc_alpha),
-                              ("--warm-start", args.warm_start)):
+                              ("--td3bc-alpha", args.td3bc_alpha)):
                 if val:
                     print(f"[ppo] IGNORING {flag}: it is SAC-only", flush=True)
-            model = PPO("MlpPolicy", venv, verbose=1, device=args.torch_device,
-                        gamma=args.gamma, learning_rate=args.learning_rate,
-                        n_steps=args.ppo_n_steps, batch_size=args.ppo_batch_size,
-                        n_epochs=args.ppo_n_epochs, clip_range=args.ppo_clip_range,
-                        gae_lambda=args.ppo_gae_lambda,
-                        ent_coef=float(_parse_ent_coef(args.ent_coef))
-                        if not isinstance(_parse_ent_coef(args.ent_coef), str) else 0.0,
-                        policy_kwargs={"net_arch": list(args.net_arch)} if args.net_arch else {})
+            if args.warm_start:
+                # A PPO checkpoint only -- a SAC clone cannot transfer, since SAC has a
+                # separate actor and critic where PPO has one ActorCriticPolicy. Build the
+                # PPO-shaped clone with scripts/bc_to_ppo.py, which fits the RAW action
+                # (PPO's Box policy does not squash) rather than atanh.
+                #
+                # Warm-starting PPO is the point rather than a convenience: on this stage an
+                # untrained policy samples the terminal reward ZERO times -- thrust-to-weight
+                # at the action box centre is 1.0159, so its mean action is a hover, measured
+                # at 0/20 touchdowns and a median minimum altitude of 200.0 m over sixty
+                # seconds. PPO from scratch here cannot work, and a run was wasted proving it.
+                model = PPO.load(args.warm_start, env=venv, device=args.torch_device)
+                model.learning_rate = args.learning_rate
+                model.n_steps = args.ppo_n_steps
+                model.batch_size = args.ppo_batch_size
+                model.n_epochs = args.ppo_n_epochs
+                model.gamma = args.gamma
+                model.gae_lambda = args.ppo_gae_lambda
+                model._setup_model()
+                import numpy as _np
+                print(f"[ppo] warm started from {args.warm_start}; "
+                      f"log_std = {_np.round(model.policy.log_std.detach().cpu().numpy(), 4)} "
+                      f"(a default of 1.0 would destroy the clone on its first rollout)",
+                      flush=True)
+            else:
+                model = PPO("MlpPolicy", venv, verbose=1, device=args.torch_device,
+                            gamma=args.gamma, learning_rate=args.learning_rate,
+                            n_steps=args.ppo_n_steps, batch_size=args.ppo_batch_size,
+                            n_epochs=args.ppo_n_epochs, clip_range=args.ppo_clip_range,
+                            gae_lambda=args.ppo_gae_lambda,
+                            ent_coef=float(_parse_ent_coef(args.ent_coef))
+                            if not isinstance(_parse_ent_coef(args.ent_coef), str) else 0.0,
+                            policy_kwargs={"net_arch": list(args.net_arch)}
+                            if args.net_arch else {})
             print(f"[ppo] n_steps={args.ppo_n_steps}/env x {args.n_envs} envs = "
                   f"{args.ppo_n_steps*args.n_envs} per update, {args.ppo_n_epochs} epochs, "
                   f"batch {args.ppo_batch_size}, clip {args.ppo_clip_range}, "
