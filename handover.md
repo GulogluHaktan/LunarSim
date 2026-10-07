@@ -3280,3 +3280,96 @@ Every one of the 23 controller failures across all seven stages is a correct
 touchdown rejected on lateral speed, with its terminal v_xy straddling the
 1.2 m/s limit. So RL rates are read against 92% on ramp_35m and 46% on
 orbit_descent, not against 100%.
+
+# ================================================================
+# WHERE THIS STANDS (2026-10-07, end of session)
+# ================================================================
+
+## The numbers, all 96 episodes except where noted, deterministic, fixed grading
+
+```
+                          ramp_35m    orbit_descent
+ZemZev controller            92%          54%  (and 55% on a second seed block)
+BC + DAgger clone            58%          33%
+RL, gamma 0.99               48%          17%
+RL, gamma 0.995              44%           --
+```
+
+**RL is 10-14 points BELOW the clone it starts from, on both stages, under every
+configuration tried.** That is the open problem. The goal -- RL approaching the
+controller on orbit_descent -- is not met: RL is at 17% against a 54% reference,
+and the clone alone does better at 33%.
+
+## What WAS solved, and it took twenty interventions to find
+
+Warm-started policies collapsed from ~50% to 0% within ONE 10k-step window. The
+cause was not learning rate, critic quality, exploration, reward shape or
+optimiser: **nothing held the policy anywhere.** Every intervention changed how
+fast it left the good region, never whether it left -- and the fact that all
+twenty failed identically was the evidence.
+
+Mechanism: these policies are ~96% saturated, so competence depends on the
+pre-tanh mean being large. Moving it from ~5 to ~1 takes actions from 1.0 to
+0.76 -- negligible in parameter space, catastrophic in behaviour -- and any
+optimiser covers that in the 10,000 updates that fit in one window.
+
+Fix: `--bc-anchor 1e-2`, the proximal form of the BC-regularised actor used by
+TD3+BC and AWAC. It is the first thing that holds, and it holds on both stages.
+
+Separately, `--gamma 0.99` ended the critic divergence outright. Q stayed in
+[-14, +6] where every other setting ran away (+100 with 2 critics, -171 with 5,
++1972 with delayed actor updates, +109 after reward scaling). The reason it was
+reachable: the only argument for gamma 0.998 was keeping a terminal 450 steps
+away from discounting to nothing, and that assumed the shaping could not rank
+landing above stalling by itself. Measured, it can (+2.64, shaping only).
+
+## The best current hypothesis for why RL loses to the clone
+
+Lowering gamma to fix divergence made the terminal nearly invisible, and the
+shaping alone is a thin signal:
+
+```
+gamma   terminal contribution to V   shaping margin   ratio
+0.990             0.27                    2.64         0.10
+0.995             2.59                    7.27         0.36
+0.998            10.05                   27.77         0.36
+```
+
+At 0.99 the terminal carries 4x less relative weight than at 0.998, so RL
+optimises shaping almost alone and drifts to behaviour that scores shaping
+slightly better without landing. gamma 0.995 restores the ratio and halves the
+horizon -- and still lost (44% vs the clone's 58%), so this is necessary but not
+the whole story.
+
+Note one measurement that complicates it: in TRAINING-TIME (stochastic) terms RL
+beats the clone (proxy +18.5 at 53.8% landing vs +14.1 at 47.4%), while
+deterministically it loses (44% vs 58%). RL may be learning a policy that is more
+robust to its own exploration noise but worse at its deterministic peak.
+
+## The next piece of work, and it is not another hyperparameter
+
+The reward's resolution at the margin is now the thing to check. Across all seven
+stages, every one of the controller's 23 failures is a correct touchdown rejected
+on LATERAL SPEED, and its terminal v_xy sits at 0.5-1.3 m/s against a 1.2 limit --
+the reference itself straddles the criterion. The question is whether the shaped
+reward discriminates at the 0.1 m/s scale that decides those episodes, or whether
+it is flat there and RL is free to trade a landing for shaping gains it can
+actually see.
+
+That is answerable by direct computation the way the three saturation defects
+were, without a training run.
+
+## Standing warnings
+
+  - `--legacy-obs15` for any checkpoint from before slot 15 became
+    time-remaining. The vector stayed 16-wide so they LOAD silently.
+  - 24 episodes cannot rank checkpoints (one policy spanned 8-46%). 96+, on seeds
+    not used for selection.
+  - Training-time rates are stochastic and were misread as deterministic three
+    times in this session. Always confirm with the diag script.
+  - Verify an intervention is actually ACTIVE before interpreting its result.
+    Four "tried, didn't work" entries in this file turned out to have tested the
+    implementation rather than the hypothesis: the actor freeze (SB3 rewrites the
+    learning rate inside train()), two-timescale via learning rate (Adam
+    normalises it away), the action-saturation penalty (`info["action"]` was never
+    written), and the early ent_coef test (run with the broken touchdown label).
