@@ -107,7 +107,18 @@ parser.add_argument("--bc-anchor", type=float, default=None,
                           "here because competence depends on a ~96%% saturated policy, "
                           "so a small parameter move is a huge behavioural one: a 47%% "
                           "policy dies in ONE 10k-step window under Adam and under SGD "
-                          "alike, because nothing holds it anywhere.")
+                          "alike, because nothing holds it anywhere. The anchor holds the "
+                          "MEAN network only; see --bc-anchor-log-std.")
+parser.add_argument("--bc-anchor-log-std", action="store_true",
+                     help="also hold the actor's log_std head in the trust region. OFF by "
+                          "default because it was silently ON for this project's first "
+                          "anchored runs and froze exploration outright: across two "
+                          "410k-step runs log_std.bias moved -2.647 -> -2.645 and std "
+                          "stayed at the BC fit's [0.076, 0.135, 0.124, 0.020] to three "
+                          "decimals, while SAC's ent_coef auto-tuning collapsed 1.0 -> "
+                          "0.005 pushing against a parameter that could not move. A trust "
+                          "region should constrain which actions are taken, not how much "
+                          "the policy may explore around them.")
 parser.add_argument("--actor-sgd", type=float, default=None,
                      help="use SGD at this learning rate for the ACTOR instead of Adam. "
                           "Adam sets the step size from its own running statistics, so a "
@@ -743,7 +754,8 @@ def main():
                 save_replay_buffer=args.save_buffer))
         if args.bc_anchor is not None:
             from lunarsim.rl.plasticity import BCAnchorCallback
-            cbs.append(BCAnchorCallback(args.bc_anchor))
+            cbs.append(BCAnchorCallback(args.bc_anchor,
+                                         anchor_log_std=args.bc_anchor_log_std))
         if args.actor_sgd is not None:
             from lunarsim.rl.plasticity import ActorSGDCallback
             cbs.append(ActorSGDCallback(args.actor_sgd))

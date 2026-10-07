@@ -464,19 +464,45 @@ class BCAnchorCallback(BaseCallback):  # type: ignore[misc]
 
     `beta` is per actor update. With 10k updates per window, beta=1e-3 gives a
     pull half-life of ~700 updates, so the policy can move but cannot run.
+
+    The anchor covers the MEAN network only. It originally walked the whole
+    `state_dict()`, which silently included the `log_std` head -- and that pinned
+    the exploration scale to the BC fit's residual for the entire run. Measured
+    across every checkpoint of two 410k-step runs, `log_std.bias` moved from
+    -2.647 to -2.645 and the head weights stayed at |W|~5e-4, i.e. std was frozen
+    at [0.076, 0.135, 0.124, 0.020] -- identical to the clone's, to three
+    decimals, after 410k steps. SAC's entropy term was left pushing against a
+    parameter that could not move, and `ent_coef` auto-tuning collapsed from 1.0
+    to 0.005 in response. A trust region is supposed to constrain WHICH ACTIONS
+    the policy takes, not how much it is allowed to explore around them; holding
+    log_std as well turns the run into near-deterministic policy iteration inside
+    a small ball around the clone, which is not the algorithm being tested.
     """
 
-    def __init__(self, beta: float, verbose: int = 1):
+    # Substring match rather than exact keys: SB3 names this head `log_std` when
+    # it is a bare parameter and `log_std.weight` / `log_std.bias` when it is
+    # state-dependent, and this project has checkpoints of both shapes.
+    _FREE_KEY_MARKERS = ("log_std",)
+
+    def __init__(self, beta: float, anchor_log_std: bool = False, verbose: int = 1):
         super().__init__(verbose)
         self.beta = float(beta)
+        self.anchor_log_std = bool(anchor_log_std)
         self._anchor = None
         self._installed = False
+
+    def _is_free(self, key: str) -> bool:
+        if self.anchor_log_std:
+            return False
+        return any(m in key for m in self._FREE_KEY_MARKERS)
 
     def _on_training_start(self) -> None:
         if self._installed:
             return
         self._anchor = {k: v.detach().clone()
-                        for k, v in self.model.actor.state_dict().items()}
+                        for k, v in self.model.actor.state_dict().items()
+                        if not self._is_free(k)}
+        free = [k for k in self.model.actor.state_dict() if self._is_free(k)]
         opt = self.model.actor.optimizer
         original_step = opt.step
         anchor = self._anchor
@@ -497,7 +523,8 @@ class BCAnchorCallback(BaseCallback):  # type: ignore[misc]
         if self.verbose:
             half = (0.693 / beta) if beta > 0 else float("inf")
             print(f"[bc-anchor] pulling actor toward its start, beta={beta:.1e} "
-                  f"(half-life ~{half:.0f} updates)", flush=True)
+                  f"(half-life ~{half:.0f} updates); "
+                  f"{len(anchor)} tensors held, free={free or 'none'}", flush=True)
 
     def _on_step(self) -> bool:
         return True

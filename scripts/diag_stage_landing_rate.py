@@ -108,13 +108,25 @@ def main():
 
     n_safe = n_lost = n_timeout = n_left = n_crash = 0
     rows = []
+    # UNDISCOUNTED shaped return per episode, kept alongside the outcome tag.
+    # Without it the two questions "does the policy land" and "does the reward
+    # PREFER the policy that lands" cannot be separated, and this project spent
+    # a long time assuming the second without measuring it: if a policy that
+    # lands 44% of the time scores a higher return than one that lands 58%, no
+    # amount of RL tuning will close the gap, because RL is maximising the thing
+    # it was given. The reward_fn here is the same `default_reward_fn` the
+    # training runs use, so these numbers are directly comparable to them.
+    returns_by_tag = {}
+    ep_returns = []
     for ep in range(args.episodes):
         seed = args.seed0 + ep
         obs, _ = env.reset(seed=seed)
         info = {}
+        ep_return = 0.0
         for _ in range(max_steps):
             action, _ = model.predict(obs, deterministic=not args.stochastic)
             obs, reward, terminated, truncated, info = env.step(action)
+            ep_return += float(reward)
             if terminated or truncated:
                 break
         landed = bool(info.get("landed_safely"))
@@ -179,7 +191,9 @@ def main():
         detail = ((f"  margins={{" + ", ".join(f"{k}={v:.2f}" for k, v in margins.items()) + "}"
                    + (f" worst={worst}({over[worst]:.2f}x)" if worst else ""))
                   if margins else "")
-        rows.append(f"[ep {ep}] {tag:12s} t_s={info.get('t_s', float('nan')):5.1f}  "
+        returns_by_tag.setdefault(tag, []).append(ep_return)
+        ep_returns.append(ep_return)
+        rows.append(f"[ep {ep}] {tag:12s} R={ep_return:9.2f}  t_s={info.get('t_s', float('nan')):5.1f}  "
                      f"alt={info.get('altitude_m', float('nan')):6.3f}  "
                      f"vz={s['vz']:7.2f}  vxy={v_xy:6.2f}  tilt={tilt_deg:5.1f}  w={w_mag:5.2f}{detail}")
         print(rows[-1])
@@ -194,6 +208,18 @@ def main():
           f"episodes={args.episodes} seed0={args.seed0} "
           f"terrain_seed={args.terrain_seed} grid_n={args.terrain_grid_n} "
           f"stochastic={args.stochastic} legacy_obs15={args.legacy_obs15} ===")
+    # Mean AND worst decile: a mean return hides the tail that the landing rate
+    # is actually made of, and this project's own notes call for tracking the
+    # worst percentile rather than the mean for exactly that reason.
+    ordered = sorted(ep_returns)
+    decile = max(1, len(ordered) // 10)
+    print(f"=== return: mean={np.mean(ep_returns):.2f} "
+          f"worst_decile={np.mean(ordered[:decile]):.2f} "
+          f"best_decile={np.mean(ordered[-decile:]):.2f} ===")
+    for tag in sorted(returns_by_tag):
+        v = returns_by_tag[tag]
+        print(f"===   {tag:12s} n={len(v):3d}  mean_R={np.mean(v):9.2f}  "
+              f"min={min(v):9.2f}  max={max(v):9.2f} ===")
 
 
 if __name__ == "__main__":
