@@ -606,24 +606,34 @@ def main():
             if args.warm_start:
                 _cls = _sac_class(args)
                 model = _cls.load(args.warm_start, env=venv, device=args.torch_device)
+                # EXPAND FIRST. `_expand_critic_ensemble` returns a NEW model, so any
+                # attribute set before it is silently discarded -- which would have made
+                # --cql-alpha a no-op on every run that also changed --n-critics, and made
+                # --dual-gamma reject a 2-critic warm start with a message telling the user
+                # to pass the flag they had already passed.
+                if len(model.critic.q_networks) != args.n_critics:
+                    model = _expand_critic_ensemble(model, venv, args, args.n_critics)
                 if _cls is not SAC:
-                    # `load` does not call __init__, so these carry the defaults
-                    # from the class body until set here.
+                    # `load` does not call __init__, so these carry the class-body
+                    # defaults until set here.
                     model.cql_alpha = float(args.cql_alpha)
                     model.cql_n_samples = int(args.cql_n_samples)
                     model.calql_ref = (None if args.calql_ref is None
                                        else float(args.calql_ref))
+                    print(f"[cql] conservative critic term active, alpha={model.cql_alpha}, "
+                          f"n_samples={model.cql_n_samples}, "
+                          f"calql_ref={model.calql_ref}", flush=True)
                     _buf_kw, _dg_kw = _dual_gamma_kwargs(args)
                     if _dg_kw:
                         n_c = len(model.critic.q_networks)
                         if n_c < 4 or n_c % 2 != 0:
                             raise SystemExit(
                                 f"--dual-gamma needs an even n_critics >= 4 so each stream "
-                                f"keeps a pair; this warm start has {n_c}. Pass "
-                                f"--n-critics 4 so the ensemble is expanded on load.")
+                                f"keeps a pair, and the ensemble is {n_c} after expansion. "
+                                f"Pass --n-critics 4 (or any even value >= 4).")
                         model.dual_gamma = _dg_kw["dual_gamma"]
                         model._n_half = n_c // 2
-                        # `load` restores a plain ReplayBuffer, which has no terminal
+                        # `load` restores a plain ReplayBuffer, which carries no terminal
                         # stream, so it has to be replaced before any data is collected.
                         from lunarsim.rl.dual_gamma import DualRewardReplayBuffer
                         model.replay_buffer_class = DualRewardReplayBuffer
@@ -636,11 +646,6 @@ def main():
                               f"terminal={model.dual_gamma[1]}, "
                               f"{model._n_half} critics per stream, "
                               f"buffer -> DualRewardReplayBuffer", flush=True)
-                    print(f"[cql] conservative critic term active, alpha={args.cql_alpha}, "
-                          f"n_samples={args.cql_n_samples}, "
-                          f"calql_ref={model.calql_ref}", flush=True)
-                if len(model.critic.q_networks) != args.n_critics:
-                    model = _expand_critic_ensemble(model, venv, args, args.n_critics)
                 # SAC.load does NOT restore a replay buffer, so without this the
                 # critic starts from an empty one and refits off a narrow early
                 # window every single warm start.
