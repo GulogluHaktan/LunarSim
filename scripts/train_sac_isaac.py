@@ -708,8 +708,17 @@ def main():
     model = None
     venv = None
     for stage in stages:
-        print(f"=== stage: {stage.name} (tile={stage.tile_size_m:.0f} m, alt={stage.params.spawn_altitude_m:.0f} m, "
-              f"h_speed={stage.params.spawn_horizontal_speed_m_s} m/s, n_envs={args.n_envs}) ===")
+        # `describe` rather than :.0f -- spawn altitude and descent rate may be RANGES
+        # now, and a tuple raises "unsupported format string passed to tuple.__format__".
+        # That is what killed the first from-scratch curriculum run, on the banner line,
+        # before a single step was taken.
+        from lunarsim.rl.spawn_range import describe as _rng_str
+        print(f"=== stage: {stage.name} (tile={stage.tile_size_m:.0f} m, "
+              f"alt={_rng_str(stage.params.spawn_altitude_m)} m, "
+              f"vz={_rng_str(stage.params.spawn_v_z_m_s)} m/s, "
+              f"h_speed={stage.params.spawn_horizontal_speed_m_s} m/s, "
+              f"tilt={_rng_str(stage.params.spawn_tilt_rad)} rad, "
+              f"n_envs={args.n_envs}) ===")
         tile_fn = make_tile_fn(stage, args.terrain_grid_n)
         if venv is None:
             # the PhysX scene (N vehicles + N terrain slots) is built once,
