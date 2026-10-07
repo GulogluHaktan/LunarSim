@@ -794,14 +794,27 @@ def main():
                 # at the action box centre is 1.0159, so its mean action is a hover, measured
                 # at 0/20 touchdowns and a median minimum altitude of 200.0 m over sixty
                 # seconds. PPO from scratch here cannot work, and a run was wasted proving it.
-                model = PPO.load(args.warm_start, env=venv, device=args.torch_device)
-                model.learning_rate = args.learning_rate
-                model.n_steps = args.ppo_n_steps
-                model.batch_size = args.ppo_batch_size
-                model.n_epochs = args.ppo_n_epochs
-                model.gamma = args.gamma
-                model.gae_lambda = args.ppo_gae_lambda
-                model._setup_model()
+                # Hyperparameters go in as load() KWARGS, not set afterwards. SB3's load
+                # already calls _setup_model() internally and then loads the parameters, so
+                # calling _setup_model() again after load REBUILDS THE POLICY and throws the
+                # checkpoint away. That is exactly what happened: a 2M-step run reported
+                # `log_std = [0. 0. 0. 0.]`, i.e. std 1.0 -- the catastrophic default the
+                # clone's residual-fitted log_std (0.02-0.09) existed to avoid -- so it was
+                # never warm started at all and every conclusion drawn from it about warm
+                # starting was void. The log_std print below is the guard against a repeat.
+                model = PPO.load(
+                    args.warm_start, env=venv, device=args.torch_device,
+                    learning_rate=args.learning_rate, n_steps=args.ppo_n_steps,
+                    batch_size=args.ppo_batch_size, n_epochs=args.ppo_n_epochs,
+                    gamma=args.gamma, gae_lambda=args.ppo_gae_lambda,
+                    clip_range=args.ppo_clip_range)
+                import numpy as _np
+                _ls = model.policy.log_std.detach().cpu().numpy()
+                if float(_np.abs(_ls).max()) < 1e-6:
+                    raise SystemExit(
+                        "log_std came back all zeros, i.e. std 1.0 on a [-1,1] action box. "
+                        "The checkpoint's parameters did not survive the load, so this would "
+                        "be a from-scratch run wearing a warm start's name.")
                 import numpy as _np
                 print(f"[ppo] warm started from {args.warm_start}; "
                       f"log_std = {_np.round(model.policy.log_std.detach().cpu().numpy(), 4)} "

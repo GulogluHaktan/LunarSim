@@ -54,15 +54,22 @@ OBS_SCALE = np.array([
     1.0, 1.0,       # fuel_frac, rcs_fuel_frac -- already [0, 1]
     1.0,            # time_remaining_frac -- already [0, 1]; was the dead leg_force_frac slot
     # ---- appended 2026-10-07, following arXiv:1810.08719 -------------- #
-    # 16-18: velocity ERROR against `reward.target_velocity`, i.e.
-    # (vx, vy, vz) - (vx_t, vy_t, vz_t). Same 30.0 as the raw velocities at
-    # 3-5 on purpose: this is a velocity in the same units, over the same
-    # physical range (the error is bounded by the release speed plus the
-    # field's own demand, both already inside that envelope), and giving the
-    # error a different scale than the velocity it is computed from would
-    # make the two slots disagree about what "fast" means.
-    30.0, 30.0, 30.0,
-    # 19: t_go, SECONDS of flight left if the vehicle flies the field.
+    # 16: LATERAL SPEED error, hypot(vx,vy) - speed_target. A scalar, because the
+    #     field is a speed schedule along the vehicle's own heading -- this task's
+    #     success criteria contain no position term, so a target DIRECTION would
+    #     charge for something nothing grades. The first version of this slot
+    #     computed `vx - speed_target`, subtracting a magnitude from a signed
+    #     component, and shifted by a mean of 8.055 m/s the moment the lateral
+    #     target stopped being zero -- which silently took the orbit_descent clone
+    #     from 22% to 2% on the same checkpoint and seed block, because its input
+    #     had moved under it.
+    # 17: VERTICAL error, vz - vz_target.
+    # Both at 30.0, the same as the raw velocities at 3-5: these are velocities in
+    # the same units over the same physical range, and giving an error a different
+    # scale than the velocity it is computed from would make the slots disagree
+    # about what "fast" means.
+    30.0, 30.0,
+    # 18: t_go, SECONDS of flight left if the vehicle flies the field.
     #
     # MEASURED to pick this, from `reward.target_velocity`'s own output
     # rather than from a round number. `t_go = alt / |vz_t(alt)|` with the
@@ -92,6 +99,10 @@ OBS_SCALE = np.array([
     # start-of-episode overshoot past 1.0 is the same transient the 30 m/s
     # velocity scale already tolerates at a fast release.
     10.0,
+    # 19: current lateral SPEED, hypot(vx,vy), kept raw at 30.0 to match slots 3-5.
+    # The error alone cannot distinguish "2 m/s over the schedule at 3 m/s" from
+    # "...at 20 m/s", and near the ground those are a landing and a crash.
+    30.0,
 ], dtype=np.float32)
 
 
@@ -131,15 +142,38 @@ def guidance_obs(w, alt_m, dx, dy, vx, vy, vz) -> list[float]:
     `alt_m` must be the env's OWN altitude definition -- the one behind
     `info["altitude_m"]` and the termination test -- so "altitude" keeps
     meaning one thing across the pipeline. `dx`/`dy` are the pad offsets
-    (x - target_x, y - target_y); the current field ignores them (its lateral
-    target is zero everywhere, see `target_velocity`), but they are passed
-    through so that a pinpoint variant of the field would reach the
-    observation without a second edit in three places.
+    (x - target_x, y - target_y), passed through so that a pinpoint variant of
+    the field would reach the observation without a second edit in three places.
+
+    THE LATERAL SLOT IS A SPEED ERROR, not a component error, and that correction
+    matters. `target_velocity` returns the lateral target as a MAGNITUDE in its
+    first slot, because the field is a speed schedule along the vehicle's own
+    heading -- this task's success criteria contain no position term, so a target
+    direction would be charging for something nothing grades. The first version
+    of this function computed `vx - speed_target`, subtracting a magnitude from a
+    signed component, which is not a quantity. It also shifted slot 16 by a mean
+    of 8.055 m/s the moment the lateral target stopped being zero, which silently
+    invalidated every clone trained before that change: the orbit_descent clone
+    went from 22% to 2% measured on the same checkpoint and the same seed block,
+    because it was being handed an input whose meaning had moved under it.
+
+    So the four slots are now:
+        16  lateral SPEED error    hypot(vx, vy) - speed_target
+        17  vertical error         vz - vz_target
+        18  t_go
+        19  current lateral speed  hypot(vx, vy)
+    Slot 16 is exactly what `reward._velocity_field_penalty` charges, so the
+    observation shows the policy the quantity the reward grades. Slot 19 is kept
+    raw so the policy can tell "I am 2 m/s over the schedule at 3 m/s" from
+    "...at 20 m/s", which the error alone does not distinguish.
     """
+    import math
+
     from lunarsim.rl.reward import target_velocity
 
-    vx_t, vy_t, vz_t, t_go = target_velocity(w, float(alt_m), float(dx), float(dy))
-    return [float(vx) - vx_t, float(vy) - vy_t, float(vz) - vz_t, t_go]
+    speed_t, _unused, vz_t, t_go = target_velocity(w, float(alt_m), float(dx), float(dy))
+    lat = math.hypot(float(vx), float(vy))
+    return [lat - speed_t, float(vz) - vz_t, t_go, lat]
 
 
 def normalize_obs(obs: np.ndarray) -> np.ndarray:
