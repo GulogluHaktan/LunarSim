@@ -302,6 +302,57 @@ class RewardWeights:
     #   severity 1.0 -> 0.50x -> -60   (beats hovering: attempting pays)
     #   severity 2.5 -> 1.18x -> -141
     #   severity 7.6 -> 3.00x -> -360  (capped)
+    # ---- CONTINUOUS TOUCHDOWN TERMINAL (replaces the two branches below) ----
+    # Measured reason for the change, on the 48 recorded ramp_35m demo episodes:
+    #
+    #   episode length                448 steps
+    #   dense shaping sum, whole ep   +32.4
+    #   terminal for a landing        +351 .. +450
+    #     terminal / shaping          10.8x
+    #     STEP at the success boundary  411
+    #
+    # So the term that should only SETTLE the final behaviour was 10.8x the term
+    # that is supposed to carry the vehicle onto the path, and it arrived as a
+    # discontinuity: +351 at v_xy = 1.19 m/s, -60 at 1.21. A gradient method
+    # cannot climb a step. Improving terminal lateral speed from 1.5 to 1.3 m/s
+    # earned NOTHING until the boundary was crossed, which is why the actor could
+    # only ever find the cheap gradient -- stop hovering, commit, crash -- and
+    # that is exactly what it did: against the clone's 33 timeouts / 10 crashes,
+    # the RL policy produced 25 timeouts / 23 crashes with the landing count
+    # unchanged.
+    #
+    # The replacement is one continuous, monotone function of `severity` (how many
+    # times over its worst limit the touchdown was, 1.0 being exactly at a limit):
+    #
+    #   terminal = touchdown_k * (1 - severity),  floored at -touchdown_penalty_cap
+    #
+    #   severity 0.0  feather-soft landing      +120
+    #   severity 0.5  comfortable landing        +60
+    #   severity 1.0  exactly at the limit         0   <- continuous HERE
+    #   severity 1.05 marginal crash              -6
+    #   severity 1.5  crash                      -60   = a timeout
+    #   severity 2.0  hard crash                -120
+    #   severity 7.6  slam                      -480   (capped)
+    #
+    # severity < 1 is exactly the `landed_safely` condition, so the label boundary
+    # and the reward boundary coincide by construction instead of disagreeing by
+    # 411 points. Lateral speed now pays continuously all the way down, which is
+    # the gradient the precision failures need: every one of the controller's own
+    # 23 failures across seven stages is a touchdown rejected on lateral speed,
+    # with terminal v_xy sitting at 0.5-1.3 m/s against the 1.2 limit.
+    #
+    # touchdown_k > timeout_penalty is REQUIRED, not cosmetic: it is what makes a
+    # hard crash worse than waiting (severity 2 -> -120 against a -60 timeout)
+    # while a near-landing crash is still better than waiting (severity 1.05 ->
+    # -6). Both orderings matter -- the first stops "commit and slam" from being
+    # free, the second keeps committing better than stalling.
+    touchdown_k: float = 120.0
+    touchdown_penalty_cap: float = 480.0
+
+    # ---- DEPRECATED: the old two-branch terminal. Kept so that older configs
+    # and recorded `reward_weights` blobs still load; no longer read by
+    # `_terminal_reward`.
+    landing_bonus_scale_deprecated: float = 450.0
     crash_penalty: float = 120.0
     crash_severity_base: float = 0.5
     crash_severity_k: float = 0.45
@@ -311,7 +362,10 @@ class RewardWeights:
     # terrain tile). Must stay worse than a near-miss touchdown -- trying
     # and nearly making it has to beat never trying -- and better than a
     # real crash.
-    timeout_penalty: float = 105.0
+    # 60 rather than 105 so that, with touchdown_k=120, a crash at severity 1.5
+    # costs exactly what a timeout costs: the crossover between "committing was
+    # worth it" and "you should have kept trying" sits halfway over the limit.
+    timeout_penalty: float = 60.0
 
     # Defensive clip on the summed per-step shaping, excluding the
     # terminal. A safety net, not a constraint -- and it had stopped being
@@ -462,18 +516,26 @@ def _touchdown_severity(p, s, margins: dict) -> float:
 
 
 def _terminal_reward(w: RewardWeights, info: dict, severity: float | None = None) -> float:
+    """One continuous, monotone ramp in touchdown severity.
+
+    See the touchdown_k block in RewardWeights for the measurement that forced
+    this shape. The short version: the previous form jumped 411 points across the
+    success boundary while the entire dense shaping sum over a 448-step episode was
+    32, so the only gradient the actor could perceive was "commit and crash" and it
+    took it. This version is continuous at severity 1.0, so approaching the limit
+    pays continuously instead of paying nothing until it is crossed.
+    """
     margins = info.get("landing_margins") or {}
-    if info.get("landed_safely"):
-        # graded by how far inside every limit it was, so a feather-soft
-        # landing beats a marginal one.
-        quality = float(np.clip(np.mean(list(margins.values())), 0.0, 1.0)) if margins else 1.0
-        return w.landing_bonus_scale * (0.5 + 0.5 * quality)
-    if margins and severity is not None:
-        sev = max(severity, 1.0)
-        mult = min(w.crash_severity_base + w.crash_severity_k * (sev - 1.0), w.crash_severity_cap)
-        return -w.crash_penalty * mult
-    # no margins means no touchdown happened: a lost_control tumble.
-    return -w.crash_penalty * w.crash_severity_cap
+    if not margins:
+        # No margins means no touchdown happened at all: a lost_control tumble,
+        # which gets the floor. There is nothing to grade continuously here --
+        # the vehicle never reached the surface.
+        return -w.touchdown_penalty_cap
+    # severity < 1 is the landed_safely condition, so one expression covers both
+    # outcomes and the two boundaries cannot drift apart the way they did when a
+    # label fix and a grading fix were applied to different states.
+    sev = float(severity) if severity is not None else 1.0
+    return float(max(w.touchdown_k * (1.0 - sev), -w.touchdown_penalty_cap))
 
 
 def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMSpecs | None = None):

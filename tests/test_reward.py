@@ -119,18 +119,73 @@ def test_timeout_without_landing_is_penalized_not_free():
 
 
 def test_softer_landing_scores_higher_than_marginal_landing():
+    """Graded on the WORST criterion, read from the state.
+
+    This used to vary `landing_margins` while holding the state fixed, which only
+    a stub can do: all three real envs derive the margins FROM the state, so the
+    two can never disagree in a running episode. The terminal now grades on
+    `severity` -- how many times over its worst limit the touchdown was -- which is
+    the quantity that actually decides `landed_safely`, and which makes the landing
+    and crash branches one continuous ramp instead of two formulas meeting at a
+    411-point cliff. Grading on the MEAN of the margins rewarded being comfortable
+    on criteria that were not binding; grading on the worst rewards fixing the one
+    that is.
+
+    So the intent is unchanged -- a softer touchdown must score higher than a
+    marginal one -- but it is now expressed through the descent rate that makes the
+    touchdown soft, rather than through a margin dict the state does not support.
+    """
     reward_fn = make_apollo_reward_fn(RewardWeights())
     params = LanderParams()
-    env = _StubEnv(params, _base_state())
 
-    def terminal(margin):
+    def terminal(vz, v_xy=0.1):
+        env = _StubEnv(params, _base_state(vz=vz, vx=v_xy, vy=0.0))
+        margins = {
+            "v_z": max(0.0, 1.0 - abs(vz) / params.safe_landing_v_z_m_s),
+            "v_xy": max(0.0, 1.0 - v_xy / params.safe_landing_v_xy_m_s),
+            "tilt": 0.9, "w": 0.9, "leg_diff": 0.9,
+        }
         return reward_fn(env, {
             "terminated": True, "landed_safely": True,
-            "landing_margins": {"v_z": margin, "v_xy": margin, "tilt": margin, "w": margin},
+            "landing_margins": margins,
             "altitude_m": 0.0, "leg_force_n": 1000.0, "leg_force_max_n": 8000.0,
         })
 
-    assert terminal(0.95) > terminal(0.05)
+    # 0.1 m/s is a feather touchdown, 0.95 m/s is just inside the 1.0 m/s limit
+    assert terminal(-0.1) > terminal(-0.95)
+    # and the ramp is monotone rather than flat anywhere inside the envelope
+    seq = [terminal(-v) for v in (0.1, 0.3, 0.5, 0.7, 0.95)]
+    assert all(a > b for a, b in zip(seq, seq[1:])), seq
+
+
+def test_terminal_is_continuous_across_the_success_boundary():
+    """The defect that made RL prefer crashing to trying.
+
+    The previous terminal paid +351 for a touchdown at v_xy = 1.19 m/s and -60 for
+    one at 1.21 -- a 411-point step at the success boundary, against a dense shaping
+    sum of 32.4 over a 448-step episode (measured on the 48 recorded ramp_35m demo
+    episodes). Gradient methods cannot climb a step: improving terminal lateral
+    speed from 1.5 to 1.3 m/s earned nothing at all until the boundary was crossed,
+    so the only gradient the actor could perceive was "stop hovering, commit,
+    crash" -- and that is what it produced, 25 timeouts / 23 crashes against the
+    clone's 33 / 10, with the landing count unchanged.
+    """
+    from lunarsim.rl.reward import _terminal_reward
+    w = RewardWeights()
+    margins = {"v_z": 0.5, "v_xy": 0.5, "tilt": 0.5, "w": 0.5, "leg_diff": 0.5}
+
+    def term(sev):
+        return _terminal_reward(w, {"landed_safely": sev < 1.0,
+                                    "landing_margins": margins}, sev)
+
+    # continuous: the gap across the boundary is the local slope, not a cliff
+    assert abs(term(0.999) - term(1.001)) < 1.0, (term(0.999), term(1.001))
+    # monotone decreasing in severity, with no flat region to hide in
+    sevs = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+    vals = [term(s) for s in sevs]
+    assert all(a > b for a, b in zip(vals, vals[1:])), list(zip(sevs, vals))
+    # and it is bounded below, so one catastrophic slam cannot dominate a batch
+    assert term(50.0) == -w.touchdown_penalty_cap
 
 
 def _step_reward(reward_fn, params, alt_m, **state_overrides):
