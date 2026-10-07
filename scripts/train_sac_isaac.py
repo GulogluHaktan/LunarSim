@@ -160,6 +160,36 @@ parser.add_argument("--td3bc-alpha", type=float, default=None,
                           "against 47.6%% for the clone's own untrained critic. A calibrated "
                           "value is not a correct gradient, and the actor only ever uses the "
                           "gradient.")
+parser.add_argument("--algo", type=str, default="sac", choices=["sac", "ppo"],
+                     help="PPO is here because of a measurement, not variety. Every mechanism "
+                          "that depends on this project's CRITIC has now failed, and all for "
+                          "one reason: the critic overestimates its own policy. The ones that "
+                          "use its action GRADIENT (--bc-anchor, --cql-alpha, --td3bc-alpha) "
+                          "and the one that uses its RANKING (--pex-temperature, which fell "
+                          "from 22%% to 1%% over training while Q0 sat +40 above the realised "
+                          "return) fail the same way. The overestimation comes from "
+                          "bootstrapping Q(s', a') where a' is the policy's own, possibly "
+                          "out-of-distribution action. PPO's value function is V(s) -- NO "
+                          "ACTION ARGUMENT -- so there is no out-of-distribution action to "
+                          "extrapolate onto, and it is fitted by regression on observed "
+                          "returns rather than off its own maximum. The mechanism that breaks "
+                          "us is structurally absent. It is also what the closest published "
+                          "work on this problem used (Gaudet/Linares/Furfaro, arXiv:1810.08719) "
+                          "and our reward is now built to their design. PPO is on-policy, so "
+                          "every SAC-only flag below is ignored and a BC warm start cannot "
+                          "transfer -- PPO trains from scratch, which is what they did.")
+parser.add_argument("--net-arch", type=int, nargs="+", default=None,
+                     help="hidden layer sizes. The BC diagnosis measured [256,256] plateauing "
+                          "at 4.3-4.6x the irreducible fit error while [512,512] reached 3.2x "
+                          "and was still improving, with almost no overfitting -- so width was "
+                          "what limited the clone, and the same is worth testing here.")
+parser.add_argument("--ppo-n-steps", type=int, default=512,
+                     help="rollout length PER ENV before each PPO update. With 16 envs this is "
+                          "8192 transitions a batch, about 18 episodes on orbit_descent.")
+parser.add_argument("--ppo-n-epochs", type=int, default=10)
+parser.add_argument("--ppo-batch-size", type=int, default=1024)
+parser.add_argument("--ppo-clip-range", type=float, default=0.2)
+parser.add_argument("--ppo-gae-lambda", type=float, default=0.95)
 parser.add_argument("--pex-temperature", type=float, default=None,
                      help="PEX, Policy Expansion (Zhang/Xu/Yu, arXiv:2302.00935): FREEZE the "
                           "warm-start policy, add a learnable one, and pick between their "
@@ -388,7 +418,7 @@ simulation_app = SimulationApp({"headless": args.headless})
 
 sys.path.insert(0, args.lunarsim_root)
 
-from stable_baselines3 import SAC
+from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.utils import FloatSchedule  # noqa: E402
 
 
@@ -740,7 +770,33 @@ def main():
             venv.reset()
 
         first_model_creation = model is None
-        if model is None:
+        if model is None and args.algo == "ppo":
+            # On-policy, so none of the SAC-only machinery applies and a BC clone cannot
+            # transfer: PPO uses a single ActorCriticPolicy where SAC has a separate actor and
+            # critic, so the state dicts are not compatible. That is not a limitation worth
+            # working around here -- the published PPO result on this problem trains from
+            # scratch, and the reason PPO is being tried at all is that this project's critic
+            # cannot be trusted, which makes warm-starting from its judgement beside the point.
+            for flag, val in (("--bc-anchor", args.bc_anchor), ("--cql-alpha", args.cql_alpha),
+                              ("--dual-gamma", args.dual_gamma),
+                              ("--pex-temperature", args.pex_temperature),
+                              ("--td3bc-alpha", args.td3bc_alpha),
+                              ("--warm-start", args.warm_start)):
+                if val:
+                    print(f"[ppo] IGNORING {flag}: it is SAC-only", flush=True)
+            model = PPO("MlpPolicy", venv, verbose=1, device=args.torch_device,
+                        gamma=args.gamma, learning_rate=args.learning_rate,
+                        n_steps=args.ppo_n_steps, batch_size=args.ppo_batch_size,
+                        n_epochs=args.ppo_n_epochs, clip_range=args.ppo_clip_range,
+                        gae_lambda=args.ppo_gae_lambda,
+                        ent_coef=float(_parse_ent_coef(args.ent_coef))
+                        if not isinstance(_parse_ent_coef(args.ent_coef), str) else 0.0,
+                        policy_kwargs={"net_arch": list(args.net_arch)} if args.net_arch else {})
+            print(f"[ppo] n_steps={args.ppo_n_steps}/env x {args.n_envs} envs = "
+                  f"{args.ppo_n_steps*args.n_envs} per update, {args.ppo_n_epochs} epochs, "
+                  f"batch {args.ppo_batch_size}, clip {args.ppo_clip_range}, "
+                  f"gae_lambda {args.ppo_gae_lambda}, gamma {args.gamma}", flush=True)
+        elif model is None:
             if args.warm_start:
                 _cls = _sac_class(args)
                 model = _cls.load(args.warm_start, env=venv, device=args.torch_device)
@@ -1048,20 +1104,25 @@ def main():
                 save_path=f"{args.out_dir}/snapshots",
                 name_prefix=f"{stage.name}",
                 save_replay_buffer=args.save_buffer))
-        if args.bc_anchor is not None:
+        # Everything from here to the proxy logger reaches into SAC's actor/critic split
+        # (model.actor, model.critic, their separate optimizers). PPO has a single
+        # ActorCriticPolicy, so these would raise on attribute access rather than quietly do
+        # nothing -- which is the better failure, but they still have to be skipped.
+        _sac_only = args.algo == "sac"
+        if _sac_only and args.bc_anchor is not None:
             from lunarsim.rl.plasticity import BCAnchorCallback
             cbs.append(BCAnchorCallback(args.bc_anchor,
                                          anchor_log_std=args.bc_anchor_log_std))
-        if args.actor_sgd is not None:
+        if _sac_only and args.actor_sgd is not None:
             from lunarsim.rl.plasticity import ActorSGDCallback
             cbs.append(ActorSGDCallback(args.actor_sgd))
-        if args.policy_delay > 1:
+        if _sac_only and args.policy_delay > 1:
             from lunarsim.rl.plasticity import PolicyDelayCallback
             cbs.append(PolicyDelayCallback(args.policy_delay))
-        if args.actor_lr is not None:
+        if _sac_only and args.actor_lr is not None:
             from lunarsim.rl.plasticity import ActorLearningRateCallback
             cbs.append(ActorLearningRateCallback(args.actor_lr))
-        if args.critic_only_steps > 0 and args.warm_start and first_model_creation:
+        if _sac_only and args.critic_only_steps > 0 and args.warm_start and first_model_creation:
             from lunarsim.rl.plasticity import ActorFreezeCallback
             cbs.append(ActorFreezeCallback(args.critic_only_steps))
         if args.proxy_log_every > 0:
@@ -1069,7 +1130,7 @@ def main():
             cbs.append(ProxyVsTrueCallback(
                 log_every=args.proxy_log_every,
                 csv_path=f"{args.out_dir}/proxy_vs_true_{stage.name}.csv"))
-        if args.reset_every > 0:
+        if _sac_only and args.reset_every > 0:
             from lunarsim.rl.plasticity import PeriodicResetCallback
             cbs.append(PeriodicResetCallback(
                 every=args.reset_every, alpha=args.reset_alpha,

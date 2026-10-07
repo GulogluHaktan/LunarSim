@@ -172,7 +172,19 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
                 with th.no_grad():
                     s0 = th.as_tensor(np.asarray(self._ep_s0), device=dev)
                     a0 = th.as_tensor(np.asarray(self._ep_a0), device=dev)
-                    qs = th.cat(self.model.critic(s0, a0), dim=1).min(dim=1).values
+                    if hasattr(self.model, "critic"):
+                        # SAC/TD3: Q(s,a), the min over the ensemble -- the same scalar the
+                        # actor ascends.
+                        qs = th.cat(self.model.critic(s0, a0), dim=1).min(dim=1).values
+                    else:
+                        # PPO: V(s). There is no action argument, which is precisely why PPO
+                        # is being tried -- the overestimation that broke every critic-based
+                        # mechanism here comes from bootstrapping Q(s', a') onto the policy's
+                        # own possibly out-of-distribution action, and V has no such argument.
+                        # Measuring the same gap for PPO is how that claim gets tested rather
+                        # than asserted: if V is also +40 above the realised return, the
+                        # reasoning was wrong.
+                        qs = self.model.policy.predict_values(s0).reshape(-1)
                     q = float(qs.mean().item())
                 mc = float(np.mean(self._ep_disc))
                 row["q_s0"], row["mc_s0"], row["q_minus_mc"] = q, mc, q - mc
