@@ -180,6 +180,21 @@ class ZemZevController:
         # function of the state (the energy-optimal tgo is a root of a quartic -- Guo,
         # Hawkins and Wie's optimal-feedback landing guidance), not re-estimated by the
         # same heuristic every step.
+        #
+        # AND HOW MUCH OF THE IMITATION GAP IS THIS? Measured, because the reasoning
+        # above does not say -- the same network fitted to the same teacher actions,
+        # twice, with an EPISODE-WISE held-out split (a random transition split would put
+        # consecutive near-identical states on both sides and flatter the result):
+        #
+        #     120 analytic episodes, 86,948 transitions, 256x256, 400 epochs
+        #       observation alone          train 0.1188   held-out 0.1646
+        #       observation + teacher tgo  train 0.0893   held-out 0.1434
+        #
+        # So the hidden integrator accounts for about 13% of the held-out residual. Real,
+        # but NOT the dominant cause, and not worth widening the observation for. The
+        # larger signal in those numbers is the 39% train-to-held-out gap, which is a
+        # COVERAGE limit: the clone is fitted on 48 landed episodes / 33,758 transitions,
+        # and more demonstrations attack that directly.
         self.stateless_tgo = bool(stateless_tgo)
 
     def reset(self) -> None:
