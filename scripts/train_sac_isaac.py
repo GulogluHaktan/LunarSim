@@ -324,6 +324,32 @@ def _sac_class(args):
         return CQLSAC
     return SAC
 
+def _carried_policy_kwargs(old_model):
+    """The architecture choices that must survive a critic-ensemble rebuild.
+
+    `_expand_critic_ensemble` builds a FRESH SAC and copies the old weights into it, so
+    anything the fresh one does not know about comes out as SB3's default and the copy
+    fails on a shape mismatch. That is exactly how v65 died: the warm start was a
+    [512,512] clone, the rebuild used the default [256,256], and
+    `model.actor.load_state_dict(old_model.actor.state_dict())` raised
+
+        size mismatch for latent_pi.0.weight: copying a param with shape [512, 20]
+        from checkpoint, the shape in current model is [256, 20]
+
+    Latent until today because every previous warm start used the default width. Read
+    off the loaded model rather than from args, so it cannot disagree with the
+    checkpoint being copied.
+    """
+    kw = dict(getattr(old_model, "policy_kwargs", None) or {})
+    # net_arch may live only in the constructed policy, so recover it from there too
+    if "net_arch" not in kw:
+        na = getattr(old_model.policy, "net_arch", None)
+        if na is not None:
+            kw["net_arch"] = na
+    kw.pop("n_critics", None)        # the caller sets this
+    return kw
+
+
 def _expand_critic_ensemble(old_model, venv, args, n_critics):
     """Warm start into a LARGER critic ensemble without losing the actor.
 
@@ -347,7 +373,8 @@ def _expand_critic_ensemble(old_model, venv, args, n_critics):
                 gamma=args.gamma, gradient_steps=args.gradient_steps,
                 tau=args.tau, ent_coef=_parse_ent_coef(args.ent_coef),
                 learning_rate=args.learning_rate,
-                policy_kwargs={"n_critics": n_critics})
+                policy_kwargs={**_carried_policy_kwargs(old_model),
+                               "n_critics": n_critics})
 
     model.actor.load_state_dict(old_model.actor.state_dict())
     model.actor_target.load_state_dict(old_model.actor.state_dict())         if hasattr(model, "actor_target") else None
