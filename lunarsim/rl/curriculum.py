@@ -147,6 +147,14 @@ STAGES = [
             spawn_xy_radius_m=10.0,
             spawn_v_z_m_s=(-5.0, -1.0),
             spawn_horizontal_speed_m_s=(0.0, 6.0),
+            # An approach policy does not hand the vehicle over upright and still. The
+            # measured controller tilts 8-13 deg routinely while braking and up to 17.6,
+            # so a specialist that only ever sees near-level entries would be trained on a
+            # handoff distribution that does not occur. +/-0.26 rad is 15 deg, the same
+            # figure as the touchdown tilt criterion, so the entry spread reaches the edge
+            # of what is still recoverable rather than stopping short of it.
+            spawn_tilt_rad=(-0.26, 0.26),
+            spawn_w_rad_s=(-0.15, 0.15),
             max_episode_s=20.0,
         ),
     ),

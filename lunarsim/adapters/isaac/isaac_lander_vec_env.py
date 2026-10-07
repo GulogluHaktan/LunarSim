@@ -264,14 +264,16 @@ class IsaacLanderVecEnv(VecEnv):
         dist = max(1e-6, float(np.hypot(dx, dy)))
         vx0, vy0 = speed * dx / dist, speed * dy / dist
 
-        tilt_x0 = float(self._rng.uniform(-0.05, 0.05))
-        tilt_y0 = float(self._rng.uniform(-0.05, 0.05))
+        tilt_x0 = sample_range(p.spawn_tilt_rad, self._rng)
+        tilt_y0 = sample_range(p.spawn_tilt_rad, self._rng)
         x0, y0 = ox + x0_local, oy + y0_local
         # per-env draw, so sixteen vehicles do not all enter from the same point
         _alt0 = sample_range(p.spawn_altitude_m, self._rng)
         _vz0 = sample_range(p.spawn_v_z_m_s, self._rng)
         z0 = ground_z0 + _alt0 + self._half_height_m
 
+        _wx0 = sample_range(p.spawn_w_rad_s, self._rng)
+        _wy0 = sample_range(p.spawn_w_rad_s, self._rng)
         qw, qx, qy, qz = _euler_to_quat(tilt_x0, tilt_y0, 0.0)
         self.body.set_world_poses(
             positions=np.array([[x0, y0, z0]], dtype=np.float32),
@@ -279,7 +281,7 @@ class IsaacLanderVecEnv(VecEnv):
             indices=np.array([i]),
         )
         self.body.set_velocities(
-            np.array([[vx0, vy0, _vz0, 0.0, 0.0, 0.0]], dtype=np.float32),
+            np.array([[vx0, vy0, _vz0, _wx0, _wy0, 0.0]], dtype=np.float32),
             indices=np.array([i]),
         )
 
@@ -287,7 +289,10 @@ class IsaacLanderVecEnv(VecEnv):
         s["x"][i], s["y"][i], s["z"][i] = x0, y0, z0
         s["vx"][i], s["vy"][i], s["vz"][i] = vx0, vy0, _vz0
         s["tilt_x"][i], s["tilt_y"][i], s["yaw"][i] = tilt_x0, tilt_y0, 0.0
-        s["wx"][i] = s["wy"][i] = s["wz"][i] = 0.0
+        # must match what was written to PhysX above, not zero: the state dict is what
+        # the observation and the reward read, so a mismatch here would show the policy
+        # a still vehicle while the simulator span one.
+        s["wx"][i], s["wy"][i], s["wz"][i] = _wx0, _wy0, 0.0
         s["fuel_kg"][i] = p.initial_fuel_kg
         s["rcs_fuel_kg"][i] = p.initial_rcs_fuel_kg
         s["throttle"][i] = 0.0

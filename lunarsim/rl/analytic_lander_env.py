@@ -159,6 +159,17 @@ class LanderParams:
     spawn_altitude_m: float = 80.0
     spawn_xy_radius_m: float = 30.0
     spawn_v_z_m_s: float = -3.0
+    # Initial ATTITUDE and body rate, as ranges. Both default to exactly the spread the
+    # three envs had hardcoded (+/-0.05 rad, zero rate), so every existing stage is
+    # bit-identical and this is purely an exposure of a knob that was already there.
+    #
+    # It becomes a real knob for `land_handoff`: a landing specialist is handed the vehicle
+    # by an approach policy, which will not deliver it perfectly upright or perfectly still,
+    # and a specialist trained only from near-level entries would be accepting a handoff
+    # distribution it has never seen. The whole point of that stage is that the handoff is
+    # covered rather than assumed.
+    spawn_tilt_rad: tuple = (-0.05, 0.05)
+    spawn_w_rad_s: tuple = (0.0, 0.0)
     spawn_horizontal_speed_m_s: tuple[float, float] = (0.0, 0.0)
 
 
@@ -255,10 +266,12 @@ class AnalyticLanderEnv(gym.Env):
         self.state = {
             "x": x0, "y": y0, "z": ground_z0 + sample_range(p.spawn_altitude_m, self._rng),
             "vx": vx0, "vy": vy0, "vz": sample_range(p.spawn_v_z_m_s, self._rng),
-            "tilt_x": self._rng.uniform(-0.05, 0.05),
-            "tilt_y": self._rng.uniform(-0.05, 0.05),
+            "tilt_x": sample_range(p.spawn_tilt_rad, self._rng),
+            "tilt_y": sample_range(p.spawn_tilt_rad, self._rng),
             "yaw": 0.0,
-            "wx": 0.0, "wy": 0.0, "wz": 0.0,
+            "wx": sample_range(p.spawn_w_rad_s, self._rng),
+            "wy": sample_range(p.spawn_w_rad_s, self._rng),
+            "wz": 0.0,
             "fuel_kg": p.initial_fuel_kg,
             "rcs_fuel_kg": p.initial_rcs_fuel_kg,
             "throttle": 0.0,
