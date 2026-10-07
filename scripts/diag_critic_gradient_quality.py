@@ -52,7 +52,16 @@ rng = np.random.default_rng(0)
 idx = rng.choice(len(obs), size=min(args.samples, len(obs)), replace=False)
 obs, act = obs[idx], act[idx]
 
-m = SAC.load(args.checkpoint, device="cpu")
+# NOT SAC.load: a LayerNorm'd critic (--layer-norm, from v77 on) makes that raise on the
+# state dict, which is the exact failure that turned six evaluation cells into blank
+# lines. This path rebuilds the critic to match the checkpoint and loads it strictly, and
+# hands back the `dual_gamma` the run was actually trained with instead of leaving it to
+# be inferred from the head count.
+from lunarsim.rl.eval_loader import load_with_critic_for_diag  # noqa: E402
+
+m, _dual_gamma = load_with_critic_for_diag(args.checkpoint, device="cpu")
+m.actor = m.policy.actor
+m.dual_gamma = _dual_gamma
 o = th.as_tensor(obs)
 a_exp = th.as_tensor(act)
 

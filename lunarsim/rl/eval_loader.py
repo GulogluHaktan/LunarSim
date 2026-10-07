@@ -94,3 +94,80 @@ def load_actor_for_eval(path: str, device: str = "cpu"):
             return self.policy.predict(observation, state, episode_start, deterministic)
 
     return _ActorOnly(policy)
+
+
+def load_with_critic_for_diag(path: str, device: str = "cpu"):
+    """Like `load_actor_for_eval`, but the CRITIC is loaded too -- strictly.
+
+    The module docstring says a caller needing Q at evaluation time should say so
+    explicitly rather than inherit a silently half-loaded critic. This is that caller:
+    measuring whether a split critic's VALUE is calibrated needs the critic's own
+    weights, and a freshly initialised one would answer a different question while
+    looking identical.
+
+    Returns `(model_like, dual_gamma)` where `model_like` carries `.critic` (a list of
+    Q networks' outputs, SB3's `ContinuousCritic` call signature) and `.predict`, and
+    `dual_gamma` is the `(gamma_shaping, gamma_terminal)` the checkpoint was trained with
+    or None. Raises rather than loading the critic partially: a diagnostic that silently
+    measures half a critic is worse than no diagnostic.
+    """
+    from stable_baselines3.common.save_util import load_from_zip_file
+    from stable_baselines3.sac.policies import SACPolicy
+
+    data, params, _ = load_from_zip_file(path, device=device)
+    policy_kwargs = dict(data.get("policy_kwargs") or {})
+    policy = SACPolicy(data["observation_space"], data["action_space"],
+                       data["lr_schedule"], **policy_kwargs).to(device)
+    sd = params["policy"]
+
+    def _sub(prefix):
+        return {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
+
+    critic_sd = _sub("critic.")
+    if not critic_sd:
+        raise RuntimeError(f"{path}: no critic parameters under 'policy'")
+
+    try:
+        policy.critic.load_state_dict(critic_sd, strict=True)
+    except RuntimeError:
+        # The checkpoint's critic carries LayerNorm woven in after construction (see
+        # lunarsim/rl/plasticity.add_layer_norm_to_critic). Rebuild it the SAME way the
+        # training run did, then load strictly -- the retry is what makes "strict" mean
+        # something here instead of just failing on a known, reproducible difference.
+        from lunarsim.rl.plasticity import add_layer_norm_to_critic
+
+        # The surgery also rebuilds the critic's optimizer (the LayerNorm parameters
+        # would otherwise never get a gradient step), so the shim has to carry
+        # `.critic` and `.lr_schedule` as well -- a diagnostic load never steps that
+        # optimizer, but constructing it is part of matching the training-time critic.
+        class _Shim:
+            pass
+        shim = _Shim()
+        shim.policy = policy
+        shim.critic = policy.critic
+        shim.lr_schedule = data["lr_schedule"]
+        add_layer_norm_to_critic(shim)
+        policy.critic.load_state_dict(critic_sd, strict=True)
+        print(f"[eval-loader] {path}: critic rebuilt WITH LayerNorm to match the "
+              f"checkpoint, loaded strictly", flush=True)
+
+    actor_sd = _sub("actor.")
+    policy.actor.load_state_dict(actor_sd, strict=True)
+    policy.set_training_mode(False)
+
+    dual = data.get("dual_gamma")
+    dual = None if dual is None else (float(dual[0]), float(dual[1]))
+
+    class _WithCritic:
+        def __init__(self, pol):
+            self.policy = pol
+            self.critic = pol.critic
+            self.observation_space = pol.observation_space
+            self.action_space = pol.action_space
+            self.device = device
+
+        def predict(self, observation, state=None, episode_start=None,
+                    deterministic=False):
+            return self.policy.predict(observation, state, episode_start, deterministic)
+
+    return _WithCritic(policy), dual

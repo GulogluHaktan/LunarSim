@@ -65,6 +65,18 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
         self._disc_running: dict[int, float] = {}
         self._disc_t: dict[int, int] = {}
         self._ep_disc: list[float] = []
+        # DUAL-GAMMA: a second, stream-wise accumulator. When the critic is split
+        # (`CQLSAC.dual_gamma`) it does not represent the single-gamma total return at
+        # all -- it represents  sum g_s^t r_shaping + sum g_t^t r_terminal, with the two
+        # streams discounted differently and backed up by different halves of the
+        # ensemble. Comparing that against sum gamma^t (r_shaping + r_terminal), as the
+        # single-gamma accumulator above does, compares two different quantities and can
+        # manufacture a gap out of the discounting alone. This project read a +28..+30
+        # "gap" on a dual-gamma run and nearly concluded that CQL/Cal-QL/LayerNorm had
+        # failed to calibrate anything; the gauge was wrong, not necessarily the critic.
+        self._disc_running_s: dict[int, float] = {}
+        self._disc_running_t: dict[int, float] = {}
+        self._ep_disc_dual: list[float] = []
         self._ep_s0: list = []
         self._ep_a0: list = []
         self._pending_s0: dict[int, object] = {}
@@ -101,16 +113,27 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
                                                np.array(acts[i], dtype=np.float32))
                     except (IndexError, TypeError):
                         pass
+        # (gamma_shaping, gamma_terminal) when the critic is split, else None.
+        dual = getattr(self.model, "dual_gamma", None)
         for i, r in enumerate(rewards):
             self._running[i] = self._running.get(i, 0.0) + float(r)
             tt = self._disc_t.get(i, 0)
             self._disc_running[i] = self._disc_running.get(i, 0.0) + (gamma ** tt) * float(r)
+            if dual is not None:
+                g_s, g_t = float(dual[0]), float(dual[1])
+                stepinfo = infos[i] if infos is not None and i < len(infos) else {}
+                r_t = float(stepinfo.get("reward_terminal", 0.0))
+                r_s = float(r) - r_t
+                self._disc_running_s[i] = self._disc_running_s.get(i, 0.0) + (g_s ** tt) * r_s
+                self._disc_running_t[i] = self._disc_running_t.get(i, 0.0) + (g_t ** tt) * r_t
             self._disc_t[i] = tt + 1
         for i, done in enumerate(dones):
             if not done:
                 continue
             self._returns.append(self._running.pop(i, 0.0))
             self._ep_disc.append(self._disc_running.pop(i, 0.0))
+            self._ep_disc_dual.append(self._disc_running_s.pop(i, 0.0)
+                                      + self._disc_running_t.pop(i, 0.0))
             self._disc_t.pop(i, None)
             s0a0 = self._pending_s0.pop(i, None)
             if s0a0 is not None:
@@ -172,7 +195,19 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
                 with th.no_grad():
                     s0 = th.as_tensor(np.asarray(self._ep_s0), device=dev)
                     a0 = th.as_tensor(np.asarray(self._ep_a0), device=dev)
-                    if hasattr(self.model, "critic"):
+                    dual = getattr(self.model, "dual_gamma", None)
+                    if hasattr(self.model, "critic") and dual is not None:
+                        # DUAL-GAMMA: the scalar the actor ascends is the min WITHIN each
+                        # stream, summed across streams -- not the min over the whole
+                        # ensemble, which mixes two different partial returns and reports
+                        # whichever half happens to be smaller. `CQLSAC.train` builds the
+                        # actor's objective exactly this way; so does this.
+                        qlist = self.model.critic(s0, a0)
+                        half = len(qlist) // 2
+                        q_s = th.cat(qlist[:half], dim=1).min(dim=1).values
+                        q_t = th.cat(qlist[half:], dim=1).min(dim=1).values
+                        qs = q_s + q_t
+                    elif hasattr(self.model, "critic"):
                         # SAC/TD3: Q(s,a), the min over the ensemble -- the same scalar the
                         # actor ascends.
                         qs = th.cat(self.model.critic(s0, a0), dim=1).min(dim=1).values
@@ -186,7 +221,13 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
                         # reasoning was wrong.
                         qs = self.model.policy.predict_values(s0).reshape(-1)
                     q = float(qs.mean().item())
-                mc = float(np.mean(self._ep_disc))
+                # The realised return in the critic's OWN units: per-stream discounting
+                # when the critic is split, the single-gamma total otherwise.
+                if (getattr(self.model, "dual_gamma", None) is not None
+                        and len(self._ep_disc_dual) == len(self._ep_disc)):
+                    mc = float(np.mean(self._ep_disc_dual))
+                else:
+                    mc = float(np.mean(self._ep_disc))
                 row["q_s0"], row["mc_s0"], row["q_minus_mc"] = q, mc, q - mc
             except Exception:
                 pass
@@ -209,6 +250,7 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
                 w.writerow(row)
         self._returns.clear()
         self._ep_disc.clear()
+        self._ep_disc_dual.clear()
         self._ep_s0.clear()
         self._ep_a0.clear()
         self._landed.clear()
