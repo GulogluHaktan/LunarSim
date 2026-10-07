@@ -47,11 +47,9 @@ def test_the_frozen_policy_never_changes_while_the_learnable_one_does():
     m.install_pex(temperature=1.0)
     before = {k: v.clone() for k, v in m.pex_actor.state_dict().items()}
     theta_before = {k: v.clone() for k, v in m.actor.state_dict().items()}
-    for _ in range(200):
-        m.replay_buffer.add(np.zeros((1, 4), np.float32), np.zeros((1, 4), np.float32),
-                            np.random.uniform(-1, 1, (1, 2)).astype(np.float32),
-                            np.array([1.0], np.float32), np.array([False]), [{}])
-    m.train(gradient_steps=50, batch_size=16)
+    # learn() rather than a bare train(): train() alone leaves SB3's _logger unset and
+    # raises before touching a single parameter, which would pass as a false negative here
+    m.learn(total_timesteps=400, log_interval=100000)
 
     for k, v in m.pex_actor.state_dict().items():
         assert th.equal(v, before[k]), f"frozen policy moved at {k}"
@@ -69,6 +67,13 @@ def test_selection_follows_Q_and_can_pick_either_policy():
     """
     m = _model()
     m.install_pex(temperature=0.01)        # near-argmax
+
+    # install_pex deep-copies the actor, so immediately afterwards the two propose the
+    # SAME action and selection is unobservable -- the guard below caught exactly that on
+    # the first run. Perturb the learnable one so there is a real choice to make.
+    with th.no_grad():
+        for prm in m.actor.mu.parameters():
+            prm.add_(th.randn_like(prm) * 0.5)
 
     obs = np.zeros((16, 4), np.float32)
     with th.no_grad():

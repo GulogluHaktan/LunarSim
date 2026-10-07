@@ -384,8 +384,35 @@ class CQLSAC(SAC):
             actions = actions.squeeze(axis=0)
         return actions, state
 
-    def _excluded_save_params(self):
-        return super()._excluded_save_params()
+    def set_parameters(self, load_path_or_dict, exact_match: bool = True, device="auto"):
+        """Create the frozen policy before SB3 tries to load into it.
+
+        `load` constructs the model without calling `install_pex`, so `pex_actor` is None
+        and SB3's loader walks straight into
+
+            AttributeError: 'NoneType' object has no attribute 'load_state_dict'
+
+        A checkpoint that carries a frozen policy has to rebuild the module first. Without
+        this, loading a PEX checkpoint either raises or -- worse, if the name were simply
+        dropped -- would silently return pi_theta ALONE and every evaluation would measure
+        a policy that was never deployed.
+        """
+        import copy
+        params = load_path_or_dict
+        if not isinstance(params, dict):
+            from stable_baselines3.common.save_util import load_from_zip_file
+            _, params, _ = load_from_zip_file(load_path_or_dict, device=device)
+        if "pex_actor" in params and self.pex_actor is None:
+            self.pex_actor = copy.deepcopy(self.actor)
+            for prm in self.pex_actor.parameters():
+                prm.requires_grad_(False)
+            if self.pex_temperature is None:
+                # a saved composite without a temperature would silently become argmax;
+                # the paper's default is used and announced rather than guessed at silently
+                self.pex_temperature = 1.0
+                print("[pex] checkpoint carries a frozen policy but no temperature; "
+                      "using 1.0", flush=True)
+        return super().set_parameters(params, exact_match=exact_match, device=device)
 
     def _get_torch_save_params(self):
         state_dicts, tensors = super()._get_torch_save_params()
