@@ -53,6 +53,21 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
         self.csv_path = csv_path
         self._running: dict[int, float] = {}
         self._returns: list[float] = []
+        # DISCOUNTED return per episode, plus the (s0, a0) it started from, so the
+        # critic's estimate can be compared against the realised value IN THE SAME
+        # UNITS. Without this the only available comparison is Q against the
+        # UNDISCOUNTED proxy return, which is not the same quantity at all: at
+        # gamma=0.995 over ~450 steps a uniform reward stream discounts to roughly
+        # 0.4x its undiscounted sum, so that comparison can manufacture an
+        # "overestimation" of several units out of nothing. This project read
+        # Q~-1 against a proxy of -11.20 and called it a 10-unit overestimate; the
+        # honest version of that claim needs this number.
+        self._disc_running: dict[int, float] = {}
+        self._disc_t: dict[int, int] = {}
+        self._ep_disc: list[float] = []
+        self._ep_s0: list = []
+        self._ep_a0: list = []
+        self._pending_s0: dict[int, object] = {}
         self._landed: list[bool] = []
         self._lost: list[bool] = []
         self._left: list[bool] = []
@@ -73,12 +88,34 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
             return True
         rewards = np.atleast_1d(rewards)
         dones = np.atleast_1d(dones)
+        gamma = float(getattr(self.model, "gamma", 0.99))
+        # capture (s0, a0) for any env whose episode has just begun
+        acts = self.locals.get("actions")
+        last_obs = getattr(self.model, "_last_obs", None)
+        if last_obs is not None and acts is not None:
+            acts = np.atleast_2d(acts)
+            for i in range(len(rewards)):
+                if i not in self._pending_s0:
+                    try:
+                        self._pending_s0[i] = (np.array(last_obs[i], dtype=np.float32),
+                                               np.array(acts[i], dtype=np.float32))
+                    except (IndexError, TypeError):
+                        pass
         for i, r in enumerate(rewards):
             self._running[i] = self._running.get(i, 0.0) + float(r)
+            tt = self._disc_t.get(i, 0)
+            self._disc_running[i] = self._disc_running.get(i, 0.0) + (gamma ** tt) * float(r)
+            self._disc_t[i] = tt + 1
         for i, done in enumerate(dones):
             if not done:
                 continue
             self._returns.append(self._running.pop(i, 0.0))
+            self._ep_disc.append(self._disc_running.pop(i, 0.0))
+            self._disc_t.pop(i, None)
+            s0a0 = self._pending_s0.pop(i, None)
+            if s0a0 is not None:
+                self._ep_s0.append(s0a0[0])
+                self._ep_a0.append(s0a0[1])
             info = infos[i] if infos is not None and i < len(infos) else {}
             self._landed.append(bool(info.get("landed_safely")))
             self._lost.append(bool(info.get("lost_control")))
@@ -122,12 +159,33 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
         except Exception:
             row["critic_loss"] = row["actor_loss"] = row["ent_coef"] = float("nan")
 
+        # THE OVERESTIMATION NUMBER. Q(s0, a0) from the current critic against the
+        # realised discounted return of the episode that actually started there.
+        # A positive gap is the critic valuing its own policy above what the policy
+        # delivered, which is the mechanism every collapse in this project points
+        # at -- and it is only meaningful because both sides are discounted.
+        row["q_s0"] = row["mc_s0"] = row["q_minus_mc"] = float("nan")
+        if self._ep_s0 and len(self._ep_s0) == len(self._ep_disc):
+            try:
+                import torch as th
+                dev = self.model.device
+                with th.no_grad():
+                    s0 = th.as_tensor(np.asarray(self._ep_s0), device=dev)
+                    a0 = th.as_tensor(np.asarray(self._ep_a0), device=dev)
+                    qs = th.cat(self.model.critic(s0, a0), dim=1).min(dim=1).values
+                    q = float(qs.mean().item())
+                mc = float(np.mean(self._ep_disc))
+                row["q_s0"], row["mc_s0"], row["q_minus_mc"] = q, mc, q - mc
+            except Exception:
+                pass
+
         if self.verbose:
             print(f"[proxy-vs-true] step {row['step']:>9}  n={n:>4}  "
                   f"proxy {row['proxy_mean_return']:>9.2f} "
                   f"(worst10% {row['proxy_worst_decile']:>9.2f})  "
                   f"landed {row['true_landed_rate']:>6.1%}  "
                   f"lost={lost} left={left} other={row['other_failures']}  "
+                  f"Q0 {row['q_s0']:+.2f} vs MC {row['mc_s0']:+.2f} (gap {row['q_minus_mc']:+.2f})  "
                   f"Q~{-row['actor_loss']:.0f} critic={row['critic_loss']:.1f}",
                   flush=True)
         if self.csv_path:
@@ -138,6 +196,9 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
                 self._wrote_header = True
                 w.writerow(row)
         self._returns.clear()
+        self._ep_disc.clear()
+        self._ep_s0.clear()
+        self._ep_a0.clear()
         self._landed.clear()
         self._lost.clear()
         self._left.clear()
