@@ -3759,3 +3759,44 @@ the TOTAL return signal shrank about fourfold: the clone's proxy return went fro
 dense shaping should CARRY the path while the terminal only settles it, which calls
 for raising the dense terms, not only lowering the terminal. Uniform rescaling will
 not fix it either, since scaling the reward scales the critic's error with it.
+
+## From scratch: RL learns nothing on this task, and the overestimation is now a number
+
+Two 400k-step runs with no warm start, no anchor, and nothing to fall away from -- the
+test that separates "RL cannot improve on a good policy" from "RL cannot learn this task
+at all".
+
+```
+  v64 scratch, no CQL      0.0% landed at every checkpoint through 370k
+  v64 scratch, CQL a=5     0.0% throughout, one 4.5% reading at 340k
+```
+
+So the second diagnosis is the true one: **SAC does not get off the ground here from a
+cold start.** The warm start is not a convenience, it is the only thing that produces a
+competent policy at all, and the whole open question is therefore whether RL can improve
+on it -- not whether RL can solve the task independently.
+
+### The overestimation, finally measured in matched units
+
+The Q0-vs-MC instrument added today compares Q(s0,a0) against the realised DISCOUNTED
+return of the episode that started there, so the two are the same quantity. Earlier in
+this project the same claim was made by comparing Q against the UNDISCOUNTED proxy, which
+can manufacture several units of "overestimation" out of nothing. With CQL alpha=5 active:
+
+```
+  step  10000   Q0  +0.05  vs MC -12.42   gap +12.47
+  step  40000   Q0 +23.80  vs MC -27.72   gap +51.52   <- severe overestimation
+  step  70000   Q0 -32.28  vs MC -26.75   gap  -5.53   <- CQL overshoots into pessimism
+  step 100000   Q0 -60.07  vs MC -26.32   gap -33.75   <- deeply pessimistic
+  step 260000   Q0 +12.26  vs MC  -7.48   gap +19.73   <- and back to overestimating
+  step 340000   Q0 +14.51  vs MC  -6.33   gap +20.84
+```
+
+The critic never settles. It overestimates by 51, CQL drives it 34 units past the truth in
+the other direction, and it returns to overestimating by 21. CQL is not calibrating the
+critic here, it is oscillating it -- which is precisely the failure Cal-QL
+(arXiv:2303.05479) exists to fix by clamping the out-of-distribution values from below so
+conservatism cannot overshoot. `--calql-ref` is implemented and these runs did not use it.
+
+Stopped both at this point: they had answered their question, and they were competing with
+the BC fit for the GPU.
