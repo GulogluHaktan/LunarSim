@@ -160,6 +160,21 @@ parser.add_argument("--td3bc-alpha", type=float, default=None,
                           "against 47.6%% for the clone's own untrained critic. A calibrated "
                           "value is not a correct gradient, and the actor only ever uses the "
                           "gradient.")
+parser.add_argument("--pex-temperature", type=float, default=None,
+                     help="PEX, Policy Expansion (Zhang/Xu/Yu, arXiv:2302.00935): FREEZE the "
+                          "warm-start policy, add a learnable one, and pick between their "
+                          "per-state proposals with a categorical over Q at this "
+                          "temperature. Lower is closer to argmax. Requires --warm-start. "
+                          "Added because every other intervention here traded one failure "
+                          "for the other: anchor 1e-2 froze the clone at its own level, "
+                          "anchor 1e-3 and 3e-3 killed it in one window, and CQL gave no "
+                          "collapse and no improvement. One network cannot be both the "
+                          "competent fallback and the explorer. PEX also happens to need "
+                          "only what our critic HAS -- its value is calibrated (Q0 against "
+                          "the realised discounted return ~0) and selection only RANKS two "
+                          "concrete actions -- while avoiding what it lacks, an informative "
+                          "action gradient (40.8%% toward the expert against 47.6%% for an "
+                          "untrained critic).")
 parser.add_argument("--cql-n-samples", type=int, default=10,
                      help="actions sampled per state for the CQL logsumexp, half from the "
                           "policy and half uniform over the action box.")
@@ -288,6 +303,12 @@ parser.add_argument("--checkpoint-every", type=int, default=0,
                           "result so far is the END of a run. If the peak is mid-run, saving only "
                           "the last step systematically keeps the over-trained tail. 0 disables.")
 parser.add_argument("--headless", action="store_true", default=True)
+parser.add_argument("--min-free-gpu-mib", type=int, default=2600,
+                     help="refuse to boot Isaac unless at least this much GPU memory is "
+                          "free, naming whatever is holding it. 0 disables the check. "
+                          "Exists because a run died 26 seconds in with a CUDA OOM buried "
+                          "under Isaac's asset_converter noise, when two unrelated "
+                          "processes held 6.4 of 7.6 GiB.")
 args = parser.parse_args()
 
 
@@ -309,6 +330,60 @@ if args.torch_device == "auto":
     import torch as _torch
     args.torch_device = "cuda" if _torch.cuda.is_available() else "cpu"
 
+
+def _require_free_gpu(min_free_mib: int = 2600) -> None:
+    """Fail BEFORE booting Isaac if the GPU cannot hold the run.
+
+    v69 died 26 seconds in with
+
+        torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 MiB.
+        GPU 0 has a total capacity of 7.62 GiB of which 3.75 MiB is free.
+
+    because two unrelated processes held 6.4 GiB between them. Nothing was wrong with the
+    run; it just could not fit, and finding that out took a full Isaac boot and a traceback
+    buried under the usual asset_converter noise. Checking first turns a 26-second mystery
+    into one line, and names WHO is holding the memory so the choice of what to stop is the
+    user's rather than a guess.
+
+    Skipped silently when nvidia-smi is unavailable, so a CPU-only or non-NVIDIA box is
+    unaffected.
+    """
+    import shutil
+    import subprocess
+    if shutil.which("nvidia-smi") is None:
+        return
+    try:
+        free = int(subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10, check=True).stdout.split("\n")[0])
+    except (subprocess.SubprocessError, ValueError, IndexError):
+        return
+    if free >= min_free_mib:
+        return
+    holders = []
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10, check=True).stdout
+        for row in out.strip().split("\n"):
+            if not row.strip():
+                continue
+            pid, mib = (x.strip() for x in row.split(","))
+            try:
+                name = subprocess.run(["ps", "-o", "comm=", "-p", pid],
+                                      capture_output=True, text=True,
+                                      timeout=5).stdout.strip() or "?"
+            except subprocess.SubprocessError:
+                name = "?"
+            holders.append(f"    {mib:>6} MiB  pid {pid:<7} {name}")
+    except (subprocess.SubprocessError, ValueError):
+        pass
+    raise SystemExit(
+        f"GPU has {free} MiB free and this run needs about {min_free_mib}.\n"
+        + ("Currently held by:\n" + "\n".join(holders) + "\n" if holders else "")
+        + "Free some memory and rerun, or pass --min-free-gpu-mib to override the check.")
+_require_free_gpu(args.min_free_gpu_mib)
 simulation_app = SimulationApp({"headless": args.headless})
 
 sys.path.insert(0, args.lunarsim_root)
@@ -704,6 +779,18 @@ def main():
                     n_ln = add_layer_norm_to_critic(model)
                     print(f"[layernorm] {n_ln} critic trunks rebuilt with LayerNorm "
                           f"(actor untouched so the warm start survives)", flush=True)
+                if args.pex_temperature is not None:
+                    if not hasattr(model, "install_pex"):
+                        raise SystemExit(
+                            "--pex-temperature needs the CQLSAC class; pass --cql-alpha "
+                            "(any value, 0 is fine) so the model is built from it.")
+                    # AFTER the ensemble expansion and the LayerNorm rebuild, so the frozen
+                    # copy is of the actor that will actually be deployed. Before them it
+                    # would freeze a model that the rebuild then replaces.
+                    model.install_pex(args.pex_temperature)
+                    print(f"[pex] frozen the warm-start policy; selecting between it and "
+                          f"the learnable actor by Q at temperature "
+                          f"{args.pex_temperature}", flush=True)
                 # SAC.load does NOT restore a replay buffer, so without this the
                 # critic starts from an empty one and refits off a narrow early
                 # window every single warm start.
