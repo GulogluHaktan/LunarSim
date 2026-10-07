@@ -39,17 +39,36 @@ def layer_norm_after_relu(module: nn.Module) -> nn.Module:
     SB3's `create_mlp` emits `[Linear, act, Linear, act, ...]` with no
     normalisation, and MlpPolicy exposes no option to add it, so the layers
     have to be woven in after construction.
+
+    The new LayerNorms are placed on the SAME DEVICE as the module they are woven into.
+    Without that they are created on CPU while the policy is on cuda and the first forward
+    pass dies with
+
+        RuntimeError: Expected all tensors to be on the same device, but got weight is on
+        cpu, different from other tensors on cuda:0
+
+    which is how v67 died 28 seconds in. Both callers hit it, so `--layer-norm` had never
+    worked on GPU in this project at all -- it was only ever exercised on CPU, where the
+    bug is invisible.
     """
     if not isinstance(module, nn.Sequential):
         return module
+    try:
+        device = next(module.parameters()).device
+    except StopIteration:
+        device = None
     out: list[nn.Module] = []
     for i, layer in enumerate(module):
         out.append(layer)
         is_act = isinstance(layer, (nn.ReLU, nn.Tanh, nn.ELU, nn.GELU, nn.SiLU))
         prev_linear = i > 0 and isinstance(module[i - 1], nn.Linear)
         if is_act and prev_linear:
-            out.append(nn.LayerNorm(module[i - 1].out_features))
-    return nn.Sequential(*out)
+            ln = nn.LayerNorm(module[i - 1].out_features)
+            if device is not None:
+                ln = ln.to(device)
+            out.append(ln)
+    seq = nn.Sequential(*out)
+    return seq.to(device) if device is not None else seq
 
 
 def add_layer_norm_to_sac(model) -> int:
