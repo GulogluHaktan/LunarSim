@@ -131,6 +131,22 @@ parser.add_argument("--calql-ref", type=float, default=None,
                           "recorded ramp_35m episodes in training reward units. That is 26 "
                           "to 37 units of over-conservatism and it left the actor nothing "
                           "to climb. Omit for plain CQL.")
+parser.add_argument("--dual-gamma", type=float, nargs=2, default=None,
+                     metavar=("GAMMA_SHAPING", "GAMMA_TERMINAL"),
+                     help="two discount rates: a low one for the dense shaping stream and "
+                          "a high one for the terminal. arXiv:1810.08719 lists this as a "
+                          "primary contribution and states that WITHOUT it 'the performance "
+                          "was actually worsened by including the terminal reward term'. "
+                          "This project's gamma sweep is that sentence from the outside: "
+                          "0.99 bounded the critic and discounted the terminal to 0.011 of "
+                          "its value over 450 steps, 0.998 kept the terminal visible and the "
+                          "critic diverged to +100..+1972, and 0.995 split the difference and "
+                          "still failed. One gamma cannot serve two streams whose "
+                          "requirements are opposed -- the terminal arrives once at ~450 "
+                          "steps and needs gamma near 1, while the shaping arrives every step "
+                          "and a high gamma amplifies its per-step error by 1/(1-gamma). "
+                          "Requires an even --n-critics >= 4 so each stream keeps a pair, and "
+                          "uses DualRewardReplayBuffer to carry the split.")
 parser.add_argument("--cql-n-samples", type=int, default=10,
                      help="actions sampled per state for the CQL logsumexp, half from the "
                           "policy and half uniform over the action box.")
@@ -286,6 +302,15 @@ sys.path.insert(0, args.lunarsim_root)
 
 from stable_baselines3 import SAC
 from stable_baselines3.common.utils import FloatSchedule  # noqa: E402
+
+
+def _dual_gamma_kwargs(args):
+    """Buffer + critic kwargs for dual discounting, or empty when it is off."""
+    if not getattr(args, "dual_gamma", None):
+        return {}, {}
+    from lunarsim.rl.dual_gamma import DualRewardReplayBuffer
+    return ({"replay_buffer_class": DualRewardReplayBuffer},
+            {"dual_gamma": (args.dual_gamma[0], args.dual_gamma[1])})
 
 
 def _sac_class(args):
@@ -588,6 +613,29 @@ def main():
                     model.cql_n_samples = int(args.cql_n_samples)
                     model.calql_ref = (None if args.calql_ref is None
                                        else float(args.calql_ref))
+                    _buf_kw, _dg_kw = _dual_gamma_kwargs(args)
+                    if _dg_kw:
+                        n_c = len(model.critic.q_networks)
+                        if n_c < 4 or n_c % 2 != 0:
+                            raise SystemExit(
+                                f"--dual-gamma needs an even n_critics >= 4 so each stream "
+                                f"keeps a pair; this warm start has {n_c}. Pass "
+                                f"--n-critics 4 so the ensemble is expanded on load.")
+                        model.dual_gamma = _dg_kw["dual_gamma"]
+                        model._n_half = n_c // 2
+                        # `load` restores a plain ReplayBuffer, which has no terminal
+                        # stream, so it has to be replaced before any data is collected.
+                        from lunarsim.rl.dual_gamma import DualRewardReplayBuffer
+                        model.replay_buffer_class = DualRewardReplayBuffer
+                        model.replay_buffer = DualRewardReplayBuffer(
+                            model.buffer_size, model.observation_space,
+                            model.action_space, device=model.device,
+                            n_envs=model.n_envs,
+                            optimize_memory_usage=model.optimize_memory_usage)
+                        print(f"[dual-gamma] shaping={model.dual_gamma[0]} "
+                              f"terminal={model.dual_gamma[1]}, "
+                              f"{model._n_half} critics per stream, "
+                              f"buffer -> DualRewardReplayBuffer", flush=True)
                     print(f"[cql] conservative critic term active, alpha={args.cql_alpha}, "
                           f"n_samples={args.cql_n_samples}, "
                           f"calql_ref={model.calql_ref}", flush=True)
@@ -721,9 +769,10 @@ def main():
                 # is an independent divergence driver from the entropy
                 # runaway and pinning alpha does not address it.
                 _cls = _sac_class(args)
+                _buf_kw, _dg_kw = _dual_gamma_kwargs(args)
                 _extra = ({"cql_alpha": args.cql_alpha,
                            "cql_n_samples": args.cql_n_samples,
-                           "calql_ref": args.calql_ref}
+                           "calql_ref": args.calql_ref, **_dg_kw, **_buf_kw}
                           if _cls is not SAC else {})
                 model = _cls("MlpPolicy", venv, verbose=1, device=args.torch_device,
                              gamma=args.gamma, gradient_steps=args.gradient_steps,

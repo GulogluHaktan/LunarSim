@@ -80,12 +80,24 @@ class CQLSAC(SAC):
     """
 
     def __init__(self, *args, cql_alpha: float = 5.0, cql_n_samples: int = 10,
-                 calql_ref: float | None = None, **kwargs):
+                 calql_ref: float | None = None,
+                 dual_gamma: tuple[float, float] | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.cql_alpha = float(cql_alpha)
         self.cql_n_samples = int(cql_n_samples)
         # None disables the Cal-QL clamp and leaves plain CQL(H).
         self.calql_ref = None if calql_ref is None else float(calql_ref)
+        # (gamma_shaping, gamma_terminal) or None for single-gamma SAC. See
+        # lunarsim/rl/dual_gamma.py for the measurement that motivates it.
+        self.dual_gamma = None if dual_gamma is None else (float(dual_gamma[0]),
+                                                           float(dual_gamma[1]))
+        if self.dual_gamma is not None:
+            n = len(self.critic.q_networks)
+            if n < 4 or n % 2 != 0:
+                raise ValueError(
+                    f"dual_gamma needs an even n_critics >= 4 so each stream keeps a "
+                    f"pair to take the min over; got n_critics={n}")
+            self._n_half = n // 2
 
     def _conservative_term(self, observations, current_q_values) -> th.Tensor:
         """logsumexp over OOD actions minus Q on the buffer's own actions."""
@@ -161,16 +173,44 @@ class CQLSAC(SAC):
                 ent_coef_loss.backward()
                 self.ent_coef_optimizer.step()
 
-            with th.no_grad():
-                next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
-                next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
-                next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
-                next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
-                target_q_values = replay_data.rewards + (1 - replay_data.dones) * discounts * next_q_values
+            if self.dual_gamma is None:
+                with th.no_grad():
+                    next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
+                    next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
+                    next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+                    next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
+                    target_q_values = replay_data.rewards + (1 - replay_data.dones) * discounts * next_q_values
 
-            current_q_values = self.critic(replay_data.observations, replay_data.actions)
+                current_q_values = self.critic(replay_data.observations, replay_data.actions)
+                critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values)
+                                        for current_q in current_q_values)
+            else:
+                # ---- DUAL DISCOUNT ----
+                # The ensemble is split in half: the first `_n_half` networks back up the
+                # SHAPING stream at gamma_shaping, the rest back up the TERMINAL stream at
+                # gamma_terminal. Each half keeps a pair so clipped-double-Q still applies
+                # within a stream.
+                #
+                # The entropy bonus goes on the SHAPING target only. It is a dense
+                # per-step quantity, so discounting it at the terminal's gamma would be
+                # wrong, and adding it to both would count it twice.
+                g_s, g_t = self.dual_gamma
+                r_term = replay_data.rewards_terminal
+                r_shape = replay_data.rewards - r_term
+                with th.no_grad():
+                    next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
+                    nq = self.critic_target(replay_data.next_observations, next_actions)
+                    nq_s, _ = th.min(th.cat(nq[:self._n_half], dim=1), dim=1, keepdim=True)
+                    nq_t, _ = th.min(th.cat(nq[self._n_half:], dim=1), dim=1, keepdim=True)
+                    nq_s = nq_s - ent_coef * next_log_prob.reshape(-1, 1)
+                    tgt_s = r_shape + (1 - replay_data.dones) * g_s * nq_s
+                    tgt_t = r_term + (1 - replay_data.dones) * g_t * nq_t
 
-            critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
+                current_q_values = self.critic(replay_data.observations, replay_data.actions)
+                critic_loss = 0.5 * (
+                    sum(F.mse_loss(q, tgt_s) for q in current_q_values[:self._n_half])
+                    + sum(F.mse_loss(q, tgt_t) for q in current_q_values[self._n_half:]))
+
             assert isinstance(critic_loss, th.Tensor)
             critic_losses.append(critic_loss.item())
 
@@ -185,8 +225,15 @@ class CQLSAC(SAC):
             critic_loss.backward()
             self.critic.optimizer.step()
 
-            q_values_pi = th.cat(self.critic(replay_data.observations, actions_pi), dim=1)
-            min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
+            qpi = self.critic(replay_data.observations, actions_pi)
+            if self.dual_gamma is None:
+                min_qf_pi, _ = th.min(th.cat(qpi, dim=1), dim=1, keepdim=True)
+            else:
+                # The actor maximises the SUM of the two streams, which is the quantity
+                # the environment actually pays. Each stream contributes its own min.
+                qs, _ = th.min(th.cat(qpi[:self._n_half], dim=1), dim=1, keepdim=True)
+                qt, _ = th.min(th.cat(qpi[self._n_half:], dim=1), dim=1, keepdim=True)
+                min_qf_pi = qs + qt
             actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())
 

@@ -779,6 +779,7 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
             + _action_saturation_penalty(w, info.get("action"))
         )
         r = -min(shaping, w.shaping_clip_abs) * w.reward_scale
+        terminal_part = 0.0
 
         if info.get("terminated"):
             # Grade the severity from the IMPACT state when the env publishes
@@ -796,9 +797,11 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
             # The analytic env has no contact solver, so its `state` already
             # holds the true impact velocity and the fallback is correct there.
             grade_state = info.get("impact_state") or s
-            r += _terminal_reward(w, info,
-                                  _touchdown_severity(p, grade_state,
-                                                      info.get("landing_margins") or {}))
+            term = _terminal_reward(w, info,
+                                    _touchdown_severity(p, grade_state,
+                                                        info.get("landing_margins") or {}))
+            r += term
+            terminal_part += term
         elif info.get("truncated"):
             # Charge the timeout penalty only for an actual TIMEOUT. The other
             # way an episode truncates is `left_tile`, which is an artificial
@@ -811,6 +814,22 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
             # `truncated` keep the previous behaviour.
             if info.get("timed_out", True):
                 r -= w.timeout_penalty
+                terminal_part -= w.timeout_penalty
+        # Publish the SPLIT so a dual-discount critic can learn the two streams with
+        # separate gamma. arXiv:1810.08719 lists multiple discount rates as a primary
+        # contribution and is explicit about the cost of not having them: "Without the
+        # use of multiple discount rates, the performance was actually worsened by
+        # including the terminal reward term." That matches this project's own gamma
+        # sweep exactly -- gamma 0.99 bounded the critic but discounted the terminal to
+        # 0.011 of its value over 450 steps, gamma 0.998 kept the terminal visible and
+        # the critic diverged, and gamma 0.995 split the difference and still failed.
+        # The resolution is not a value between them; it is two values.
+        #
+        # Written into `info` rather than returned, so every existing caller of
+        # `reward_fn` keeps the same scalar interface and only a buffer that wants the
+        # split has to look for it.
+        info["reward_terminal"] = float(terminal_part * w.reward_total_scale)
+        info["reward_shaping"] = float((r - terminal_part) * w.reward_total_scale)
         return float(r * w.reward_total_scale)
 
     # Published on the closure so the ENVS can read the very weights this
