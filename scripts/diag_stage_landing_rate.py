@@ -31,13 +31,20 @@ parser.add_argument("--terrain-grid-n", type=int, default=80,
                      help="must match the --terrain-grid-n the checkpoint was trained with")
 parser.add_argument("--seed0", type=int, default=7000)
 parser.add_argument("--legacy-obs15", action="store_true",
-                     help="feed observation slot 15 the constant 0.0 it held before it "
-                          "was repurposed to carry time-remaining. Required to evaluate "
-                          "a checkpoint trained before that change: the vector stayed "
-                          "16-wide so it LOADS without complaint, but the policy has "
-                          "arbitrary weights on a slot it only ever saw as zero, and a "
-                          "measured difference would otherwise be attributed to whatever "
-                          "else changed.")
+                     help="emit the ORIGINAL 16-wide observation, slot 15 held at the "
+                          "constant 0.0 it had before it was repurposed to carry "
+                          "time-remaining. Required to evaluate a checkpoint trained "
+                          "before that change: back when the live vector was also "
+                          "16-wide it LOADED without complaint while the policy had "
+                          "arbitrary weights on a slot it only ever saw as zero, so a "
+                          "measured difference would be attributed to whatever else "
+                          "changed. The live vector is now 20-wide, so such a checkpoint "
+                          "is rejected on shape unless this is passed.")
+parser.add_argument("--legacy-obs16", action="store_true",
+                     help="emit the 16-wide observation as it stood AFTER slot 15 became "
+                          "time-remaining and BEFORE the 16 -> 20 widening added the "
+                          "velocity-error/t_go slots. For checkpoints trained in that "
+                          "window.")
 parser.add_argument("--stochastic", action="store_true",
                      help="sample from the policy instead of taking its mean. Training "
                           "collects data this way while evaluation is deterministic, so a "
@@ -102,7 +109,8 @@ def main():
     tile = generate_tile(terrain_config(stage, args.terrain_seed, args.terrain_grid_n))
     env = IsaacLanderEnv(tile=tile, params=params, reward_fn=default_reward_fn,
                           seed=args.seed0, lunarsim_root=args.lunarsim_root,
-                          legacy_obs15=args.legacy_obs15)
+                          legacy_obs15=args.legacy_obs15,
+                          legacy_obs16=args.legacy_obs16)
     model = SAC.load(args.checkpoint, device="cpu")
     max_steps = int(params.max_episode_s / params.dt_s) + 5
 
@@ -207,7 +215,8 @@ def main():
           f"-- checkpoint={args.checkpoint} stage={args.stage} "
           f"episodes={args.episodes} seed0={args.seed0} "
           f"terrain_seed={args.terrain_seed} grid_n={args.terrain_grid_n} "
-          f"stochastic={args.stochastic} legacy_obs15={args.legacy_obs15} ===")
+          f"stochastic={args.stochastic} legacy_obs15={args.legacy_obs15} "
+          f"legacy_obs16={args.legacy_obs16} ===")
     # Mean AND worst decile: a mean return hides the tail that the landing rate
     # is actually made of, and this project's own notes call for tracking the
     # worst percentile rather than the mean for exactly that reason.

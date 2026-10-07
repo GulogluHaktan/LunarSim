@@ -36,11 +36,16 @@ contact and crash/success classification use the SAME real terrain
 heightmap `core.terrain` would export to Isaac, so an episode's landing
 site is the same tile geometry either backend would see.
 
-Observation matches the sensor suite this vehicle actually has: IMU
+Observation is 20 wide. Sixteen slots are what the vehicle can sense: IMU
 (attitude quaternion + angular velocity), a radar/LiDAR-style altitude,
-DPS/RCS propellant remaining, and per-leg touchdown load -- see
-`_observation`. `use_lidar_obs` appends a ring of downward-ish LiDAR
-ranges on top of that for terrain-relative sensing.
+pad-relative position, velocity, DPS/RCS propellant remaining, and the
+fraction of the episode clock left. The last four are GUIDANCE, not
+sensing -- the velocity error against `reward.target_velocity` and the
+time-to-go, following arXiv:1810.08719, so the policy closes a loop on an
+already-computed error instead of rediscovering the guidance law. See
+`_observation`, and `lunarsim/rl/obs_norm.py` for the slot list and scales.
+`use_lidar_obs` appends a ring of downward-ish LiDAR ranges on top of that
+for terrain-relative sensing.
 
 `spawn_horizontal_speed_m_s` (a (low, high) range, default (0, 0)) sets an
 initial horizontal speed aimed from the spawn point toward
@@ -63,7 +68,7 @@ from gymnasium import spaces
 from lunarsim.core.terrain.generate import Tile
 from lunarsim.core.terrain.rocks import sample_height_at
 from lunarsim.core.vehicle.apollo_lm import ApolloLMSpecs, G0, leg_force_bounds_n, moment_of_inertia
-from lunarsim.rl.obs_norm import normalize_obs
+from lunarsim.rl.obs_norm import OBS_SCALE, guidance_obs, normalize_obs, resolve_reward_weights
 from lunarsim.rl.action_map import action_to_throttle
 
 _SPECS = ApolloLMSpecs()
@@ -182,6 +187,7 @@ class AnalyticLanderEnv(gym.Env):
         lidar_n_rays: int = 8,
         seed: int | None = None,
         tile_fn: Optional[Callable[[np.random.Generator], Tile]] = None,
+        reward_weights=None,
     ):
         """`tile` is a fixed terrain tile reused for every episode (the
         original behavior, still the default for a single fixed map).
@@ -202,13 +208,18 @@ class AnalyticLanderEnv(gym.Env):
             from lunarsim.rl.reward import default_reward_fn
             reward_fn = default_reward_fn
         self.reward_fn = reward_fn
+        # The weights obs 16-19 are built from. Picked up off `reward_fn` so the
+        # observation's guidance field and the reward's are the same object by
+        # default; see `obs_norm.resolve_reward_weights`.
+        self.reward_weights = resolve_reward_weights(reward_fn, reward_weights)
         self.use_lidar_obs = use_lidar_obs
         self.lidar_n_rays = lidar_n_rays
         self._rng = np.random.default_rng(seed)
 
         # [relx, rely, alt, vx, vy, vz, qw, qx, qy, qz, wx, wy, wz,
-        #  fuel_frac, rcs_fuel_frac, leg_force_frac]
-        obs_dim = 16 + (lidar_n_rays if use_lidar_obs else 0)
+        #  fuel_frac, rcs_fuel_frac, time_remaining_frac,
+        #  vx-vx_t, vy-vy_t, vz-vz_t, t_go]
+        obs_dim = len(OBS_SCALE) + (lidar_n_rays if use_lidar_obs else 0)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
         # [throttle, pitch_cmd, roll_cmd, yaw_cmd] all in [-1, 1]
         # throttle scales the DPS between dps_thrust_min_n/dps_thrust_max_n
@@ -444,10 +455,19 @@ class AnalyticLanderEnv(gym.Env):
             # ~11% slack, so "how long have I got" is decision-relevant rather
             # than academic.
             #
-            # Reusing the dead slot keeps the observation 16-wide, so existing
-            # checkpoints still load.
+            # Reusing the dead slot kept the observation 16-wide, so existing
+            # checkpoints still loaded -- which is exactly how a 22% -> 5% drop
+            # got attributed to the wrong change for days. The four slots below
+            # are APPENDED for that reason: a width change is a loud failure.
             max(0.0, 1.0 - self._t / p.max_episode_s),
         ]
+        # 16-19: velocity error against the guidance field, and t_go.
+        # `s["z"] - ground_z` is the same altitude `info["altitude_m"]` and the
+        # termination test use, so the field is evaluated at one definition of
+        # "altitude" everywhere.
+        obs.extend(guidance_obs(self.reward_weights, s["z"] - ground_z,
+                                 s["x"] - p.target_x, s["y"] - p.target_y,
+                                 s["vx"], s["vy"], s["vz"]))
         if self.use_lidar_obs:
             obs.extend(self._lidar_ranges())
         return normalize_obs(np.array(obs, dtype=np.float32))

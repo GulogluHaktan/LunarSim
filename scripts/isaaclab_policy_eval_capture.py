@@ -5,8 +5,9 @@ gravity PhysX physics) -- but this time a trained SAC checkpoint
 (`--checkpoint`, a stable_baselines3 `.zip`, e.g. one of
 `out/sac_training_run/sac_lunar_lander_isaac_<stage>.zip`) actually FLIES
 the vehicle: every physics step, a real observation is built (the exact
-16-float layout `lunarsim.adapters.isaac.isaac_lander_env.IsaacLanderEnv`
-trains against), the policy picks an action, and real DPS/RCS forces are
+20-float layout `lunarsim.adapters.isaac.isaac_lander_env.IsaacLanderEnv`
+trains against -- see `lunarsim/rl/obs_norm.py` for the slot list), the
+policy picks an action, and real DPS/RCS forces are
 applied from it -- unlike the uncontrolled-descent capture script, this one
 can actually show a soft landing (or an early/mid-training crash), which is
 the point: this is what periodic "how is training going" review footage
@@ -95,9 +96,9 @@ sys.path.insert(0, args_cli.lunarsim_root)
 from stable_baselines3 import SAC  # noqa: E402
 
 from lunarsim.adapters.isaac.heightfield import (
-from lunarsim.rl.action_map import action_to_throttle  # noqa: E402
     add_heightfield_collision, apply_regolith_physics_material, build_render_mesh,
 )
+from lunarsim.rl.action_map import action_to_throttle  # noqa: E402
 from lunarsim.adapters.isaac.isaac_lander_env import (
     TOUCHDOWN_CONTACT_EPS_M, _quat_to_euler, collision_mesh_height_at, contact_clearance_m,
     out_of_tile,
@@ -119,7 +120,14 @@ from lunarsim.core.vehicle.apollo_lm import ApolloLMSpecs, G0, moment_of_inertia
 from lunarsim.rl import LanderParams
 from lunarsim.rl.curriculum import Stage as CurriculumStage
 from lunarsim.rl.curriculum import terrain_config as curriculum_terrain_config
-from lunarsim.rl.obs_norm import normalize_obs
+from lunarsim.rl.obs_norm import guidance_obs, normalize_obs
+from lunarsim.rl.reward import RewardWeights
+
+# The weights the guidance-field observation slots (16-19) are built from.
+# This script evaluates checkpoints trained against `default_reward_fn`, which
+# uses the defaults; if a run ever trains on tuned weights, this has to be the
+# same object or the policy is shown a different field than it was paid for.
+_OBS_REWARD_WEIGHTS = RewardWeights()
 
 
 def _lidar_pose_columns(pc):
@@ -501,12 +509,25 @@ with open(telemetry_path, "w", newline="") as tf, \
             roll, pitch, specs.height_m / 2.0, specs.footpad_span_m / 2.0)
         belly_z = float(pos_w[2]) - specs.height_m / 2.0
 
+        # SLOT 15 was a hardcoded 0.0 here long after both training envs had
+        # repurposed it to carry time-remaining -- a silent train/eval skew in
+        # the one script that builds this vector by hand. Fixed with the 16 ->
+        # 20 widening, and the clock is the SAME budget the timeout test below
+        # uses (`args_cli.max_episode_s`), not the `LanderParams` default.
+        t_s_now = step * sim_dt
         obs = np.array([
             pos_w[0] - p.target_x, pos_w[1] - p.target_y, alt_m,
             float(lin_vel_w[0]), float(lin_vel_w[1]), float(lin_vel_w[2]),
             qw, qx, qy, qz,
             float(ang_vel_w[0]), float(ang_vel_w[1]), float(ang_vel_w[2]),
-            fuel_kg / p.initial_fuel_kg, rcs_fuel_kg / p.initial_rcs_fuel_kg, 0.0,
+            fuel_kg / p.initial_fuel_kg, rcs_fuel_kg / p.initial_rcs_fuel_kg,
+            max(0.0, 1.0 - t_s_now / max(args_cli.max_episode_s, 1e-6)),
+            # 16-19: velocity error against the guidance field, and t_go --
+            # built by the same `guidance_obs` the three envs call, at the same
+            # `alt_m` (`contact_clearance_m`) the training envs use.
+            *guidance_obs(_OBS_REWARD_WEIGHTS, alt_m,
+                          pos_w[0] - p.target_x, pos_w[1] - p.target_y,
+                          float(lin_vel_w[0]), float(lin_vel_w[1]), float(lin_vel_w[2])),
         ], dtype=np.float32)
         obs = normalize_obs(obs)
 

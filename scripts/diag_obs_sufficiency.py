@@ -1,4 +1,8 @@
-"""Is the controller's action a function of the 16-dim observation?
+"""Is the controller's action a function of the observation?
+
+(The observation is whatever width the demo file carries -- 16 before the
+2026-10-07 widening, 20 after it; this script reads `obs.shape[1]` and never
+assumes.)
 
 This bounds everything else. The controller lands 92% on ramp_35m; a behaviour
 clone of it lands 50.5%; and no RL configuration tried so far exceeds the clone.

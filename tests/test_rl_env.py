@@ -5,6 +5,7 @@ from lunarsim.core.terrain.config import TerrainConfig
 from lunarsim.core.terrain.generate import generate_tile
 from lunarsim.rl import AnalyticLanderEnv, LanderParams
 from lunarsim.rl.action_map import throttle_to_action
+from lunarsim.rl.obs_norm import OBS_SCALE
 
 
 def _flat_tile():
@@ -238,8 +239,13 @@ def test_lidar_obs_changes_dimensionality():
     env_lidar = AnalyticLanderEnv(_flat_tile(), use_lidar_obs=True, lidar_n_rays=6, seed=0)
     obs1, _ = env_no_lidar.reset(seed=0)
     obs2, _ = env_lidar.reset(seed=0)
-    assert obs1.shape[0] == 16
-    assert obs2.shape[0] == 22
+    # 20, not 16: the base layout gained the four guidance-field slots
+    # (velocity error vs. `reward.target_velocity`, plus t_go) on 2026-10-07.
+    # Pinned against both the literal and `OBS_SCALE`, because the two drifting
+    # apart is what would silently mis-normalise every observation.
+    assert len(OBS_SCALE) == 20
+    assert obs1.shape[0] == 20
+    assert obs2.shape[0] == 20 + 6
 
 
 def test_yaw_rotates_the_thrust_direction():

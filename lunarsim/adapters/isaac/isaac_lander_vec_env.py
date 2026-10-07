@@ -53,7 +53,7 @@ from lunarsim.core.terrain.rocks import sample_height_at
 from lunarsim.rl.action_map import action_to_throttle
 from lunarsim.core.vehicle.apollo_lm import ApolloLMSpecs, G0, leg_force_bounds_n, moment_of_inertia
 from lunarsim.rl.analytic_lander_env import LanderParams, _euler_to_quat
-from lunarsim.rl.obs_norm import normalize_obs
+from lunarsim.rl.obs_norm import OBS_SCALE, guidance_obs, normalize_obs, resolve_reward_weights
 from lunarsim.adapters.isaac.isaac_lander_env import (
     TOUCHDOWN_CONTACT_EPS_M, _quat_to_euler, _REPO_ROOT, collision_mesh_height_at,
     contact_clearance_m, out_of_tile,
@@ -90,6 +90,7 @@ class IsaacLanderVecEnv(VecEnv):
         seed: int | None = None,
         lunarsim_root=None,
         max_rocks_per_env: int = 10,
+        reward_weights=None,
     ):
         self.tile_fn = tile_fn
         self.params = params or LanderParams()
@@ -98,13 +99,16 @@ class IsaacLanderVecEnv(VecEnv):
             from lunarsim.rl.reward import default_reward_fn
             reward_fn = default_reward_fn
         self.reward_fn = reward_fn
+        # The weights obs 16-19 are built from -- taken off `reward_fn` so the
+        # observation's guidance field and the reward's cannot differ.
+        self.reward_weights = resolve_reward_weights(reward_fn, reward_weights)
         self.env_spacing_m = env_spacing_m
         self._rng = np.random.default_rng(seed)
         self._specs = ApolloLMSpecs()
         self._half_height_m = self._specs.height_m / 2.0
         self._lunarsim_root = lunarsim_root or _REPO_ROOT
 
-        obs_dim = 16
+        obs_dim = len(OBS_SCALE)
         observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
         action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
         super().__init__(num_envs, observation_space, action_space)
@@ -326,10 +330,24 @@ class IsaacLanderVecEnv(VecEnv):
             # ~11% slack, so "how long have I got" is decision-relevant rather
             # than academic.
             #
-            # Reusing the dead slot keeps the observation 16-wide, so existing
-            # checkpoints still load.
+            # Reusing the dead slot kept the observation 16-wide, so existing
+            # checkpoints still loaded -- which is exactly how a 22% -> 5% drop
+            # got attributed to the wrong change for days. The four slots below
+            # are APPENDED for that reason: a width change is a loud failure.
             max(0.0, 1.0 - float(self._t[i]) / p.max_episode_s),
         ]
+        # 16-19: velocity error against the guidance field, and t_go. Built
+        # per-env, which is already how this whole observation is built (the
+        # batch is `np.stack([_obs_one(i) ...])`) -- `_contact(i)` is a
+        # per-env heightfield lookup, so there is nothing to vectorise here
+        # that is not already serial. `clearance_m` is the same altitude
+        # `info["altitude_m"]` and the termination test use, and the pad
+        # offsets carry the ENV ORIGIN correction, exactly as slots 0-1 do.
+        obs.extend(guidance_obs(
+            self.reward_weights, clearance_m,
+            s["x"][i] - (self.env_origins[i][0] + p.target_x),
+            s["y"][i] - (self.env_origins[i][1] + p.target_y),
+            s["vx"][i], s["vy"][i], s["vz"][i]))
         return normalize_obs(np.array(obs, dtype=np.float32))
 
     def _write_mass_inertia_all(self):
@@ -523,6 +541,19 @@ class IsaacLanderVecEnv(VecEnv):
                 "t_s": self._t[i],
             }
             scalar_state = {k: s[k][i] for k in _STATE_FIELDS}
+            # PAD-RELATIVE x/y, not world x/y. The envs are laid out side by
+            # side at `env_spacing_m` along +x, so world x for env i carries an
+            # `env_origins[i][0]` offset -- i*200 m by default. A single-env
+            # `reward_fn` computes its pad offset as `s["x"] - p.target_x` with
+            # no knowledge of that, so env 7 was handed a 1400 m offset from a
+            # pad it was in fact sitting on. It is latent today (the current
+            # velocity field takes dx/dy and ignores them) and was NOT latent
+            # when the field had a lateral aim point. Correcting it here makes
+            # the reward read the same offsets that observation slots 0-1 and
+            # 16-17 are built from, which is the property the whole
+            # guidance-field observation depends on.
+            scalar_state["x"] = scalar_state["x"] - self.env_origins[i][0]
+            scalar_state["y"] = scalar_state["y"] - self.env_origins[i][1]
             view = _EnvView(p, scalar_state)
             rewards[i] = self.reward_fn(view, info)
             done = terminated or truncated

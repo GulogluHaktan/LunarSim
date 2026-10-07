@@ -58,7 +58,7 @@ from lunarsim.core.terrain.generate import Tile
 from lunarsim.core.vehicle.apollo_lm import ApolloLMSpecs, G0, leg_force_bounds_n, moment_of_inertia
 from lunarsim.rl.analytic_lander_env import LanderParams, _euler_to_quat
 from lunarsim.rl.action_map import action_to_throttle
-from lunarsim.rl.obs_norm import normalize_obs
+from lunarsim.rl.obs_norm import OBS_SCALE, guidance_obs, normalize_obs, resolve_reward_weights
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -253,30 +253,49 @@ class IsaacLanderEnv(gym.Env):
         seed: int | None = None,
         lunarsim_root: str | Path | None = None,
         legacy_obs15: bool = False,
+        legacy_obs16: bool = False,
+        reward_weights=None,
     ):
         super().__init__()
         self.tile = tile
-        # OBSERVATION VINTAGE. Slot 15 was `leg_force_frac`, hardcoded 0.0 in
-        # every env -- a dead input. It now carries time-remaining. That keeps
-        # the vector 16-wide so old checkpoints LOAD, which is convenient and
-        # also a trap: a policy trained when the slot was always 0 has arbitrary
-        # weights on it, and feeding it a 1.0 -> 0.0 ramp changes its behaviour
-        # with no warning and no space-check failure. Set this to evaluate a
-        # pre-change checkpoint on the input it was actually trained with, so a
-        # measured difference can be attributed to the thing under test rather
-        # than to the slot.
+        # OBSERVATION VINTAGE. Explicit, opt-in, and never the default: the live
+        # layout is 20-wide and these two flags reproduce the two historical
+        # 16-wide ones so a pre-widening checkpoint can be evaluated on the
+        # input it was actually trained with.
+        #
+        #   legacy_obs15  slot 15 = 0.0, 16 wide. The ORIGINAL vintage, when
+        #       slot 15 was a `leg_force_frac` hardcoded to 0.0 in every env.
+        #   legacy_obs16  slot 15 = time-remaining, 16 wide. The vintage after
+        #       that dead slot was repurposed.
+        #
+        # Why the flag had to change meaning here: it used to only zero slot 15
+        # while the vector stayed 16 wide, because keeping the WIDTH is what let
+        # the old checkpoint load at all. That is also precisely the trap -- a
+        # policy trained when the slot was always 0 has arbitrary weights on it,
+        # and feeding it a 1.0 -> 0.0 ramp changed its behaviour with no warning
+        # and no space-check failure (measured: 22% -> 5%, misattributed for
+        # days). Now that the live vector is 20 wide, a 16-dim checkpoint is
+        # rejected on shape, which is the desired loud failure; so for the flag
+        # to still do its job it must emit the whole 16-wide vector, and
+        # `observation_space` must say 16 as well.
+        if legacy_obs15 and legacy_obs16:
+            raise ValueError("legacy_obs15 and legacy_obs16 are mutually exclusive")
         self.legacy_obs15 = bool(legacy_obs15)
+        self.legacy_obs16 = bool(legacy_obs16)
         self.params = params or LanderParams()
         if reward_fn is None:
             from lunarsim.rl.reward import default_reward_fn
             reward_fn = default_reward_fn
         self.reward_fn = reward_fn
+        # The weights obs 16-19 are built from -- taken off `reward_fn` so the
+        # observation's guidance field and the reward's cannot differ.
+        self.reward_weights = resolve_reward_weights(reward_fn, reward_weights)
         self._rng = np.random.default_rng(seed)
         self._specs = ApolloLMSpecs()
         self._half_height_m = self._specs.height_m / 2.0
         self._lunarsim_root = Path(lunarsim_root) if lunarsim_root is not None else _REPO_ROOT
 
-        obs_dim = 16
+        obs_dim = 16 if (self.legacy_obs15 or self.legacy_obs16) else len(OBS_SCALE)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
         # [throttle, pitch_cmd, roll_cmd, yaw_cmd] all in [-1, 1] -- same as AnalyticLanderEnv
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
@@ -628,10 +647,19 @@ class IsaacLanderEnv(gym.Env):
             # ~11% slack, so "how long have I got" is decision-relevant rather
             # than academic.
             #
-            # Reusing the dead slot keeps the observation 16-wide, so existing
-            # checkpoints still load.
+            # Reusing the dead slot kept the observation 16-wide, so existing
+            # checkpoints still loaded -- which is exactly how a 22% -> 5% drop
+            # got attributed to the wrong change for days. The four slots below
+            # are APPENDED for that reason: a width change is a loud failure.
             0.0 if self.legacy_obs15 else max(0.0, 1.0 - self._t / p.max_episode_s),
         ]
+        if not (self.legacy_obs15 or self.legacy_obs16):
+            # 16-19: velocity error against the guidance field, and t_go.
+            # Evaluated at `clearance_m` -- the same altitude definition
+            # `info["altitude_m"]` and the termination test use.
+            obs.extend(guidance_obs(self.reward_weights, clearance_m,
+                                     s["x"] - p.target_x, s["y"] - p.target_y,
+                                     s["vx"], s["vy"], s["vz"]))
         return normalize_obs(np.array(obs, dtype=np.float32))
 
     def close(self):

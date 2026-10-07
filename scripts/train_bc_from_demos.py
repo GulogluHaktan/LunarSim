@@ -140,6 +140,21 @@ def main():
     if len(obs) == 0:
         raise SystemExit("no transitions left after filtering -- no demo episode landed")
 
+    # STALE DEMOS ARE A LOUD FAILURE HERE. `_Spaces` below takes the observation
+    # width from the FILE, so a clone trained on a pre-2026-10-07 16-wide .npz
+    # would build a 16-input actor that trains, validates and saves perfectly
+    # well, and only fails much later -- or, worse, gets evaluated against a
+    # 20-wide env and silently reads nonsense. The last time this project let a
+    # stale observation load without complaint it cost days of misattribution,
+    # so refuse here with the recollection command rather than infer a width.
+    from lunarsim.rl.obs_norm import OBS_SCALE
+    if obs.shape[1] != len(OBS_SCALE):
+        raise SystemExit(
+            f"demo observations are {obs.shape[1]}-wide but the live layout is "
+            f"{len(OBS_SCALE)}-wide (lunarsim/rl/obs_norm.py). These demos predate an "
+            f"observation change; re-record them with "
+            f"scripts/collect_zemzev_demos.py before cloning.")
+
     # The demo actions were recorded in the env's action space, so they are
     # already in [-1, 1]; clipping guards a boundary value that would make
     # atanh infinite below.
