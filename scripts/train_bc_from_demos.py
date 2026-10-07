@@ -81,6 +81,15 @@ parser.add_argument("--gain-check", action="store_true", default=True,
                          "cannot see it (0.068 MSE / 0.0485 mean error coexisted with "
                          "a +0.129 gain and a 4%% landing rate).")
 parser.add_argument("--no-gain-check", dest="gain_check", action="store_false")
+parser.add_argument("--net-arch", type=int, nargs="+", default=None,
+                     help="hidden layer sizes for the actor, e.g. --net-arch 512 512. "
+                          "Default is SB3's [256, 256], which MEASURABLY limits the fit: "
+                          "against the irreducible conditional action spread (the floor set "
+                          "by how well the observation determines the controller's action, "
+                          "measured at 0.079 of the marginal spread), [256,256] plateaus at "
+                          "4.3-4.6x the floor by epoch 500-600 while [512,512] reaches 3.2x "
+                          "at 600 and is still improving, with train 0.069 against val 0.079 "
+                          "-- almost no overfitting, so the data supports more capacity.")
 parser.add_argument("--device", type=str, default="cpu")
 parser.add_argument("--seed", type=int, default=0)
 args = parser.parse_args()
@@ -157,8 +166,11 @@ def main():
             return np.zeros(obs.shape[1], np.float32), 0.0, False, False, {}
 
     torch.manual_seed(args.seed)
+    policy_kwargs = {"net_arch": list(args.net_arch)} if args.net_arch else {}
     model = SAC("MlpPolicy", _Spaces(), device=args.device, verbose=0,
-                seed=args.seed)
+                seed=args.seed, policy_kwargs=policy_kwargs)
+    if args.net_arch:
+        print(f"[bc] actor net_arch={list(args.net_arch)}", flush=True)
     actor = model.policy.actor
 
     # Fit the PRE-TANH mean, not the squashed action. SAC's actor emits an
