@@ -109,6 +109,20 @@ parser.add_argument("--bc-anchor", type=float, default=None,
                           "policy dies in ONE 10k-step window under Adam and under SGD "
                           "alike, because nothing holds it anywhere. The anchor holds the "
                           "MEAN network only; see --bc-anchor-log-std.")
+parser.add_argument("--cql-alpha", type=float, default=0.0,
+                     help="weight on CQL's conservative critic term (arXiv:2006.04779, "
+                          "CQL(H) continuous form). 0 disables it and the run is plain "
+                          "SAC. Added because the measured failure is a CRITIC error, not "
+                          "an actor one: with --bc-anchor 1e-3 the policy died in one 10k "
+                          "window while Q read +1 to +6 and the true shaped return was -10 "
+                          "to -45 -- wrong in SIGN -- at critic_loss 0.2-2.3, i.e. no "
+                          "divergence, just confident nonsense about the actions the actor "
+                          "had begun proposing. Twenty-two actor-side interventions could "
+                          "not fix that because a trust region only shortens the walk; it "
+                          "cannot correct what Q says at the end of it.")
+parser.add_argument("--cql-n-samples", type=int, default=10,
+                     help="actions sampled per state for the CQL logsumexp, half from the "
+                          "policy and half uniform over the action box.")
 parser.add_argument("--bc-anchor-log-std", action="store_true",
                      help="also hold the actor's log_std head in the trust region. OFF by "
                           "default because it was silently ON for this project's first "
@@ -261,6 +275,18 @@ sys.path.insert(0, args.lunarsim_root)
 
 from stable_baselines3 import SAC
 from stable_baselines3.common.utils import FloatSchedule  # noqa: E402
+
+
+def _sac_class(args):
+    """CQLSAC when a conservative term is asked for, plain SAC otherwise.
+
+    Kept as a swap rather than a flag inside SAC so that a run with --cql-alpha 0
+    is bit-identical to every earlier result in this project.
+    """
+    if getattr(args, "cql_alpha", 0.0) and args.cql_alpha > 0.0:
+        from lunarsim.rl.cql_sac import CQLSAC
+        return CQLSAC
+    return SAC
 
 def _expand_critic_ensemble(old_model, venv, args, n_critics):
     """Warm start into a LARGER critic ensemble without losing the actor.
@@ -542,7 +568,15 @@ def main():
         first_model_creation = model is None
         if model is None:
             if args.warm_start:
-                model = SAC.load(args.warm_start, env=venv, device=args.torch_device)
+                _cls = _sac_class(args)
+                model = _cls.load(args.warm_start, env=venv, device=args.torch_device)
+                if _cls is not SAC:
+                    # `load` does not call __init__, so these carry the defaults
+                    # from the class body until set here.
+                    model.cql_alpha = float(args.cql_alpha)
+                    model.cql_n_samples = int(args.cql_n_samples)
+                    print(f"[cql] conservative critic term active, alpha={args.cql_alpha}, "
+                          f"n_samples={args.cql_n_samples}", flush=True)
                 if len(model.critic.q_networks) != args.n_critics:
                     model = _expand_critic_ensemble(model, venv, args, args.n_critics)
                 # SAC.load does NOT restore a replay buffer, so without this the
@@ -672,11 +706,15 @@ def main():
                 # the slower of the two by 2x -- the stable ordering. This
                 # is an independent divergence driver from the entropy
                 # runaway and pinning alpha does not address it.
-                model = SAC("MlpPolicy", venv, verbose=1, device=args.torch_device,
+                _cls = _sac_class(args)
+                _extra = ({"cql_alpha": args.cql_alpha,
+                           "cql_n_samples": args.cql_n_samples}
+                          if _cls is not SAC else {})
+                model = _cls("MlpPolicy", venv, verbose=1, device=args.torch_device,
                              gamma=args.gamma, gradient_steps=args.gradient_steps,
                              tau=args.tau, ent_coef=_parse_ent_coef(args.ent_coef),
                              learning_rate=args.learning_rate,
-                             policy_kwargs={"n_critics": args.n_critics})
+                             policy_kwargs={"n_critics": args.n_critics}, **_extra)
                 if args.layer_norm:
                     from lunarsim.rl.plasticity import add_layer_norm_to_sac
                     n_ln = add_layer_norm_to_sac(model)
