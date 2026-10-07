@@ -3462,3 +3462,61 @@ needs both policies in the SAME run matrix -- same episode count, same seed bloc
 same terrain seed -- and the provenance string printed on every line exists so
 that this can be checked. It was printed correctly the whole time. I did not read
 it.
+
+## Corrections to the two findings above, and the lead that survives them
+
+Checked against v55's actual launch command rather than against what the
+checkpoints seemed to imply:
+
+```
+  --gamma 0.995 --max-rocks-per-env 0 --ent-coef 0.005
+  --learning-rate 3e-4 --actor-lr 3e-5 --bc-anchor 1e-2
+  --reward-weight reward_total_scale=0.1
+  --log-std-max 0.0 --onpolicy-warmup --critic-only-steps 40000
+```
+
+**WRONG: "ent_coef auto-tuning collapsed 1.0 -> 0.005."** `--ent-coef` is an
+explicit flag and v55 passed `0.005` deliberately. Nothing collapsed. The 1.0 read
+off the clone is simply the BC script's default on a model that was never
+SAC-trained. I inferred a mechanism from two checkpoint values without checking
+the command that produced them.
+
+**WRONG for v55: the training/eval rock mismatch.** v55 ran
+`--max-rocks-per-env 0`, so training had no rocks and neither does the evaluator.
+They match. The vec env's default is 10, which is where the claim came from, but
+this run overrode it.
+
+**STANDS: log_std was pinned.** That was measured directly off four checkpoints
+(bias -2.647 -> -2.645, head |W| ~5e-4, std identical to three decimals after
+410k steps). The anchor did hold it; only the ent_coef story around it was wrong.
+
+**STANDS: the terrain mismatch.** `train_sac_isaac.py` sets
+`venv.tile_fn = make_tile_fn(stage, ...)`, a fresh terrain per episode, while the
+evaluator builds one fixed tile and cannot do otherwise.
+
+### The lead that survives, and it explains the corrected numbers
+
+`--bc-anchor 1e-2` gives a pull half-life of **69 actor updates**:
+
+```
+  beta     half-life (actor updates)
+  1e-2            69
+  3e-3           231
+  1e-3           693
+  3e-4          2310
+```
+
+This file's own BCAnchorCallback docstring names 1e-3 (~700 updates) as the
+setting where "the policy can move but cannot run." Every anchored run in this
+project used 1e-2, ten times tighter -- any deviation the actor makes is pulled
+halfway back to the clone within 69 updates, for 410k steps.
+
+So the corrected measurement is not a mystery, it is the expected result: RL at
+53% against the clone's 55% because **the anchored policy essentially IS the
+clone.** The sequence was: no anchor -> collapse to 0%; anchor at 1e-2 -> frozen
+at the warm start. Both ends of the same knob, and the middle was never tried.
+
+That makes the next experiment a single-variable sweep of exactly the parameter
+TD3+BC calls alpha and reports as needing tuning: beta in {1e-3, 3e-3}, with
+log_std now free, from the same clone, measured against the clone at 96 episodes
+on the SAME seed block.
