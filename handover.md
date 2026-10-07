@@ -3552,3 +3552,56 @@ crash and 5 timeout, reproducing an earlier independent run exactly, breakdown
 included. Run-to-run variation is not a confound here; it was worth checking,
 because if it had been one then every comparison in this file would have carried
 unquantified noise.
+
+## v56 (beta=1e-3): collapses in ONE window, and shows WHY
+
+310k steps in 22 minutes (these runs are far cheaper than assumed -- the sweep
+cost is not a reason to test one beta at a time).
+
+```
+  step  50000  landed 47.4%  proxy  14.07  Q~-2  critic=0.2   <- actor frozen: the clone
+        [freeze] actor released at step 50000
+  step  60000  landed  0.0%  proxy -10.03  Q~+1  critic=0.6
+  step  70000  landed  0.0%  proxy -10.56  Q~+2  critic=0.7
+  step  80000  landed  0.0%  proxy -21.08  Q~+5  critic=2.3
+  step  90000  landed  0.0%  proxy -44.83  Q~+6  critic=2.3
+  ... peaks 23.1% at 230k, mostly 0-11%, ends 0.0%
+```
+
+So the knob's two ends are both characterized, on the same config, one variable
+apart:
+
+```
+  beta    half-life   outcome
+  1e-2       69       frozen at the warm start: 53% vs clone 55%, no learning
+  1e-3      693       dead in one 10k window (625 actor updates)
+```
+
+0/21, then 0/28, then 0/41 consecutively is not a small-sample artifact; a 47%
+policy does not produce that.
+
+### The measured reason, which is not the anchor at all
+
+In the death window Q is POSITIVE (+1 -> +6) while the true shaped return is
+-10 -> -45. Inconsistent in sign, not just magnitude. And critic_loss stays at
+0.2-2.3 throughout, so this is not the divergence that earlier runs showed -- the
+critic is confidently, quietly wrong about the actions the actor has just started
+proposing. The actor follows that gradient and competence is gone in 625 updates.
+
+That makes every anchor experiment in this file a PARAMETER-SPACE remedy for a
+VALUE-FUNCTION error. Constraining how far the actor may walk cannot fix a critic
+that misranks the actions at the end of the walk; it can only slow the walk down,
+which is exactly the all-or-nothing behaviour the two beta ends show.
+
+The literature's answer to this specific failure -- a warm-started policy
+degrading at the start of online finetuning because the critic's values on
+out-of-distribution actions mislead the actor -- is a conservative or calibrated
+critic: Cal-QL (arXiv:2303.05479), CQL behind it. Both were already in
+`rl-cokus-literatur-taramasi.md` as relevant and neither was ever implemented,
+because 22 interventions went into the actor instead.
+
+**Precision about an earlier claim:** the commit "exonerate overestimation"
+cleared ONE mechanism, time-limit bootstrapping, on runs at gamma 0.998 where Q
+ran to +100 and +1972. It did not clear overestimation in general, and this is
+different evidence in a different window: a bounded, low-loss critic whose sign is
+wrong exactly while the policy dies.
