@@ -244,3 +244,137 @@ SAC / tanh doygunluk:
 28. Shen, Zhou, Yu (2022). *Real-time computational powered landing guidance using convex optimization and neural networks*. arXiv:2210.07480
 29. Capolupo & Rinalducci (2023). *Descent & Landing Trajectory and Guidance Algorithms with Divert Capabilities for Moon Landing* (ESA Argonaut). arXiv:2305.13846
 30. Kumar, Chakrabarti, Rallapalli, Kumar, Kakula (2026). *Real-Time Retargeting Using Controllability Boundary for Chandrayaan-3 Lunar Landing*. arXiv:2605.29412
+
+# ================================================================
+# HOW THE CLOSEST PUBLISHED WORK ACTUALLY SHAPES THIS PROBLEM
+# Gaudet, Linares, Furfaro -- arXiv:1810.08719
+# "Deep RL for Six Degree-of-Freedom Planetary Powered Descent and Landing"
+# ================================================================
+
+Same problem class: 6-DOF powered descent to a soft, upright, low-rate touchdown
+with position/velocity/attitude/rate limits. They use PPO rather than SAC, but the
+reward and value-scaling decisions are the transferable part, and five of them differ
+from ours in ways that line up with exactly where this project is stuck.
+
+## 1. The shaping term is a VELOCITY FIELD to track, not a speed limit
+
+```
+  v_targ = -v_o * (r_hat/||r_hat||) * (1 - exp(-t_go/tau))
+  t_go   = ||r_hat|| / ||v_hat||
+
+           r_hat = r - [0,0,15]      if r_z > 15   else [0,0,r_z]
+           v_hat = v - [0,0,-2]      if r_z > 15   else v - [0,0,-1]
+           tau   = tau_1 = 20 s      if r_z > 15   else tau_2 = 100 s
+
+  reward term:  alpha * ||v - v_targ||,   alpha = -0.01
+```
+
+Above 15 m they aim at a point 15 m over the pad with a target vz of -2 m/s; below
+15 m the lateral target velocity is set to ZERO so the descent becomes vertical, with
+a target vz of -1 m/s. The magnitude decays as t_go shrinks, which is what makes the
+touchdown soft. They note the vertical-descent target has the side effect of keeping
+attitude level with small rates -- the attitude criteria come for free from the
+velocity field rather than from attitude penalties.
+
+**This is the biggest single difference from ours, and it is the one that matters.**
+Our descent term is an ENVELOPE -- a speed limit with zero penalty inside it. Measured
+on our own weights: at alt 10 m the envelope is 2.47 m/s and the penalty at
+vz = -1.00, -2.00, -2.47 is 0.0000, 0.0000, 0.0000. So inside the envelope the agent
+is told nothing about how to descend; it only meets a wall when it dives too fast.
+A velocity field has a gradient EVERYWHERE and always names a specific velocity to
+hold. That is the difference between "do not cross this line" and "here is what to do",
+and it is the same barrier-versus-gradient distinction that the dense-term audit found
+in the tilt and angular-rate terms.
+
+## 2. The terminal bonus is SMALLER than the dense shaping
+
+```
+  Table 5:  alpha=-0.01  beta=-0.05  gamma=-100  delta=-20  eta=+0.01  kappa=10
+```
+
+kappa = 10 for a successful landing. The tracking term at a ~5 m/s velocity error
+costs 0.05/step, about 20 over a 400-step episode. So terminal/dense is roughly 0.5 --
+the dense shaping is TWICE the terminal.
+
+Ours, measured: terminal 351-450 against a dense shaping sum of 32.4, i.e. 10.8x the
+wrong way. After the continuous-terminal change it is 3.7x -- still an order of
+magnitude from the published balance. The redesign was in the right direction and far
+too timid, and it confirms the correction already recorded in handover.md: lowering the
+terminal was only half the change, the dense terms had to come UP.
+
+## 3. eta is a POSITIVE per-step reward, and the paper says why
+
+> "eta is a constant positive term that encourages the agent to keep making progress
+> along the trajectory. Since all other rewards are negative, without this term, an
+> agent would be incentivized to violate the attitude constraint and prematurely
+> terminate the episode to maximize the total discounted rewards received starting
+> from the initial state."
+
+eta = +0.01 per step. **We have the exact opposite:** a time PENALTY of
+time_k * reward_scale = 400 * 0.00025 = 0.1 per step, negative, and ten times larger
+in magnitude than their anti-self-termination bonus. So this project pays the agent to
+end the episode early, which is precisely the pathology it then measured: a crash cost
+-60 against a timeout's -105, and the RL policy converted 33 of the clone's timeouts
+into 23 crashes with the landing count unchanged. The reordering committed earlier
+treats the symptom; the sign of the per-step term is the cause.
+
+## 4. The observation carries the velocity ERROR, not raw position
+
+```
+  obs = [ v_error, q, omega, r_z, t_go ],   v_error = v - v_targ
+```
+
+> "Note that aside from the altitude, the lander translational coordinates do not
+> appear in the observation. This results in a policy with good generalization in that
+> the policy's behavior can extend to areas of the full state space that were not
+> experienced during learning."
+
+Ours feeds raw `x - target_x` and `y - target_y`. Theirs hands the policy an
+already-computed guidance error, so the network only has to learn a feedback law on
+that error rather than rediscover the entire guidance problem from raw state. Note
+this also means their policy cannot overfit to absolute position, which is relevant
+to our terrain-seed finding.
+
+## 5. Attitude is penalised only near loss of control
+
+delta = -20 on a hinge `-max(0, q_i - q_mgn_i)` with q_mgn = 5*pi/16 ~ 56 deg, and
+gamma = -100 one-shot at q_lim = 7*pi/16 ~ 79 deg. Nothing at all below 56 degrees.
+
+This independently corroborates backing out the dense tilt term: the controller here
+tilts 8-13 deg routinely to brake, and a term that charged it at the 15 deg touchdown
+criterion would have taxed the one maneuver that kills lateral velocity. The published
+design leaves tilt free through the whole working range.
+
+## 6. Value-function scaling
+
+> "For value function parameter learning, we use a heuristic that multiplies the
+> rewards accumulated over an episode by a factor of 1-gamma."
+
+Plus: observations scaled with incrementally-updated statistics ("avoiding
+discontinuities in the scaling statistics"), actions scaled so max thrust = 1, and
+"it is important to ensure that the magnitude of the neural network outputs are
+reasonably close to unity."
+
+We do none of the value-side scaling. At gamma=0.995 the factor is 0.005, and our
+measured Q values live at -7 to -41 -- nowhere near unity.
+
+## 7. Their terminal bonus IS a step function
+
+kappa is paid only when position, velocity, attitude AND rate are all inside their
+limits -- a hard step, exactly the shape this project replaced. That corroborates the
+v62 result rather than contradicting it: continuity was not what was broken. A step
+terminal works when the dense shaping carries the trajectory, which in their design it
+does, at twice the terminal's weight.
+
+## What this prescribes for us, in order of expected effect
+
+  1. Replace the descent ENVELOPE with a velocity-field tracking term. This is the
+     one that gives the agent something to climb at every step.
+  2. Flip the per-step time penalty to a small POSITIVE alive bonus.
+  3. Put v_error (and t_go) in the observation instead of raw target-relative position.
+  4. Rebalance so dense shaping exceeds the terminal, rather than 3.7x under it.
+  5. Scale the critic's targets by (1-gamma).
+
+1, 2 and 4 are reward-side and cheap. 3 changes the observation, so it invalidates
+every existing checkpoint and needs fresh demos -- schedule it deliberately, not as a
+side effect.
