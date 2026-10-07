@@ -3705,3 +3705,57 @@ worth remembering if robustness ever becomes the criterion.
 `reward_total_scale=0.1` while the evaluator uses the default 1.0, so eval returns
 (~183) and training proxy (~18) differ by that factor plus discounting. They are
 consistent; they are not the same units.
+
+## v62: the reward's 411-point step was NOT the cause of the collapse
+
+New continuous terminal, `--bc-anchor 1e-3`, everything else identical to v56 --
+the run that died in one 10k window. Verified the new reward was live before
+reading anything (v62 started 10:21:34, the reward commit landed 10:17:56).
+
+```
+  step  50000  landed 47.4%  proxy   0.53  Q~-2  critic=0.0   <- actor frozen: the clone
+  step  60000  landed  4.5%  proxy  -4.59  Q~-1  critic=0.0
+  step  70000  landed 16.0%  proxy  -5.01  Q~-1  critic=0.0
+  step  80000  landed 10.0%  proxy  -8.04  Q~-1  critic=0.1
+  step  90000  landed  7.4%  proxy -11.20  Q~-2  critic=0.1
+```
+
+It collapses and keeps getting worse. So the hypothesis that drove the reward
+redesign -- that a gradient method cannot climb the 411-point step, and that this is
+why the actor could only find "commit and crash" -- is REFUTED as the cause of the
+collapse. The step was real and the continuity fix stands on its own merits, but it
+is not what kills the policy.
+
+### What the same log says IS happening
+
+Q sits at -1 to -2 for the entire descent while the true return falls from +0.53 to
+-11.20. The critic overestimates the policy's own actions by ~10, so the actor never
+receives the signal that it is getting worse. Two earlier hypotheses die here too:
+
+  - NOT a constant critic. Measured on 4000 demo states, v62 at 60k has Q std 3.26
+    and |dQ/da| = 1.41, so there is a gradient; it points the wrong way.
+  - NOT the critic's SIGN error. Under the old reward Q read +1 to +6 against true
+    returns of -10 to -45. Here Q is correctly negative and the policy still dies,
+    so the sign error was a symptom of the old reward's scale, not the mechanism.
+
+The mechanism that survives every one of these tests is overestimation of the
+policy's own actions during the window after the actor is released, and the only
+intervention that has ever prevented the collapse is the one that targets exactly
+that: CQL's conservative term.
+
+```
+  checkpoint                Q mean    Q std    |dQ/da|
+  v62 60k (new reward)       -7.14     3.26      1.41
+  v56 60k (old reward)      -11.99    18.51      3.42
+  v59 260k (CQL, survived)  -40.99    30.30     65.99
+```
+
+### A correction to my own reward change
+
+Reducing the terminal from 450 to 120 without strengthening the dense shaping did
+half of the intended change. The terminal/shaping ratio improved (10.8x -> 3.7x) but
+the TOTAL return signal shrank about fourfold: the clone's proxy return went from
+~14 under the old reward to ~0.53 under the new one. The stated principle was that
+dense shaping should CARRY the path while the terminal only settles it, which calls
+for raising the dense terms, not only lowering the terminal. Uniform rescaling will
+not fix it either, since scaling the reward scales the critic's error with it.
