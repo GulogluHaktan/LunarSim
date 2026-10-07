@@ -434,7 +434,22 @@ class RewardWeights:
     vfield_vz_p: float = 0.431
     vfield_vz_floor_m_s: float = 0.80
 
-    alive_bonus: float = 500.0
+    # MUST stay below `vfield_k * vfield_vz_floor_m_s` = 500*0.80 = 400, and this was
+    # caught by a test rather than by reasoning. At 500 the bonus EXCEEDED the field's
+    # cost of a hover near the ground: holding station at 3 m paid +0.0152/step, so the
+    # agent had no local pressure to close the last few metres -- which is the exact
+    # recipe for the low-altitude stalling this project already measured as timeouts.
+    #
+    # The published relation (their eta = -alpha, balancing at a 1 m/s error) assumes the
+    # smallest target rate is at least 1 m/s. Our floor is 0.80 m/s, so the balance point
+    # has to sit below that: 250 balances at 0.5 m/s, which keeps a hover firmly negative
+    # at every altitude the vehicle flies through.
+    #
+    # It also moves eta*T/kappa from 47% to 23%, further from the survival-bonus failure
+    # mode Mania/Guy/Recht document (arXiv:1803.07055 S5.2: Gym's +5/step Humanoid bonus
+    # produces policies that stand still for a thousand steps and "discourage[s] the
+    # exploration of policies that cause falling early on"). Gaudet's ratio is ~40%.
+    alive_bonus: float = 250.0
 
     touchdown_k: float = 120.0
     touchdown_penalty_cap: float = 480.0
