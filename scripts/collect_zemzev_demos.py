@@ -81,6 +81,13 @@ parser.add_argument("--terrain-grid-n", type=int, default=80,
                           "will consume these demos -- it sets res_m, i.e. the terrain the "
                           "transitions were actually flown over.")
 parser.add_argument("--seed0", type=int, default=1000)
+parser.add_argument("--stateless-tgo", action="store_true",
+                     help="demonstrate with a MEMORYLESS teacher: re-solve tgo from the "
+                          "current state every step instead of carrying it. The default "
+                          "controller solves tgo once and propagates it, which makes its "
+                          "command a function of (state, history) -- so no feedforward "
+                          "behaviour clone can reproduce it, however much data it gets. "
+                          "See lunarsim/control/zemzev_controller.py's constructor.")
 parser.add_argument("--headless", action="store_true", default=True)
 args = parser.parse_args()
 
@@ -146,7 +153,14 @@ def main():
     tile = generate_tile(terrain_config(_STAGE, args.terrain_seed, args.terrain_grid_n))
     env = IsaacLanderEnv(tile=tile, params=ORBIT_DESCENT_PARAMS, reward_fn=default_reward_fn,
                           seed=args.seed0, lunarsim_root=args.lunarsim_root)
-    controller = ZemZevController(ORBIT_DESCENT_PARAMS)
+    controller = ZemZevController(ORBIT_DESCENT_PARAMS,
+                                  stateless_tgo=args.stateless_tgo)
+    if args.stateless_tgo:
+        print("[demos] stateless_tgo: the teacher re-solves tgo from the current state "
+              "every step, so the demonstrated action is a FUNCTION OF THE STATE and a "
+              "feedforward clone can in principle match it exactly. With the carried "
+              "integrator it cannot: the command depends on the episode's history.",
+              flush=True)
     view = _BellyStateView(env)
     max_steps = int(ORBIT_DESCENT_PARAMS.max_episode_s / ORBIT_DESCENT_PARAMS.dt_s) + 5
 

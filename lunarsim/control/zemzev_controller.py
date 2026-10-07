@@ -136,10 +136,51 @@ class ZemZevController:
     `act(env)` once per step to get the 4-vector action `env.step` expects.
     """
 
-    def __init__(self, params: LanderParams, gains: ZemZevGains | None = None):
+    def __init__(self, params: LanderParams, gains: ZemZevGains | None = None,
+                 stateless_tgo: bool = False):
         self.p = params
         self.g = gains or ZemZevGains()
         self.tgo: float | None = None
+        # STATELESS MODE: re-solve tgo from the current state on every step instead of
+        # propagating it. Off by default, so the controller's own measured behaviour is
+        # unchanged.
+        #
+        # WHY IT EXISTS. In the main ZEM/ZEV phase `tgo` is solved ONCE (`if self.tgo is
+        # None`) and then carried: tgo_{k+1} = solve(..., tgo_k - dt). That makes the
+        # commanded action a function of (state, tgo), and tgo is a function of the whole
+        # episode history -- so two episodes passing through the IDENTICAL instantaneous
+        # state can be commanded differently. The controller is therefore not a state
+        # feedback policy, and no feedforward behaviour clone can reproduce it however
+        # much data it is given or however large its network is.
+        #
+        # That is a structural explanation for two numbers this project measured and did
+        # not connect: `diag_obs_sufficiency` found an irreducible conditional action
+        # spread of 0.079 among near-identical observations, and the BC clone's fit
+        # residual sits at ~0.10 on its OWN training states -- the same order. The clone
+        # lands 20% where its teacher lands ~50%, and the part of that gap attributable
+        # to the hidden integrator cannot be closed by better imitation.
+        #
+        # The final-approach branch is already memoryless (it sets self.tgo = None and
+        # commands from the state alone), so this only changes the cruise/braking phase.
+        #
+        # MEASURED, AND IT DOES NOT WORK AS A REPLACEMENT -- kept as a documented dead
+        # end rather than deleted, because "just make the teacher memoryless" is the
+        # obvious next thought and it is wrong:
+        #
+        #     orbit_descent, analytic env, 200 episodes, same seeds
+        #       stateless_tgo=False   169/200 landed (84.5%)
+        #       stateless_tgo=True      0/200 landed ( 0.0%)
+        #
+        # Re-solving from the state gives an estimate that does not SHRINK: along a
+        # braking profile `2*alt/(-vz)` stays roughly constant, so tgo never approaches
+        # zero, and because the ZEM/ZEV command scales with 1/tgo the vehicle coasts at
+        # near-hover throttle for the whole episode. That is the same failure the
+        # `if self.tgo is None` branch below already records for a 489 s initial
+        # estimate. A memoryless teacher therefore needs tgo solved as an OPTIMAL
+        # function of the state (the energy-optimal tgo is a root of a quartic -- Guo,
+        # Hawkins and Wie's optimal-feedback landing guidance), not re-estimated by the
+        # same heuristic every step.
+        self.stateless_tgo = bool(stateless_tgo)
 
     def reset(self) -> None:
         self.tgo = None
@@ -307,6 +348,10 @@ class ZemZevController:
             thrust_mag_n = self._throttle_from_vertical_need(
                 a_needed_z, s["tilt_x"], s["tilt_y"], mass_kg, p.dps_thrust_min_n, p.dps_thrust_max_n)
         else:
+            if self.stateless_tgo:
+                # Discard the carried value so the estimate below is recomputed from the
+                # current state, making the command a function of the state alone.
+                self.tgo = None
             if self.tgo is None:
                 a_max_net = max(self._a_max(mass_kg), 0.05)
                 # REAL BUG FOUND via this feasibility test: orbit_descent
