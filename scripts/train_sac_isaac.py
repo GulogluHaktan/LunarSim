@@ -457,12 +457,26 @@ def _expand_critic_ensemble(old_model, venv, args, n_critics):
     """
     import torch
 
-    model = SAC("MlpPolicy", venv, verbose=1, device=args.torch_device,
+    # SAME CLASS as the caller asked for. Building a plain SAC here silently stripped
+    # CQL, dual-gamma, Cal-QL and TD3+BC off every run that expanded the ensemble: the
+    # attributes were then set on a plain SAC whose train() never reads them, while the
+    # [cql] and [dual-gamma] lines printed happily because they echoed the attribute that
+    # had just been assigned. v68's 18% on orbit_descent was plain SAC, not the full stack.
+    # Only PEX caught it, because its check was a real hasattr rather than a print.
+    _cls_expand = _sac_class(args)
+    _extra_expand = ({"cql_alpha": args.cql_alpha,
+                      "cql_n_samples": args.cql_n_samples,
+                      "calql_ref": args.calql_ref,
+                      "td3bc_alpha": args.td3bc_alpha,
+                      **_dual_gamma_kwargs(args)[1],
+                      **_dual_gamma_kwargs(args)[0]}
+                     if _cls_expand is not SAC else {})
+    model = _cls_expand("MlpPolicy", venv, verbose=1, device=args.torch_device,
                 gamma=args.gamma, gradient_steps=args.gradient_steps,
                 tau=args.tau, ent_coef=_parse_ent_coef(args.ent_coef),
                 learning_rate=args.learning_rate,
                 policy_kwargs={**_carried_policy_kwargs(old_model),
-                               "n_critics": n_critics})
+                               "n_critics": n_critics}, **_extra_expand)
 
     model.actor.load_state_dict(old_model.actor.state_dict())
     model.actor_target.load_state_dict(old_model.actor.state_dict())         if hasattr(model, "actor_target") else None
@@ -779,6 +793,26 @@ def main():
                     n_ln = add_layer_norm_to_critic(model)
                     print(f"[layernorm] {n_ln} critic trunks rebuilt with LayerNorm "
                           f"(actor untouched so the warm start survives)", flush=True)
+                # REAL CHECKS, not prints. Every "[cql] active" line in this project's
+                # logs was an echo of an attribute that had just been assigned, which is how
+                # a plain-SAC model reported CQL and dual-gamma as active for a whole 400k
+                # run. A print of a value you just set proves nothing; assert the CLASS that
+                # actually consumes it.
+                _want_cls = _sac_class(args)
+                if _want_cls is not SAC and not isinstance(model, _want_cls):
+                    raise SystemExit(
+                        f"model is {type(model).__name__} but the flags require "
+                        f"{_want_cls.__name__}; CQL/dual-gamma/Cal-QL/TD3+BC would be "
+                        f"silently inert. This is what _expand_critic_ensemble used to do.")
+                if args.dual_gamma and getattr(model, "dual_gamma", None) is None:
+                    raise SystemExit("--dual-gamma did not reach the model")
+                if args.cql_alpha > 0 and not getattr(model, "cql_alpha", 0):
+                    raise SystemExit("--cql-alpha did not reach the model")
+                if args.layer_norm:
+                    import torch.nn as _nn
+                    if not any(isinstance(mm, _nn.LayerNorm)
+                               for mm in model.critic.modules()):
+                        raise SystemExit("--layer-norm did not reach the critic")
                 if args.pex_temperature is not None:
                     if not hasattr(model, "install_pex"):
                         raise SystemExit(
