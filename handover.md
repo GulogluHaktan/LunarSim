@@ -3520,3 +3520,35 @@ That makes the next experiment a single-variable sweep of exactly the parameter
 TD3+BC calls alpha and reports as needing tuning: beta in {1e-3, 3e-3}, with
 log_std now free, from the same clone, measured against the clone at 96 episodes
 on the SAME seed block.
+
+### The 2x2, every cell 96 episodes with provenance
+
+```
+  stage=ramp_35m, terrain_seed=7, deterministic, 96 episodes per cell
+
+  seed block     clone            RL v55 260k       gap
+    7000       53/96  (55%)       51/96  (53%)        2
+   41000       44/96  (46%)       42/96  (44%)        2
+   pooled      97/192 (50.5%)     93/192 (48.4%)      2.1
+
+  mean shaped return
+    7000         182.9              178.9
+   41000         142.9              140.0
+```
+
+Standard error on the pooled difference is 5.1 points, so a 2.1-point gap is no
+gap. The anchored run is statistically indistinguishable from the policy it
+started from -- which is what a 69-update pull half-life should produce.
+
+Two side results worth keeping:
+
+**The seed block moves the absolute rate by 9 points** (55% vs 46% for the SAME
+clone). That is the whole mechanism behind this session's phantom 14-point gap:
+mixing a number from one block with a number from another produces a difference
+far larger than any real effect. Both cells must come from the same matrix.
+
+**Isaac evaluation is deterministic.** RL at seed0=41000 returned 42/96 with 49
+crash and 5 timeout, reproducing an earlier independent run exactly, breakdown
+included. Run-to-run variation is not a confound here; it was worth checking,
+because if it had been one then every comparison in this file would have carried
+unquantified noise.
