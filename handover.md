@@ -3605,3 +3605,43 @@ cleared ONE mechanism, time-limit bootstrapping, on runs at gamma 0.998 where Q
 ran to +100 and +1972. It did not clear overestimation in general, and this is
 different evidence in a different window: a bounded, low-loss critic whose sign is
 wrong exactly while the policy dies.
+
+## v57 (beta=3e-3) completes the sweep: the anchor knob has no useful setting
+
+```
+  beta    pull half-life    outcome
+  1e-2         69           frozen at the warm start: 53% vs the clone's 55%
+  3e-3        231           peaks 23.1% at 160k, ends 4.2%, mostly 0-7%
+  1e-3        693           dead in ONE 10k window, peaks 23.1%, ends 0.0%
+```
+
+Neither collapsing setting ever returns to the 47% the frozen actor held at step
+50000. There is no "middle" of this knob: it either holds the policy still or
+lets it die, which is what a parameter-space constraint on a value-function error
+should look like.
+
+### The critic error is TRANSIENT, and that is the diagnostic
+
+v57's Q trace across the run:
+
+```
+  step  50000   landed 47.4%   Q~-2    <- actor frozen: the clone
+  step  70000   landed  0.0%   Q~+3    proxy -14.72
+  step  80000   landed  0.0%   Q~+4    proxy  -8.43
+  ...
+  step 290000   landed  0.0%   Q~-9    proxy -20.69
+  step 310000   landed  4.2%   Q~-12   proxy -11.59
+```
+
+Late in the run Q is roughly calibrated against the true return (-12 vs -11 to
+-22). The sign error is confined to the window immediately after the actor is
+released -- precisely when its actions first leave the distribution the critic was
+fitted on during the 40k critic-only phase. So this is not a critic that is
+globally wrong; it is extrapolation error on out-of-distribution actions, which is
+the exact failure CQL and Cal-QL were built for, and it does its damage in the
+~5 windows before the critic catches up. By then the policy is gone and the
+anchor's strength only decides how fast.
+
+This is also why "wait longer" cannot work and was never going to: the critic DOES
+become calibrated, just ~200k steps after the policy it was supposed to guide has
+been destroyed.
