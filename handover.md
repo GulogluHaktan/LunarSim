@@ -3645,3 +3645,63 @@ anchor's strength only decides how fast.
 This is also why "wait longer" cannot work and was never going to: the critic DOES
 become calibrated, just ~200k steps after the policy it was supposed to guide has
 been destroyed.
+
+## CQL: the collapse is SOLVED, the improvement is not
+
+Deterministic, 96 episodes per cell, both seed blocks, clone re-measured in the
+same matrix:
+
+```
+  policy            seed0=7000      seed0=41000     pooled
+  clone             53/96 (55%)     44/96 (46%)     97/192 (50.5%)
+  v58 CQL a=1       46/96 (48%)     33/96 (34%)     79/192 (41.1%)
+  v59 CQL a=5       48/96 (50%)     47/96 (49%)     95/192 (49.5%)
+```
+
+Against v56/v57 WITHOUT the conservative term, which ended at 0.0% and 4.2%, this
+is the difference between a dead policy and a live one. The collapse that resisted
+twenty-two actor-side interventions is gone, and the mechanism check is what makes
+it credible rather than the rates:
+
+```
+  run              50k (frozen)    60k (first window after release)   70k
+  v56 no CQL       47.4% Q~-2      0.0%  Q~+1                         0.0%
+  v58 CQL a=1      47.4% Q~-4      22.2% Q~-1                         47.8%
+  v59 CQL a=5      47.4% Q~-5      33.3% Q~-0                         52.2%
+```
+
+Q never turns positive in the release window. The exact error diagnosed, suppressed
+by the intervention aimed at it, with the predicted downstream effect.
+
+**But there is no improvement over the warm start.** v59 ties the clone (49.5% vs
+50.5%); v58 is worse. The training-time 57-59% did not survive deterministic
+evaluation -- the stochastic/deterministic gap again, and the reason the proxy
+numbers in this file are never the conclusion.
+
+### This is the over-conservatism signature, called in advance
+
+The commit that added CQL stated: "over-conservatism has a recognisable signature
+-- no collapse, but no improvement either -- that tells us to go there next",
+meaning Cal-QL. That is what happened, and it is measurable rather than inferred:
+
+```
+  run            Q at end    true shaped return at end
+  v58 a=1          -21              +13 to +20
+  v59 a=5          -32              +16 to +20
+```
+
+The critic is now confidently wrong in the OPPOSITE direction. CQL pushed Q so far
+below the real return that the actor has no gradient worth climbing, which is
+precisely the pathology Cal-QL (arXiv:2303.05479) exists to fix: it clamps the
+out-of-distribution values from below at a reference value so the penalty cannot
+drive Q beneath what the reference policy actually achieves.
+
+One honest sub-result: v59 is much more CONSISTENT across blocks than the clone
+(50%/49% against 55%/46%) and beats it on 41000. Pooled it is a wash, so it is not
+an improvement -- but a 1-point block spread against the clone's 9-point spread is
+worth remembering if robustness ever becomes the criterion.
+
+**Scale note for anyone reading the two return columns:** training ran
+`reward_total_scale=0.1` while the evaluator uses the default 1.0, so eval returns
+(~183) and training proxy (~18) differ by that factor plus discounting. They are
+consistent; they are not the same units.
