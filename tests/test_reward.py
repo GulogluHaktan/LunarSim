@@ -311,25 +311,39 @@ def test_spinning_is_penalized_and_yaw_rate_is_not_free():
     assert yawing < still
 
 
-def test_angular_rate_penalty_is_negligible_below_the_limit_and_steep_at_it():
-    """The term must not tax the ~0.3 rad/s rotation a real braking tilt
-    maneuver needs (measured: ordinary flight ran 0.01-0.07 rad/s, the
-    rejection line is 0.5). A flat quadratic strong enough to matter at
-    0.5 would have made normal maneuvering expensive, so this is shaped
-    like the tilt cutoff: gentle everywhere, a wall at the limit."""
+def test_angular_rate_penalty_is_cheap_in_flight_and_proportional_past_the_limit():
+    """Cheap where the controller actually operates, proportional past the limit.
+
+    This test used to protect "the ~0.3 rad/s rotation a real braking tilt
+    maneuver needs", and the demo data contradicts that premise: across all 21504
+    recorded ramp_35m steps the controller's MAXIMUM |w| is 0.051 rad/s, six times
+    below the 0.3 that was being guarded, and its per-altitude maxima never exceed
+    0.051 even during the hardest braking at 2-5 m. So the headroom the old bound
+    bought was headroom nothing uses.
+
+    What it cost: with the penalty capped at 800 the term went flat exactly where it
+    was supposed to bite -- 0.154 per step at the 0.5 rad/s criterion and 0.200 at
+    3.0 rad/s, so tumbling six times faster than the limit cost 30% more. A bound is
+    not a gradient. The super-criterion region now has to be proportional, which is
+    the assertion the old version was missing entirely.
+    """
     from lunarsim.rl.reward import _angular_rate_penalty
 
     w = RewardWeights()
     limit = LanderParams().safe_landing_w_rad_s
 
-    gentle = _angular_rate_penalty(w, 0.1, 0.0, 0.0, limit)
-    maneuver = _angular_rate_penalty(w, 0.3, 0.0, 0.0, limit)
-    at_limit = _angular_rate_penalty(w, limit, 0.0, 0.0, limit)
+    def pen(x):
+        return _angular_rate_penalty(w, x, 0.0, 0.0, limit)
 
-    assert gentle < 1.0
-    assert maneuver < 0.1 * at_limit
-    assert at_limit > 100.0
-    # capped, so a pathological tumble cannot swamp the whole shaping sum
+    # 0.1 rad/s is already 2x the controller's measured maximum, so flight is free
+    assert pen(0.1) < 0.02 * pen(limit)
+    assert pen(0.051) < 0.01 * pen(limit)
+    # the criterion itself is priced
+    assert pen(limit) > 100.0
+    # and past it the charge grows with the violation instead of flattening
+    assert pen(2 * limit) > 1.5 * pen(limit)
+    assert pen(4 * limit) > 2.0 * pen(2 * limit)
+    # still bounded, so one pathological tumble cannot swamp a batch
     assert _angular_rate_penalty(w, 10.0, 10.0, 10.0, limit) == pytest.approx(w.omega_penalty_cap)
 
 

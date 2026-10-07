@@ -122,7 +122,11 @@ class RewardWeights:
     # 19600, so 3000 would have saturated at just 2.74 m/s of excess and
     # recreated, in the vertical channel, the exact defect just removed
     # from the lateral one.
-    profile_cap: float = 25000.0
+    # Raised from 25000, which saturated at -15 m/s descent and +5.59 m/s climb --
+    # so a 15 m/s impact and a 20 m/s impact were priced identically, and climbing
+    # at 15 m/s cost the same as at 5.6. Both are differences the policy must be
+    # able to feel.
+    profile_cap: float = 120000.0
     # Floors the altitude inside the sqrt. Described here as "a
     # divide-by-zero guard, not a tunable", which was wrong: it sets the
     # envelope's value AT CONTACT, i.e. the touchdown speed the reward
@@ -274,6 +278,40 @@ class RewardWeights:
     # day made tilt nearly free at speed, and nothing independently
     # discouraged tilting all the way to the 60 deg cutoff. Negligible
     # through the controller-proven 0-35 deg range, steep past 45-50.
+    # CONTINUOUS tilt term, referenced to the SAFE landing criterion rather than
+    # to loss-of-control. Measured defect it replaces: the ratio**8 barrier below
+    # is referenced to loss_of_control_tilt_rad (40 deg), so at the 15 deg
+    # criterion that actually decides `landed_safely` it charged 0.0002 per step
+    # against the lateral term's 0.144 at ITS limit -- 720x underpriced. Tilt was
+    # effectively free through the entire operating range and only became visible
+    # past 30 deg, by which point the episode is already lost. 576 is chosen so
+    # that tilt AT its criterion costs the same per step as lateral speed at its
+    # criterion (0.144), which is the "no criterion is unpriced" property the
+    # barrier form silently broke.
+    # MEASURED AND SET TO ZERO. 576 (tilt at its criterion costing the same per
+    # step as lateral speed at its criterion) was tried and is wrong, and the demo
+    # data says why -- the controller tilts to brake, including near the ground:
+    #
+    #   altitude      tilt p50   tilt p90   tilt max
+    #     0-0.5 m       5.77      11.18      16.14
+    #     1-2 m         8.12      13.15      17.63
+    #     2-5 m         9.86      13.12      17.61   <- hardest braking
+    #
+    # At its own p90 tilt the controller would have paid ~0.08 per step, about 36
+    # per episode against a total dense shaping sum of 32.4. That taxes the one
+    # maneuver that kills lateral velocity, which is the failure mode every one of
+    # its 23 rejections actually comes from.
+    #
+    # It is also unnecessary. `severity` is the MAX over all four touchdown
+    # criteria, so the continuous terminal already prices tilt at the moment the
+    # criterion applies: touchdown at 20 deg gives severity 1.33 -> -40, at 7 deg
+    # -> +64. The criterion gets a gradient without flight tilt being charged for it.
+    #
+    # The division of labour this settles: the terminal prices the four touchdown
+    # criteria, and the dense shaping prices what the terminal cannot see -- time,
+    # descent progress, envelope violations, and lateral speed during flight
+    # (which must be killed BEFORE touchdown, so it needs a gradient en route).
+    tilt_safe_k: float = 0.0
     tilt_cutoff_k: float = 2000.0
     tilt_cutoff_power: float = 8.0
     tilt_cutoff_cap: float = 2000.0
@@ -283,11 +321,20 @@ class RewardWeights:
     # touchdowns ever measured. Deliberately not velocity-gated: speed can
     # justify a tilt ANGLE, never a spin. Yaw counts, which no other term
     # reads.
-    omega_k: float = 60.0
+    # Raised from 60. With the cap lifted, the barrier still saturates just past the
+    # 0.5 rad/s criterion, so between 0.5 and 1.5 rad/s the penalty only moved
+    # 0.154 -> 0.184 per step: tripling the tumble rate cost 20%. The quadratic term
+    # has to be strong enough to take over where the barrier flattens, which is what
+    # makes the super-criterion region proportional instead of merely bounded.
+    omega_k: float = 600.0
     omega_cutoff_k: float = 600.0
     omega_cutoff_power: float = 6.0
     omega_cutoff_cap: float = 600.0
-    omega_penalty_cap: float = 800.0
+    # Raised from 800. At 800 the angular-rate penalty went flat exactly where it
+    # was supposed to bite: 0.154 per step at the 0.5 rad/s criterion and 0.200 at
+    # 3.0 rad/s, so tumbling six times faster than the limit cost 30% more. The cap
+    # now sits far enough out that the super-limit region keeps paying.
+    omega_penalty_cap: float = 6000.0
 
     # ---------------------------------------------------------------- #
     # Terminal.
@@ -379,7 +426,10 @@ class RewardWeights:
     # + kxy 46400 (30 m/s at ground weight 1) = 74600.
     # This is a no-op for the proven ramp_20m regime, where touchdown v_xy
     # is 0.13-1.17 and the sum never came near either value.
-    shaping_clip_abs: float = 80000.0
+    # Raised with profile_cap/omega_penalty_cap: at 80000 the clip would have
+    # re-introduced the very saturation those two changes remove, binding before
+    # either term reached its own cap.
+    shaping_clip_abs: float = 200000.0
 
     # Applied to the shaping sum ONLY. The terminal is added after, at its
     # own scale, because it has to outweigh the SUM of hundreds of shaping
@@ -478,10 +528,28 @@ def _horizontal_speed_penalty(w: RewardWeights, v_xy: float, alt_m: float = 0.0)
 
 
 def _tilt_cutoff_penalty(w: RewardWeights, tilt_x: float, tilt_y: float,
-                          loss_of_control_tilt_rad: float) -> float:
+                          loss_of_control_tilt_rad: float,
+                          safe_tilt_rad: float | None = None) -> float:
+    """A continuous quadratic charge plus the steep loss-of-control barrier.
+
+    The barrier alone was the defect: referenced to loss-of-control (40 deg) and
+    raised to the 8th power, it charged 0.0002 per step at the 15 deg criterion
+    that decides `landed_safely`, against 0.144 for lateral speed at ITS limit. So
+    the reward never asked the policy to stay upright until it was already tumbling.
+    The quadratic term is referenced to the SAFE criterion instead, which is the
+    one the outcome is graded on; the barrier is kept because loss-of-control is a
+    genuinely different regime that should be expensive to approach.
+
+    `safe_tilt_rad=None` keeps the old barrier-only behaviour, so callers that have
+    not been updated are unchanged rather than silently re-weighted.
+    """
     tilt = float(np.hypot(tilt_x, tilt_y))
     ratio = tilt / max(loss_of_control_tilt_rad, 1e-6)
-    return min(w.tilt_cutoff_k * float(ratio ** w.tilt_cutoff_power), w.tilt_cutoff_cap)
+    barrier = min(w.tilt_cutoff_k * float(ratio ** w.tilt_cutoff_power), w.tilt_cutoff_cap)
+    if safe_tilt_rad is None or w.tilt_safe_k <= 0.0:
+        return barrier
+    safe_ratio = tilt / max(safe_tilt_rad, 1e-6)
+    return w.tilt_safe_k * safe_ratio * safe_ratio + barrier
 
 
 def _angular_rate_penalty(w: RewardWeights, wx: float, wy: float, wz: float,
@@ -555,7 +623,8 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
             + _descent_envelope_penalty(w, alt, float(s["vz"]))
             + _time_penalty(w)
             + _horizontal_speed_penalty(w, v_xy, alt)
-            + _tilt_cutoff_penalty(w, s["tilt_x"], s["tilt_y"], p.loss_of_control_tilt_rad)
+            + _tilt_cutoff_penalty(w, s["tilt_x"], s["tilt_y"], p.loss_of_control_tilt_rad,
+                                    p.safe_landing_tilt_rad)
             + _angular_rate_penalty(w, s.get("wx", 0.0), s.get("wy", 0.0), s.get("wz", 0.0),
                                      p.safe_landing_w_rad_s)
             + _action_saturation_penalty(w, info.get("action"))
