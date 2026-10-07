@@ -220,7 +220,12 @@ def test_field_cost_is_minimal_at_the_target_rate_and_rises_both_ways():
     alt = 20.0
     _, _, vz_t, _ = target_velocity(w, alt)
 
-    def cost(vz, v_xy=0.0):
+    # the lateral target is a SCHEDULE now, not zero, so "on target" means matching both
+    # channels -- target_velocity returns the lateral target as a magnitude in slot 0
+    lat_t, _, vz_t2, _ = target_velocity(w, alt)
+    assert vz_t2 == vz_t
+
+    def cost(vz, v_xy=lat_t):
         return _velocity_field_penalty(w, alt, 0.0, 0.0, v_xy, 0.0, vz)
 
     on_target = cost(vz_t)
@@ -273,28 +278,38 @@ def test_descent_envelope_is_continuous_through_zero_vertical_speed():
     assert max(vals) - min(vals) < 1e-3
 
 
-def test_lateral_speed_always_increases_the_cost():
-    """Lateral speed must always be charged, with no altitude at which it is free.
+def test_lateral_speed_above_the_schedule_is_always_charged():
+    """Being FASTER than the lateral schedule must always cost more.
 
-    NOTE A DELIBERATE DESIGN CHANGE. The retired `kxy` term was independent of the
-    vertical channel by construction, and the old version of this test asserted exactly
-    that. The field uses the Euclidean norm `||v - v_targ||`, as the published form does,
-    so the two channels are now COUPLED: a vehicle with a large vertical error has a
-    marginal lateral charge that is partly masked by the norm. That is accepted, because
-    what the task needs is that lateral speed never becomes free -- which this asserts
-    directly, at several vertical errors, instead of asserting independence.
+    DESIGN CHANGE, and it corrected a real miscalibration rather than a preference. The
+    lateral target used to be zero everywhere, and the old version of this test asserted that
+    raising lateral speed always raises the cost -- which only holds when the target is zero.
+    Measured on orbit_descent, where the controller lands 50%, a zero target gave it a mean
+    tracking error of 10.00 m/s and a dense penalty of -43.9 per episode against a +6.0
+    landing bonus: the reward punished the reference policy 7.3 to 1 for doing the only thing
+    physics allows, since it arrives with 10-30 m/s of lateral velocity and can shed 0.50 m/s^2.
+    On ramp_35m, which spawns at 2-5 m/s, the same target looked fine (1.74 m/s, 0.8x) --
+    which is how a stage-specific miscalibration hides.
+
+    The target is now the measured schedule (0.170*alt^0.870, floored at 0.30), so what must
+    hold is that exceeding it is charged and that the charge grows with the excess.
     """
     from lunarsim.rl.reward import _velocity_field_penalty, target_velocity
 
     w = RewardWeights()
-    for alt in (0.2, 2.0, 10.0):
-        _, _, vz_t, _ = target_velocity(w, alt)
-        for vz in (vz_t, vz_t - 2.0, 0.0):
-            lo = _velocity_field_penalty(w, alt, 0.0, 0.0, 1.0, 0.0, vz)
-            hi = _velocity_field_penalty(w, alt, 0.0, 0.0, 10.0, 0.0, vz)
-            assert hi > lo, f"lateral speed free at alt={alt}, vz={vz}"
-        zero = _velocity_field_penalty(w, alt, 0.0, 0.0, 0.0, 0.0, vz_t)
-        assert zero == pytest.approx(0.0, abs=1e-9)
+    for alt in (0.2, 2.0, 10.0, 50.0, 150.0):
+        lat_t, _, vz_t, _ = target_velocity(w, alt)
+        on_sched = _velocity_field_penalty(w, alt, 0.0, 0.0, lat_t, 0.0, vz_t)
+        assert on_sched == pytest.approx(0.0, abs=1e-9), (alt, on_sched)
+        prev = on_sched
+        for excess in (0.5, 2.0, 6.0, 15.0):
+            c = _velocity_field_penalty(w, alt, 0.0, 0.0, lat_t + excess, 0.0, vz_t)
+            assert c > prev, f"excess {excess} m/s not charged at alt={alt}"
+            prev = c
+        # and being SLOWER than the schedule is also a deviation, which is what keeps the
+        # vehicle from simply stopping dead at altitude and burning the clock
+        if lat_t > 0.5:
+            assert _velocity_field_penalty(w, alt, 0.0, 0.0, 0.0, 0.0, vz_t) > on_sched
 
 
 def test_climbing_away_is_never_cheaper_than_staying_put():
@@ -449,26 +464,25 @@ def test_descent_envelope_floor_matches_the_real_touchdown_limit():
 
 
 def test_vertical_and_lateral_channels_have_equal_authority():
-    """Neither channel may be so weak the policy can ignore it.
+    """A deviation of the same size must cost the same in either channel.
 
-    Measured with the old separate terms: at profile_k=35 the charge separating a landing
-    from a crash was 63.7/step vertically against 792.4/step laterally, 12.4x apart, and
-    v_z duly became the binding criterion on 3 of the 4 remaining crashes. The old test
-    allowed a 0.25-4.0x band because two independently-weighted terms could only ever be
-    balanced by tuning.
+    Measured with the old separate terms: at profile_k=35 the charge separating a landing from
+    a crash was 63.7/step vertically against 792.4/step laterally, 12.4x apart, and v_z duly
+    became the binding criterion on 3 of the 4 remaining crashes. One norm over both channels
+    makes the authority equal by construction, so this asserts equality rather than the old
+    tuned 0.25-4.0x band -- a property that cannot drift when a weight is retuned.
 
-    One norm over both channels makes the authority equal by construction, so this now
-    asserts equality rather than a band -- a property that cannot drift when a weight is
-    retuned.
+    Both deviations are now measured FROM THE SCHEDULE rather than from zero, since the
+    lateral target is no longer zero.
     """
     from lunarsim.rl.reward import _velocity_field_penalty, target_velocity
 
     w = RewardWeights()
     alt = 0.2
-    _, _, vz_t, _ = target_velocity(w, alt)
+    lat_t, _, vz_t, _ = target_velocity(w, alt)
     d = 0.8
-    vertical = _velocity_field_penalty(w, alt, 0.0, 0.0, 0.0, 0.0, vz_t - d)
-    lateral = _velocity_field_penalty(w, alt, 0.0, 0.0, d, 0.0, vz_t)
+    vertical = _velocity_field_penalty(w, alt, 0.0, 0.0, lat_t, 0.0, vz_t - d)
+    lateral = _velocity_field_penalty(w, alt, 0.0, 0.0, lat_t + d, 0.0, vz_t)
     assert vertical == pytest.approx(lateral, rel=1e-9), (vertical, lateral)
 
 

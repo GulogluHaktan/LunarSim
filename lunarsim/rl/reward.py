@@ -433,6 +433,29 @@ class RewardWeights:
     vfield_vz_c: float = 0.547
     vfield_vz_p: float = 0.431
     vfield_vz_floor_m_s: float = 0.80
+    # LATERAL schedule. A target of zero everywhere was wrong, and badly so on the stage
+    # that matters. Measured on orbit_descent, where the controller lands 50%: its mean
+    # tracking error against a zero lateral target is 10.00 m/s (p90 19.29), because it
+    # arrives with 10-30 m/s of lateral velocity and the measured lateral deceleration it can
+    # sustain is 0.50 m/s^2 -- killing 30 m/s takes a minute. The dense penalty came to -43.9
+    # per episode against a +6.0 landing bonus, so the reward was punishing the reference
+    # policy 7.3 to 1 for doing the only thing physics allows. On ramp_35m, which spawns at
+    # 2-5 m/s, the same target was fine (error 1.74 m/s, ratio 0.8x) -- which is exactly how
+    # a stage-specific miscalibration hides.
+    #
+    # Gaudet's magnitude is v_o*(1 - exp(-t_go/tau)): anchored to the arrival speed and
+    # DECAYING, never zero at altitude. Rejecting their aim point was right (this task has no
+    # position criterion) but replacing the magnitude with 0 was not.
+    #
+    # Fitted over the landed demos of BOTH stages, 1 m and up:
+    #     v_xy = 0.170 * alt^0.870      (200 m: 17.1 vs 15.0 measured, 50 m: 5.12 vs 4.95,
+    #                                    10 m: 1.26 vs 1.35, 5 m: 0.69 vs 0.53)
+    # The floor is 0.30, deliberately BELOW the 0.64 the controller achieves at 0-2 m: near
+    # the ground is where precision decides the outcome, so a small standing pressure there is
+    # wanted, and 0.34 m/s of it costs 0.002 per step.
+    vfield_vxy_c: float = 0.170
+    vfield_vxy_p: float = 0.870
+    vfield_vxy_floor_m_s: float = 0.30
 
     # MUST stay below `vfield_k * vfield_vz_floor_m_s` = 500*0.80 = 400, and this was
     # caught by a test rather than by reasoning. At 500 the bonus EXCEEDED the field's
@@ -601,7 +624,14 @@ def target_velocity(w: RewardWeights, alt_m: float, dx: float = 0.0, dy: float =
     rate = w.vfield_vz_c * (max(alt_m, 0.0) ** w.vfield_vz_p)
     vz_t = -max(rate, w.vfield_vz_floor_m_s)
     t_go = max(alt_m, 0.0) / max(-vz_t, 1e-6)
-    return 0.0, 0.0, float(vz_t), float(t_go)
+    # The lateral target is a SPEED SCHEDULE, pointed along the vehicle's current lateral
+    # heading rather than at any particular place. So the term asks "be down to this speed by
+    # this altitude" and says nothing about direction -- which is right for a task whose
+    # success criteria contain no position term, and which leaves the error a pure magnitude
+    # difference instead of charging for a heading the criteria do not care about.
+    speed = max(w.vfield_vxy_c * (max(alt_m, 0.0) ** w.vfield_vxy_p),
+                w.vfield_vxy_floor_m_s)
+    return float(speed), 0.0, float(vz_t), float(t_go)
 
 
 def _velocity_field_penalty(w: RewardWeights, alt_m: float, dx: float, dy: float,
@@ -615,8 +645,11 @@ def _velocity_field_penalty(w: RewardWeights, alt_m: float, dx: float, dy: float
     """
     if w.vfield_k <= 0.0:
         return 0.0
-    vx_t, vy_t, vz_t, _ = target_velocity(w, alt_m, dx, dy)
-    err = float(np.sqrt((vx - vx_t) ** 2 + (vy - vy_t) ** 2 + (vz - vz_t) ** 2))
+    speed_t, _unused, vz_t, _ = target_velocity(w, alt_m, dx, dy)
+    # `target_velocity` returns the lateral target as a MAGNITUDE in its first slot; the
+    # direction is the vehicle's own, so the lateral error is a scalar speed difference.
+    lat = float(np.hypot(vx, vy))
+    err = float(np.sqrt((lat - speed_t) ** 2 + (vz - vz_t) ** 2))
     return min(w.vfield_k * err, w.vfield_cap)
 
 
