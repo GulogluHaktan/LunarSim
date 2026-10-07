@@ -456,6 +456,43 @@ class RewardWeights:
     vfield_vxy_c: float = 0.170
     vfield_vxy_p: float = 0.870
     vfield_vxy_floor_m_s: float = 0.30
+    # ---- TILE BOUNDARY ----
+    # Added because the first learner able to actually optimise this reward found that it
+    # does not protect against leaving the map. PPO, warm-started and run 2M steps on
+    # orbit_descent with a value function calibrated to within 0.5 of the realised return,
+    # landed 0.0% and ended its episodes by LEAVING THE TILE, monotonically:
+    #
+    #     left_tile   10 -> 24 -> 23 -> 21 -> 33 -> 31 -> 33 -> 38   (of ~56 episodes)
+    #
+    # That is not a bug in PPO, it is the reward's own optimum. The lateral target is a
+    # direction-agnostic SPEED schedule -- chosen deliberately, because `landed_safely`
+    # contains no position term -- so satisfying it while drifting off the map scores well.
+    # But `left_tile` truncation IS a position constraint, and nothing priced it.
+    # curriculum.py already recorded the geometry (orbit_descent's 1680 m tile against ~1800 m
+    # of episode drift) and left it because "a competent policy brakes early and the ZemZev
+    # demos never leave any tile (0/48)". A learning policy is not that policy.
+    #
+    # A BARRIER is the right shape here, unlike for the precision criteria. The distinction is
+    # whether the thing is something to optimise or a genuine constraint: leaving the tile
+    # truncates the episode and the env's own altitude reads become fictional outside it
+    # (sample_height_at clamps to the grid edge while the PhysX mesh simply ends), so there is
+    # nothing to be gained out there and no gradient worth providing. It starts charging
+    # BEFORE the edge, at `edge_safe_frac` of the half-extent, so the gradient points inward
+    # while the vehicle can still act on it.
+    # MEASURED, not chosen. The controller reaches 0.83 of the half-extent on orbit_descent
+    # (696.6 m of 840 m) and 0.36 on ramp_35m, so a free radius of 0.75 would have charged
+    # the reference policy -- the same mistake the zero lateral target made, caught this time
+    # before a run rather than after one. 0.88 leaves it free and ramps over the remaining
+    # 0.12 of the half-extent.
+    #
+    # edge_k is sized against what the exploit AVOIDS, which is the whole terminal penalty:
+    # `left_tile` truncation deliberately pays no timeout penalty (see `_terminal_reward`'s
+    # caller), so leaving the map is a FREE EXIT from a crash worth -6 to -24. At 6400 the
+    # charge is 0.08 per step at the boundary, so drifting out there for ~100 steps costs
+    # about what the crash it dodges would have.
+    edge_k: float = 6400.0
+    edge_safe_frac: float = 0.88
+    edge_cap: float = 120000.0
 
     # MUST stay below `vfield_k * vfield_vz_floor_m_s` = 500*0.80 = 400, and this was
     # caught by a test rather than by reasoning. At 500 the bonus EXCEEDED the field's
@@ -705,6 +742,26 @@ def _horizontal_speed_penalty(w: RewardWeights, v_xy: float, alt_m: float = 0.0)
     return min(w.kxy * charge * ground_weight, w.kxy_cap)
 
 
+def _edge_penalty(w: RewardWeights, dx: float, dy: float, tile_size_m: float) -> float:
+    """Quadratic charge once outside `edge_safe_frac` of the tile's half-extent.
+
+    Zero in the usable interior, so a policy that stays where the ground is never pays it.
+    See the `edge_k` block for the measurement that made this necessary.
+    """
+    if w.edge_k <= 0.0 or not tile_size_m:
+        return 0.0
+    safe = 0.5 * float(tile_size_m) * w.edge_safe_frac
+    r = float(np.hypot(dx, dy))
+    over = max(r - safe, 0.0)
+    if over <= 0.0:
+        return 0.0
+    # normalised by the remaining margin, so the charge means the same thing on a 120 m tile
+    # and a 1680 m one rather than scaling with the stage's size
+    margin = max(0.5 * float(tile_size_m) - safe, 1e-6)
+    frac = over / margin
+    return min(w.edge_k * frac * frac, w.edge_cap)
+
+
 def _tilt_cutoff_penalty(w: RewardWeights, tilt_x: float, tilt_y: float,
                           loss_of_control_tilt_rad: float,
                           safe_tilt_rad: float | None = None) -> float:
@@ -803,6 +860,7 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
             + _descent_envelope_penalty(w, alt, float(s["vz"]))
             + _velocity_field_penalty(w, alt, dx, dy,
                                        float(s["vx"]), float(s["vy"]), float(s["vz"]))
+            + _edge_penalty(w, dx, dy, getattr(getattr(env, "tile", None), "size_m", 0.0))
             + _time_penalty(w)
             + _horizontal_speed_penalty(w, v_xy, alt)
             + _tilt_cutoff_penalty(w, s["tilt_x"], s["tilt_y"], p.loss_of_control_tilt_rad,

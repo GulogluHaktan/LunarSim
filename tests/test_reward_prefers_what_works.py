@@ -170,3 +170,47 @@ def test_the_per_step_bonus_cannot_pay_for_doing_nothing():
     # and the whole-episode version: never-ending hover must lose to landing
     assert (w.alive_bonus * S) * 448 < w.touchdown_k, (
         "the alive bonus over one episode exceeds the landing bonus")
+
+
+def test_the_tile_edge_is_charged_but_not_where_the_controller_flies():
+    """The exploit PPO found, and the calibration that must not punish the reference.
+
+    PPO, warm-started and run 2M steps with a value function calibrated to within 0.5 of the
+    realised return, landed 0.0% and ended by LEAVING THE TILE, monotonically: left_tile went
+    10 -> 24 -> 23 -> 21 -> 33 -> 31 -> 33 -> 38 of ~56 episodes. That is the reward's own
+    optimum, not a flaw in PPO. The lateral target is a direction-agnostic SPEED schedule --
+    deliberately, since `landed_safely` has no position term -- and `left_tile` truncation
+    pays no timeout penalty, so leaving the map is a free exit from a crash worth -6 to -24.
+
+    The calibration has to clear the controller, which reaches 0.83 of the half-extent on
+    orbit_descent (696.6 m of 840) and 0.36 on ramp_35m. A free radius of 0.75 would have
+    charged the reference -- the same mistake the zero lateral target made, caught this time
+    before a run instead of after one.
+    """
+    from lunarsim.rl.reward import _edge_penalty
+    from lunarsim.rl.curriculum import STAGES_BY_NAME
+
+    w = RewardWeights()
+    for stage_name, size in (("orbit_descent", 1680.0), ("ramp_35m", 320.0)):
+        half = size / 2.0
+        # free where the controller flies
+        assert _edge_penalty(w, half * 0.83, 0.0, size) == 0.0, stage_name
+        # charged before the edge, so the gradient points inward while there is still room
+        assert _edge_penalty(w, half * 0.95, 0.0, size) > 0.0, stage_name
+        # and growing past it
+        prev = 0.0
+        for frac in (0.92, 1.0, 1.1, 1.3):
+            c = _edge_penalty(w, half * frac, 0.0, size)
+            assert c > prev, (stage_name, frac)
+            prev = c
+        # bounded, so one runaway episode cannot dominate a batch
+        assert _edge_penalty(w, half * 50.0, 0.0, size) == w.edge_cap
+
+    # and the controller's own recorded trajectories must pay exactly nothing
+    o, ends, landed = _load()
+    for stage_name in ("orbit_descent",):
+        size = STAGES_BY_NAME[stage_name].tile_size_m
+        pen = [_edge_penalty(w, o[i, 0], o[i, 1], size) for i in range(0, len(o), 7)]
+        assert max(pen) == 0.0, (
+            f"the controller pays the edge penalty on {stage_name}; the free radius is too "
+            f"tight and the reward would be punishing the reference again")
