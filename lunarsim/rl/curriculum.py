@@ -111,6 +111,46 @@ class Stage:
 #  envelope no matter how well it is flown.
 STAGES = [
     Stage(
+        # LANDING SPECIALIST. Not part of the sequential curriculum's difficulty ramp --
+        # it is one half of a two-model split, and it exists because of a measurement.
+        #
+        # The critic's action gradient, resolved by altitude on a trained orbit_descent
+        # checkpoint:
+        #
+        #     altitude     toward the expert    |dQ/da|
+        #      0-2 m            54.3%            1.297    decisive, gradient is noise
+        #      2-5 m            53.8%            0.585
+        #     15-40 m           63.1%            0.257
+        #     80-150 m          68.6%            0.118    informative, barely pushes
+        #
+        # The actor is pushed hardest exactly where the critic knows least. And on
+        # orbit_descent the buffer is 65% cruise-phase samples (40-210 m) against 14% in
+        # the decisive 0-5 m band, so most of what the critic learns is about the regime
+        # that does not decide the outcome. Gaudet/Linares/Furfaro switch regime at 15 m
+        # for the same reason, and Apollo's descent guidance was phase-split outright
+        # (P63 braking, P64 approach, P66 terminal descent).
+        #
+        # Trained alone, this stage's buffer is 100% decisive-band data -- which is the
+        # condition under which this file already records from-scratch RL working: at
+        # ramp_20m's release "a RANDOM policy touches down 40/40 ... the success region is
+        # immediately adjacent to random behaviour".
+        #
+        # The ENTRY CONDITIONS ARE A DISTRIBUTION, not a point, because the specialist is
+        # only useful if it accepts whatever an approach policy hands over. The ranges
+        # below are deliberately wider than any single approach policy would produce, so
+        # the handoff is covered rather than assumed; the envelope it actually achieves is
+        # then measurable, and an approach policy can be rewarded for delivering into it.
+        name="land_handoff",
+        tile_size_m=120.0,
+        params=LanderParams(
+            spawn_altitude_m=(8.0, 25.0),
+            spawn_xy_radius_m=10.0,
+            spawn_v_z_m_s=(-5.0, -1.0),
+            spawn_horizontal_speed_m_s=(0.0, 6.0),
+            max_episode_s=20.0,
+        ),
+    ),
+    Stage(
         name="ramp_20m",
         # 60 -> 120 m (2026-10-05). MEASURED: tiles were sized for the drift
         # during a ballistic FALL, but episodes run ~4x the fall time, so a

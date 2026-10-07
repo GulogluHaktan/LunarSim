@@ -45,6 +45,8 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 import numpy as np
+
+from lunarsim.rl.spawn_range import sample_range
 from gymnasium import spaces
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv
 
@@ -265,7 +267,10 @@ class IsaacLanderVecEnv(VecEnv):
         tilt_x0 = float(self._rng.uniform(-0.05, 0.05))
         tilt_y0 = float(self._rng.uniform(-0.05, 0.05))
         x0, y0 = ox + x0_local, oy + y0_local
-        z0 = ground_z0 + p.spawn_altitude_m + self._half_height_m
+        # per-env draw, so sixteen vehicles do not all enter from the same point
+        _alt0 = sample_range(p.spawn_altitude_m, self._rng)
+        _vz0 = sample_range(p.spawn_v_z_m_s, self._rng)
+        z0 = ground_z0 + _alt0 + self._half_height_m
 
         qw, qx, qy, qz = _euler_to_quat(tilt_x0, tilt_y0, 0.0)
         self.body.set_world_poses(
@@ -274,13 +279,13 @@ class IsaacLanderVecEnv(VecEnv):
             indices=np.array([i]),
         )
         self.body.set_velocities(
-            np.array([[vx0, vy0, p.spawn_v_z_m_s, 0.0, 0.0, 0.0]], dtype=np.float32),
+            np.array([[vx0, vy0, _vz0, 0.0, 0.0, 0.0]], dtype=np.float32),
             indices=np.array([i]),
         )
 
         s = self.state
         s["x"][i], s["y"][i], s["z"][i] = x0, y0, z0
-        s["vx"][i], s["vy"][i], s["vz"][i] = vx0, vy0, p.spawn_v_z_m_s
+        s["vx"][i], s["vy"][i], s["vz"][i] = vx0, vy0, _vz0
         s["tilt_x"][i], s["tilt_y"][i], s["yaw"][i] = tilt_x0, tilt_y0, 0.0
         s["wx"][i] = s["wy"][i] = s["wz"][i] = 0.0
         s["fuel_kg"][i] = p.initial_fuel_kg

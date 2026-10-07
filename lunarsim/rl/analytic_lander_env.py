@@ -63,6 +63,8 @@ from typing import Callable, Optional
 
 import gymnasium as gym
 import numpy as np
+
+from lunarsim.rl.spawn_range import sample_range
 from gymnasium import spaces
 
 from lunarsim.core.terrain.generate import Tile
@@ -251,8 +253,8 @@ class AnalyticLanderEnv(gym.Env):
         vx0, vy0 = speed * dx / dist, speed * dy / dist
 
         self.state = {
-            "x": x0, "y": y0, "z": ground_z0 + p.spawn_altitude_m,
-            "vx": vx0, "vy": vy0, "vz": p.spawn_v_z_m_s,
+            "x": x0, "y": y0, "z": ground_z0 + sample_range(p.spawn_altitude_m, self._rng),
+            "vx": vx0, "vy": vy0, "vz": sample_range(p.spawn_v_z_m_s, self._rng),
             "tilt_x": self._rng.uniform(-0.05, 0.05),
             "tilt_y": self._rng.uniform(-0.05, 0.05),
             "yaw": 0.0,

@@ -52,6 +52,8 @@ from typing import Callable, Optional
 
 import gymnasium as gym
 import numpy as np
+
+from lunarsim.rl.spawn_range import sample_range
 from gymnasium import spaces
 
 from lunarsim.core.terrain.generate import Tile
@@ -400,7 +402,9 @@ class IsaacLanderEnv(gym.Env):
         # ground directly) -- offset by the real half-height so
         # `spawn_altitude_m` still means "clearance above the ground for the
         # vehicle's belly", the same real-world quantity in both backends.
-        z0 = ground_z0 + p.spawn_altitude_m + self._half_height_m
+        _alt0 = sample_range(p.spawn_altitude_m, self._rng)
+        _vz0 = sample_range(p.spawn_v_z_m_s, self._rng)
+        z0 = ground_z0 + _alt0 + self._half_height_m
 
         qw, qx, qy, qz = _euler_to_quat(tilt_x0, tilt_y0, 0.0)
         self.body.set_world_poses(
@@ -408,12 +412,12 @@ class IsaacLanderEnv(gym.Env):
             orientations=np.array([[qw, qx, qy, qz]], dtype=np.float32),
         )
         self.body.set_velocities(
-            np.array([[vx0, vy0, p.spawn_v_z_m_s, 0.0, 0.0, 0.0]], dtype=np.float32)
+            np.array([[vx0, vy0, _vz0, 0.0, 0.0, 0.0]], dtype=np.float32)
         )
 
         self.state = {
             "x": x0, "y": y0, "z": z0,
-            "vx": vx0, "vy": vy0, "vz": p.spawn_v_z_m_s,
+            "vx": vx0, "vy": vy0, "vz": _vz0,
             "tilt_x": tilt_x0, "tilt_y": tilt_y0, "yaw": 0.0,
             "wx": 0.0, "wy": 0.0, "wz": 0.0,
             "fuel_kg": p.initial_fuel_kg,
