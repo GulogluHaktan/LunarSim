@@ -392,7 +392,36 @@ STAGES = [
         tile_size_m=1680.0,
         params=LanderParams(
             spawn_altitude_m=200.0, spawn_xy_radius_m=80.0,
-            spawn_v_z_m_s=0.0, spawn_horizontal_speed_m_s=(10.0, 30.0),
+            # 0.0 -> -5.5 (MEASURED). Every ramp rung releases with a descent already
+            # established -- -2.0, -2.0, -2.8, -3.4, -4.0, -5.0 -- and orbit_descent alone
+            # released at 0.0, breaking the ramp it is the top of. This file already records
+            # why that is fatal, for ramp_20m: "released at vz=0 a RANDOM policy touches down
+            # 0/40 times -- 40/40 time out instead. The vehicle's thrust-to-weight at the
+            # centre of the action box is 1.0159, so 'do nothing', which is exactly an
+            # untrained policy's mean action, IS a hover. Nothing ever reaches the ground, so
+            # the terminal reward is never sampled and cannot be learned, no matter what it
+            # says." The fix was applied to the rungs as they were created and never to the
+            # stage they lead to.
+            #
+            # Re-measured here on the analytic env, 20 episodes of a near-zero-mean random
+            # policy per stage:
+            #     ramp_20m   -2.00 m/s   touched down 20/20   median min altitude 0.0 m
+            #     ramp_35m   -2.80        20/20                            0.0 m
+            #     ramp_150m  -5.00        20/20                            0.0 m
+            #     orbit_descent 0.00       0/20  (20/20 timed out)       200.0 m
+            # On the target stage an untrained policy does not descend a single metre in 60
+            # seconds, so the terminal reward is sampled zero times. The "from-scratch RL
+            # scores 0%" result measured earlier in this project was therefore a statement
+            # about the stage's configuration, not about RL.
+            #
+            # -5.5 continues the ramp (-4.0, -5.0, -5.5) and is also the more realistic end of
+            # a braking burn than a hover at 200 m with 30 m/s of horizontal velocity.
+            #
+            # CONSEQUENCE, stated rather than buried: this changes the target task. The orbit
+            # demos, the clone fitted to them and the 22.9% clone baseline were all measured at
+            # vz=0 and are stale. The controller's own rate will shift too, so the comparison
+            # stays fair only if BOTH are re-measured, which is the next step.
+            spawn_v_z_m_s=-5.5, spawn_horizontal_speed_m_s=(10.0, 30.0),
             max_episode_s=60.0,
         ),
     ),
