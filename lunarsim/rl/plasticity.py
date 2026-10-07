@@ -79,6 +79,44 @@ def add_layer_norm_to_sac(model) -> int:
     return n
 
 
+def add_layer_norm_to_critic(model) -> int:
+    """LayerNorm in the CRITIC ONLY, which is what a warm start can accept.
+
+    `add_layer_norm_to_sac` rebuilds the actor's `latent_pi` as well and says so: "Call
+    this on a FRESH model, before any training: it reinitialises the inserted layers."
+    On a warm start that would destroy the behaviour clone, which IS the warm start -- so
+    `--layer-norm` being confined to the fresh-model branch was correct rather than an
+    oversight, and this is the piece that was missing.
+
+    The critic is a different case. A BC clone is fitted by regression on the actor alone;
+    its critic has never seen a Bellman target, so the weights `SAC.load` restores for it
+    carry no information and reinitialising them costs nothing. The run then spends
+    `--critic-only-steps` fitting the critic before the actor is released, which is
+    exactly the phase a fresh critic needs.
+
+    Why bother: RLPD (arXiv:2302.02948) has a section titled "Layer Normalization
+    Mitigates Catastrophic Overestimation" -- with LayerNorm before the output the critic
+    is bounded by the final layer's weights however far out of distribution the queried
+    action is. That is this project's measured failure mode, and
+    tests/test_layernorm_bounds_ood_q.py confirms the property holds in this
+    implementation: |Q| grows under 3x over a 1000x input range against over 10x
+    un-normalised, while staying discriminative in distribution.
+    """
+    n = 0
+    for critic in (model.policy.critic, model.policy.critic_target):
+        for i, qnet in enumerate(critic.q_networks):
+            new = layer_norm_after_relu(qnet)
+            critic.q_networks[i] = new
+            setattr(critic, f"qf{i}", new)
+            n += 1
+    model.policy.critic_target.load_state_dict(model.policy.critic.state_dict())
+    # the optimizer was built over the OLD parameter list, so the LayerNorm parameters
+    # would never receive a gradient step
+    model.critic.optimizer = torch.optim.Adam(model.critic.parameters(),
+                                              lr=model.lr_schedule(1.0))
+    return n
+
+
 # --------------------------------------------------------------------------- #
 # 2. Dormant neurons (diagnostic)
 # --------------------------------------------------------------------------- #

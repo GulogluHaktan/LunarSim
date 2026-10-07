@@ -673,6 +673,19 @@ def main():
                               f"terminal={model.dual_gamma[1]}, "
                               f"{model._n_half} critics per stream, "
                               f"buffer -> DualRewardReplayBuffer", flush=True)
+                if args.layer_norm:
+                    # Critic ONLY. add_layer_norm_to_sac also rebuilds the actor's latent_pi
+                    # and reinitialises it, which on a warm start would destroy the behaviour
+                    # clone -- so confining --layer-norm to the fresh-model branch was correct,
+                    # and the missing piece was a critic-only path. Before this the flag was
+                    # accepted and SILENTLY IGNORED on every warm-started run, so the one
+                    # intervention measured to bound out-of-distribution Q (RLPD 2302.02948,
+                    # verified in tests/test_layernorm_bounds_ood_q.py) had never been tested
+                    # here at all.
+                    from lunarsim.rl.plasticity import add_layer_norm_to_critic
+                    n_ln = add_layer_norm_to_critic(model)
+                    print(f"[layernorm] {n_ln} critic trunks rebuilt with LayerNorm "
+                          f"(actor untouched so the warm start survives)", flush=True)
                 # SAC.load does NOT restore a replay buffer, so without this the
                 # critic starts from an empty one and refits off a narrow early
                 # window every single warm start.
