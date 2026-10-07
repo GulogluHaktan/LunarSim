@@ -81,7 +81,8 @@ class CQLSAC(SAC):
 
     def __init__(self, *args, cql_alpha: float = 5.0, cql_n_samples: int = 10,
                  calql_ref: float | None = None,
-                 dual_gamma: tuple[float, float] | None = None, **kwargs):
+                 dual_gamma: tuple[float, float] | None = None,
+                 td3bc_alpha: float | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.cql_alpha = float(cql_alpha)
         self.cql_n_samples = int(cql_n_samples)
@@ -91,6 +92,12 @@ class CQLSAC(SAC):
         # lunarsim/rl/dual_gamma.py for the measurement that motivates it.
         self.dual_gamma = None if dual_gamma is None else (float(dual_gamma[0]),
                                                            float(dual_gamma[1]))
+        # TD3+BC's actor regulariser (Fujimoto & Gu, arXiv:2106.06860), in ACTION space.
+        # This is the paper's ALPHA, and the direction is counter-intuitive enough that it
+        # cost me a wrong test: lambda = alpha / mean|Q| scales the Q TERM, so a LARGER
+        # alpha means MORE Q and a WEAKER behaviour constraint. The paper uses 2.5. None
+        # disables the term.
+        self.td3bc_alpha = None if td3bc_alpha is None else float(td3bc_alpha)
         if self.dual_gamma is not None:
             n = len(self.critic.q_networks)
             if n < 4 or n % 2 != 0:
@@ -234,7 +241,40 @@ class CQLSAC(SAC):
                 qs, _ = th.min(th.cat(qpi[:self._n_half], dim=1), dim=1, keepdim=True)
                 qt, _ = th.min(th.cat(qpi[self._n_half:], dim=1), dim=1, keepdim=True)
                 min_qf_pi = qs + qt
-            actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
+            if self.td3bc_alpha is not None:
+                # TD3+BC (arXiv:2106.06860): keep the actor near actions the DATA
+                # supports, in action space, rather than near the parameters it started
+                # from. The two are not interchangeable and this project only had the
+                # second (`--bc-anchor`, a proximal pull on the weights).
+                #
+                # Measured reason for needing this. At v65's 60k checkpoint the critic's
+                # VALUE is calibrated -- Q0 against the realised discounted return reads
+                # +0.02 to +0.96 after dual-gamma, CQL and the Cal-QL clamp brought it
+                # down from +20..+51 -- and yet the policy fell from 75% to 4.5% in one
+                # window. Measuring the gradient instead of the value says why:
+                #
+                #   cos(grad_a Q, a_expert - pi(s))  mean -0.094, median -0.097
+                #   fraction pointing toward the expert: 40.8%  (a coin flip is 50%)
+                #   the clone's own untrained critic: -0.025, 47.6%
+                #
+                # So forty thousand steps of critic fitting left the action gradient
+                # LESS informative about the 91% behaviour than an untrained critic's,
+                # while the values were nearly exact. A calibrated value is not a correct
+                # gradient: Q is fitted to predict returns ON the data, but its SHAPE in
+                # action space around each state's single recorded action is almost
+                # unconstrained by that data. This is the standard offline-RL difficulty
+                # and the reason BCQ and TD3+BC constrain the action instead of trusting
+                # grad_a Q.
+                #
+                # lambda normalises by the Q scale, as in the paper, so alpha means the
+                # same thing whatever the reward scale is -- which matters here because
+                # reward_total_scale has already moved twice today. LOWER alpha = stronger
+                # behaviour constraint.
+                lam = self.td3bc_alpha / (min_qf_pi.abs().mean().detach() + 1e-6)
+                bc_err = ((actions_pi - replay_data.actions) ** 2).sum(dim=1).mean()
+                actor_loss = (ent_coef * log_prob - lam * min_qf_pi).mean() + bc_err
+            else:
+                actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())
 
             self.actor.optimizer.zero_grad()

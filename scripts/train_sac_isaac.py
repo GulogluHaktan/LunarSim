@@ -147,6 +147,19 @@ parser.add_argument("--dual-gamma", type=float, nargs=2, default=None,
                           "and a high gamma amplifies its per-step error by 1/(1-gamma). "
                           "Requires an even --n-critics >= 4 so each stream keeps a pair, and "
                           "uses DualRewardReplayBuffer to carry the split.")
+parser.add_argument("--td3bc-alpha", type=float, default=None,
+                     help="TD3+BC's actor regulariser in ACTION space (Fujimoto & Gu, "
+                          "arXiv:2106.06860): actor loss becomes -lambda*Q + (pi(s)-a)^2 "
+                          "with lambda = alpha/mean|Q|. LOWER alpha means a STRONGER "
+                          "behaviour constraint, because alpha scales the Q term; the paper "
+                          "uses 2.5. Omit to disable. Needed because --bc-anchor constrains "
+                          "PARAMETERS and the measured failure is in action space: at v65's "
+                          "60k checkpoint the critic's VALUE was calibrated (Q0 against the "
+                          "realised discounted return read +0.02 to +0.96) while its ACTION "
+                          "GRADIENT pointed toward the expert only 40.8%% of the time, "
+                          "against 47.6%% for the clone's own untrained critic. A calibrated "
+                          "value is not a correct gradient, and the actor only ever uses the "
+                          "gradient.")
 parser.add_argument("--cql-n-samples", type=int, default=10,
                      help="actions sampled per state for the CQL logsumexp, half from the "
                           "policy and half uniform over the action box.")
@@ -647,6 +660,11 @@ def main():
                     model.cql_n_samples = int(args.cql_n_samples)
                     model.calql_ref = (None if args.calql_ref is None
                                        else float(args.calql_ref))
+                    model.td3bc_alpha = (None if args.td3bc_alpha is None
+                                         else float(args.td3bc_alpha))
+                    if model.td3bc_alpha is not None:
+                        print(f"[td3bc] action-space actor constraint, "
+                              f"alpha={model.td3bc_alpha} (lower = stronger)", flush=True)
                     print(f"[cql] conservative critic term active, alpha={model.cql_alpha}, "
                           f"n_samples={model.cql_n_samples}, "
                           f"calql_ref={model.calql_ref}", flush=True)
@@ -817,7 +835,8 @@ def main():
                 _buf_kw, _dg_kw = _dual_gamma_kwargs(args)
                 _extra = ({"cql_alpha": args.cql_alpha,
                            "cql_n_samples": args.cql_n_samples,
-                           "calql_ref": args.calql_ref, **_dg_kw, **_buf_kw}
+                           "calql_ref": args.calql_ref,
+                           "td3bc_alpha": args.td3bc_alpha, **_dg_kw, **_buf_kw}
                           if _cls is not SAC else {})
                 model = _cls("MlpPolicy", venv, verbose=1, device=args.torch_device,
                              gamma=args.gamma, gradient_steps=args.gradient_steps,
