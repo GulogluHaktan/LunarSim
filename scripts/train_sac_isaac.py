@@ -851,12 +851,28 @@ def main():
                 # clone's residual-fitted log_std (0.02-0.09) existed to avoid -- so it was
                 # never warm started at all and every conclusion drawn from it about warm
                 # starting was void. The log_std print below is the guard against a repeat.
+                # ent_coef BELONGS IN THIS LIST. It was missing, so --ent-coef was
+                # accepted and silently dropped on every warm-started PPO run: the loaded
+                # model kept whatever the checkpoint was saved with, and bc_to_ppo builds
+                # its PPO with SB3's default of 0.0. That matters here rather than being
+                # cosmetic -- SB3's PPO has a LEARNABLE log_std, the BC fit sets it from
+                # the residual (0.02-0.09), and with no entropy term a near-deterministic
+                # warm start collapses its variance and stalls. A run doing that would
+                # read as "PPO does not work on this task" while actually missing a
+                # regulariser. Fifth flag to be dropped on a warm-start path in this
+                # project, which is why the assertion below exists.
+                _ent = _parse_ent_coef(args.ent_coef)
+                _ent = 0.0 if isinstance(_ent, str) else float(_ent)
                 model = PPO.load(
                     args.warm_start, env=venv, device=args.torch_device,
                     learning_rate=args.learning_rate, n_steps=args.ppo_n_steps,
                     batch_size=args.ppo_batch_size, n_epochs=args.ppo_n_epochs,
                     gamma=args.gamma, gae_lambda=args.ppo_gae_lambda,
-                    clip_range=args.ppo_clip_range)
+                    clip_range=args.ppo_clip_range, ent_coef=_ent)
+                if abs(float(model.ent_coef) - _ent) > 1e-12:
+                    raise SystemExit(
+                        f"--ent-coef {_ent} did not reach the model (it holds "
+                        f"{model.ent_coef}); PPO.load ignores kwargs it is not given.")
                 import numpy as _np
                 _ls = model.policy.log_std.detach().cpu().numpy()
                 if float(_np.abs(_ls).max()) < 1e-6:
