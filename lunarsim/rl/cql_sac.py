@@ -229,7 +229,33 @@ class CQLSAC(SAC):
 
             # ---- INSERTION 1: CQL(H)'s conservative term ----
             if self.cql_alpha > 0.0:
-                cql_term = self._conservative_term(replay_data.observations, current_q_values)
+                # THE SHAPING HEADS ONLY, when the critic is split.
+                #
+                # MEASURED REASON. The conservative term is a per-step force on Q, and a
+                # per-step force of F lands in the value as F/(1-gamma). The two streams
+                # amplify it by different factors -- 100 at gamma_shaping=0.99, 1000 at
+                # gamma_terminal=0.999 -- so the SAME force leaves the terminal head ten
+                # times further from the truth. From scripts/diag_critic_vs_true_value.py,
+                # against the realised reward-to-go on expert states:
+                #
+                #   alpha   implied force/step   shaping head   terminal head   corr(Q,V)
+                #   5.0           +0.18             +20.51         +21.63         -0.19
+                #   0.1           +0.013             +1.00         +11.20         -0.49
+                #
+                # Cutting alpha 50x fixed the shaping head (20.5 -> 1.0, tracking the
+                # force) and barely moved the terminal one, because 1000x amplification
+                # makes even the residual dominate -- it became 89% of the total error,
+                # and the correlation with the true value got WORSE rather than turning
+                # positive as predicted.
+                #
+                # The terminal stream is also the stream that needs conservatism least:
+                # it carries one reward per episode, at the end, so there is little
+                # action-dependent value for an out-of-distribution action to inflate.
+                # Charging it a per-step penalty amplified 1000x is paying the cost
+                # where the benefit is smallest.
+                q_for_cql = (current_q_values[:self._n_half]
+                             if self.dual_gamma is not None else current_q_values)
+                cql_term = self._conservative_term(replay_data.observations, q_for_cql)
                 critic_loss = critic_loss + self.cql_alpha * cql_term
                 cql_terms.append(cql_term.item())
             # -------------------------------------------------

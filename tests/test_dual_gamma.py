@@ -144,3 +144,57 @@ def test_the_buffer_warns_when_the_split_is_missing():
               np.zeros((1, 1), np.float32), np.array([1.0], np.float32),
               np.array([False]), [{}])
     assert "reward_terminal" in buf.getvalue(), "silent on a missing split"
+
+
+def test_the_conservative_term_sees_only_the_shaping_heads():
+    """CQL's penalty is a per-step force, and the two streams amplify it differently.
+
+    A per-step force F on Q lands in the value as F/(1-gamma): 100x at the shaping
+    stream's 0.99, 1000x at the terminal stream's 0.999. Measured on real orbit_descent
+    checkpoints against the realised reward-to-go on expert states:
+
+        alpha   implied force/step   shaping head   terminal head   corr(Q, TRUE V)
+        5.0           +0.18             +20.51         +21.63           -0.19
+        0.1           +0.013             +1.00         +11.20           -0.49
+
+    Cutting alpha 50x tracked the force in the shaping head (20.5 -> 1.0) and barely
+    moved the terminal one, which then became 89% of the total error -- and the
+    correlation got WORSE instead of turning positive as predicted. So the penalty is
+    confined to the stream that can absorb it. This test pins WHICH heads it reaches,
+    because the difference is invisible in any aggregate loss number.
+    """
+    seen = []
+    real = CQLSAC._conservative_term
+
+    def spy(self, observations, current_q_values):
+        seen.append(len(current_q_values))
+        return real(self, observations, current_q_values)
+
+    CQLSAC._conservative_term = spy
+    try:
+        th.manual_seed(0)
+        np.random.seed(0)
+        m = CQLSAC("MlpPolicy", _Env(horizon=20), device="cpu", verbose=0, seed=0,
+                   cql_alpha=1.0, dual_gamma=(0.9, 0.99), gamma=0.9,
+                   learning_starts=100, batch_size=64, train_freq=1,
+                   policy_kwargs={"n_critics": 4},
+                   replay_buffer_class=DualRewardReplayBuffer)
+        m.learn(total_timesteps=400, log_interval=10000)
+        assert seen, "the conservative term never ran -- cql_alpha did not take effect"
+        assert set(seen) == {2}, (
+            f"with 4 critics split 2+2 the penalty must see the 2 SHAPING heads, "
+            f"saw {sorted(set(seen))}")
+
+        # ...and all of them when the critic is NOT split, which must not change.
+        seen.clear()
+        th.manual_seed(0)
+        np.random.seed(0)
+        m = CQLSAC("MlpPolicy", _Env(horizon=20), device="cpu", verbose=0, seed=0,
+                   cql_alpha=1.0, dual_gamma=None, gamma=0.9,
+                   learning_starts=100, batch_size=64, train_freq=1,
+                   policy_kwargs={"n_critics": 4})
+        m.learn(total_timesteps=400, log_interval=10000)
+        assert set(seen) == {4}, (
+            f"single-gamma CQL must still see every head, saw {sorted(set(seen))}")
+    finally:
+        CQLSAC._conservative_term = real
