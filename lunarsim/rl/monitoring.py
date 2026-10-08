@@ -176,11 +176,34 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
         # warm-started policy collapses.
         try:
             lv = self.model.logger.name_to_value
-            row["critic_loss"] = float(lv.get("train/critic_loss", float("nan")))
-            row["actor_loss"] = float(lv.get("train/actor_loss", float("nan")))
+            # SAC's keys, then PPO's for the same three slots. PPO publishes
+            # train/value_loss, train/policy_gradient_loss and train/entropy_loss, so
+            # reading only SAC's names left every column NaN on a PPO run -- and
+            # approx_kl and clip_fraction, the two numbers that say whether a PPO update
+            # is destroying the policy, were not read at all. A PPO run warm started from
+            # a BC clone has log_std ~ -3.8 (std 0.022), the score function scales as
+            # 1/sigma^2, and the first run collapsed from 43.8% landed to 0.0% in two
+            # updates with no instrument pointed at why.
+            row["critic_loss"] = float(lv.get("train/critic_loss",
+                                              lv.get("train/value_loss", float("nan"))))
+            row["actor_loss"] = float(lv.get("train/actor_loss",
+                                             lv.get("train/policy_gradient_loss",
+                                                    float("nan"))))
             row["ent_coef"] = float(lv.get("train/ent_coef", float("nan")))
+            row["approx_kl"] = float(lv.get("train/approx_kl", float("nan")))
+            row["clip_fraction"] = float(lv.get("train/clip_fraction", float("nan")))
+            row["policy_std"] = float("nan")
+            try:
+                import numpy as _np2
+                _ls = getattr(self.model.policy, "log_std", None)
+                if _ls is not None:
+                    row["policy_std"] = float(_np2.exp(
+                        _ls.detach().cpu().numpy()).mean())
+            except Exception:
+                pass
         except Exception:
             row["critic_loss"] = row["actor_loss"] = row["ent_coef"] = float("nan")
+            row["approx_kl"] = row["clip_fraction"] = row["policy_std"] = float("nan")
 
         # THE OVERESTIMATION NUMBER. Q(s0, a0) from the current critic against the
         # realised discounted return of the episode that actually started there.
@@ -239,7 +262,10 @@ class ProxyVsTrueCallback(BaseCallback):  # type: ignore[misc]
                   f"landed {row['true_landed_rate']:>6.1%}  "
                   f"lost={lost} left={left} other={row['other_failures']}  "
                   f"Q0 {row['q_s0']:+.2f} vs MC {row['mc_s0']:+.2f} (gap {row['q_minus_mc']:+.2f})  "
-                  f"Q~{-row['actor_loss']:.0f} critic={row['critic_loss']:.1f}",
+                  f"Q~{-row['actor_loss']:.0f} critic={row['critic_loss']:.1f}"
+                  + ("" if row["approx_kl"] != row["approx_kl"] else
+                     f"  kl={row['approx_kl']:.4f} clip={row['clip_fraction']:.2f} "
+                     f"std={row['policy_std']:.4f}"),
                   flush=True)
         if self.csv_path:
             with open(self.csv_path, "a", newline="") as fh:

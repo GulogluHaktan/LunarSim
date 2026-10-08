@@ -72,6 +72,15 @@ p.add_argument("--dagger-iters", type=int, default=0,
                     "side; DAgger breaks the collinearity by labelling states the CLONE visits.")
 p.add_argument("--dagger-episodes", type=int, default=24)
 p.add_argument("--seed", type=int, default=0)
+p.add_argument("--value-gamma", type=float, default=0.99,
+               help="discount for the VALUE HEAD's supervised target, which must match "
+                    "the --gamma the PPO run will use")
+p.add_argument("--value-epochs", type=int, default=400,
+               help="0 disables the value-head fit. Leaving the value head at its "
+                    "initialisation is what destroyed the first PPO run here: PPO's "
+                    "advantage is (return - V(s)), so an untrained V makes the first "
+                    "updates regress on its own error, and the policy went from 43.8% "
+                    "landed to 0.0% within two updates.")
 p.add_argument("--gain-check", action="store_true", default=True,
                help="reject a clone whose d(throttle)/d(vz) is positive in any altitude band. "
                     "Positive is POSITIVE FEEDBACK: the vehicle accelerates away from the "
@@ -255,6 +264,71 @@ if args.dagger_iters > 0:
              th.as_tensor(all_o[:nv], device=args.device),
              th.as_tensor(all_a[:nv], device=args.device),
              args.epochs, tag=f"[dagger {it}]")
+
+# ---- VALUE HEAD -------------------------------------------------------------- #
+# PPO's advantage is (realised return - V(s)). bc_to_ppo used to fit the policy mean and
+# leave the value head at its initialisation, so the first updates' advantages were
+# dominated by V's own error -- and the first PPO run from this clone fell from 43.8%
+# landed at 20k steps to 0.0% at 40k, with lost_control reaching 12 of 21 episodes by
+# 100k. The target here is the controller's own discounted return-to-go, which is only an
+# approximation of the clone's value (the clone is not the controller) but is far closer
+# than zero.
+#
+# Fitted on ALL episodes, landed and failed, unlike the policy: V has to be right about
+# the states a rollout actually reaches, and half of them end badly.
+if args.value_epochs > 0:
+    _vo, _vt = [], []
+    for _f in args.demos:
+        _d = np.load(_f, allow_pickle=True)
+        _o = _d["obs"].astype(np.float32)
+        _r = _d["rewards"].astype(np.float64)
+        _ends = _d["episode_ends"]
+        _starts = np.concatenate([[0], _ends[:-1]])
+        for _s, _e in zip(_starts, _ends):
+            _seg = _r[_s:_e]
+            _g = np.zeros(len(_seg))
+            _acc = 0.0
+            for _i in range(len(_seg) - 1, -1, -1):
+                _acc = _seg[_i] + args.value_gamma * _acc
+                _g[_i] = _acc
+            _vo.append(_o[_s:_e])
+            _vt.append(_g)
+    _vo = np.concatenate(_vo).astype(np.float32)
+    _vt = np.concatenate(_vt).astype(np.float32).reshape(-1, 1)
+    _perm = np.random.default_rng(args.seed).permutation(len(_vo))
+    _vo, _vt = _vo[_perm], _vt[_perm]
+    _nv = max(1, int(len(_vo) * args.val_frac))
+    _xt = th.as_tensor(_vo[_nv:], device=args.device)
+    _yt = th.as_tensor(_vt[_nv:], device=args.device)
+    _xv = th.as_tensor(_vo[:_nv], device=args.device)
+    _yv = th.as_tensor(_vt[:_nv], device=args.device)
+
+    def _value(x):
+        return pol.value_net(pol.mlp_extractor.forward_critic(pol.extract_features(x)))
+
+    _vparams = (list(pol.mlp_extractor.value_net.parameters())
+                + list(pol.value_net.parameters()))
+    _vopt = th.optim.Adam(_vparams, lr=args.learning_rate)
+    print(f"[bc-ppo] fitting the VALUE head on {len(_xt)} transitions "
+          f"(gamma={args.value_gamma}, all episodes, target mean "
+          f"{float(_yt.mean()):+.3f})", flush=True)
+    for _ep in range(args.value_epochs):
+        _idx = th.randperm(len(_xt), device=args.device)
+        for _i in range(0, len(_xt), args.batch_size):
+            _b = _idx[_i:_i + args.batch_size]
+            _vopt.zero_grad()
+            loss_fn(_value(_xt[_b]), _yt[_b]).backward()
+            _vopt.step()
+        if _ep % 100 == 0 or _ep == args.value_epochs - 1:
+            with th.no_grad():
+                print(f"[bc-ppo] value epoch {_ep:>5}  train "
+                      f"{float(loss_fn(_value(_xt), _yt)):.5f}  val "
+                      f"{float(loss_fn(_value(_xv), _yv)):.5f}", flush=True)
+    with th.no_grad():
+        _pred = _value(_xv)
+        _r2 = 1.0 - float(((_pred - _yv) ** 2).mean() / _yv.var())
+    print(f"[bc-ppo] value head R^2 on held-out states: {_r2:+.3f} "
+          f"(0.0 would be no better than predicting the mean)", flush=True)
 
 if args.gain_check:
     # The acceptance test the loss cannot replace. A clone at val MSE 0.00279 with a mean

@@ -215,6 +215,16 @@ parser.add_argument("--ppo-n-epochs", type=int, default=10)
 parser.add_argument("--ppo-batch-size", type=int, default=1024)
 parser.add_argument("--ppo-clip-range", type=float, default=0.2)
 parser.add_argument("--ppo-gae-lambda", type=float, default=0.95)
+parser.add_argument("--ppo-target-kl", type=float, default=None,
+                     help="stop a PPO update's epoch loop once approx_kl exceeds "
+                          "1.5x this. REQUIRED in practice when warm starting from a BC "
+                          "clone: the clone's log_std is about -3.8 (std 0.022), the "
+                          "score function scales as 1/sigma^2, so the same learning rate "
+                          "moves the mean orders of magnitude further in action space "
+                          "than it would from a fresh policy. The first PPO run here "
+                          "went from 43.8%% landed at 20k steps to 0.0%% at 40k, i.e. "
+                          "within two updates, with lost_control climbing to 12 of 21 "
+                          "episodes by 100k. 0.01 is a normal value.")
 parser.add_argument("--pex-temperature", type=float, default=None,
                      help="PEX, Policy Expansion (Zhang/Xu/Yu, arXiv:2302.00935): FREEZE the "
                           "warm-start policy, add a learnable one, and pick between their "
@@ -868,7 +878,10 @@ def main():
                     learning_rate=args.learning_rate, n_steps=args.ppo_n_steps,
                     batch_size=args.ppo_batch_size, n_epochs=args.ppo_n_epochs,
                     gamma=args.gamma, gae_lambda=args.ppo_gae_lambda,
-                    clip_range=args.ppo_clip_range, ent_coef=_ent)
+                    clip_range=args.ppo_clip_range, ent_coef=_ent,
+                    target_kl=args.ppo_target_kl)
+                if args.ppo_target_kl is not None and model.target_kl is None:
+                    raise SystemExit("--ppo-target-kl did not reach the model")
                 if abs(float(model.ent_coef) - _ent) > 1e-12:
                     raise SystemExit(
                         f"--ent-coef {_ent} did not reach the model (it holds "
@@ -891,6 +904,7 @@ def main():
                             n_steps=args.ppo_n_steps, batch_size=args.ppo_batch_size,
                             n_epochs=args.ppo_n_epochs, clip_range=args.ppo_clip_range,
                             gae_lambda=args.ppo_gae_lambda,
+                            target_kl=args.ppo_target_kl,
                             ent_coef=float(_parse_ent_coef(args.ent_coef))
                             if not isinstance(_parse_ent_coef(args.ent_coef), str) else 0.0,
                             policy_kwargs={"net_arch": list(args.net_arch)}
