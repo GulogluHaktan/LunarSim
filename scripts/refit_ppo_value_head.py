@@ -72,8 +72,12 @@ Y = np.concatenate(T).astype(np.float32).reshape(-1, 1)
 perm = np.random.default_rng(0).permutation(len(X))
 X, Y = X[perm], Y[perm]
 nv = max(1, int(len(X) * args.val_frac))
-xt, yt = th.as_tensor(X[nv:]), th.as_tensor(Y[nv:])
-xv, yv = th.as_tensor(X[:nv]), th.as_tensor(Y[:nv])
+# .to(device): PPO.load puts the policy on `args.device`, and tensors built from numpy
+# land on the CPU, so a cuda run failed with "mat1 is on cpu, different from other
+# tensors on cuda:0" after the CPU version had already spent 35 minutes on 600 epochs.
+dev = args.device
+xt, yt = th.as_tensor(X[nv:]).to(dev), th.as_tensor(Y[nv:]).to(dev)
+xv, yv = th.as_tensor(X[:nv]).to(dev), th.as_tensor(Y[:nv]).to(dev)
 print(f"[refit] {len(xt)} train / {len(xv)} val transitions, gamma={args.gamma}, "
       f"target mean {float(yt.mean()):+.3f} std {float(yt.std()):.3f}", flush=True)
 
