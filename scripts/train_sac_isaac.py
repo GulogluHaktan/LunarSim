@@ -898,6 +898,14 @@ def main():
                       f"log_std = {_np.round(model.policy.log_std.detach().cpu().numpy(), 4)} "
                       f"(a default of 1.0 would destroy the clone on its first rollout)",
                       flush=True)
+                print(f"[ppo] target_kl={model.target_kl} lr={args.learning_rate} -- "
+                      f"NOTE target_kl bounds the NUMBER of epochs, not the size of one "
+                      f"minibatch step: SB3 checks approx_kl AFTER each gradient step and "
+                      f"breaks out, so with a BC warm start's small sigma a single step "
+                      f"can already overshoot. v84 ran target_kl=0.01 at lr=3e-4 and "
+                      f"measured approx_kl 0.79-7.65, 80-765x over, with clip_fraction "
+                      f"0.45-0.49 and the landing rate falling 58.8% -> 4.2%. KL scales "
+                      f"as lr^2, so the learning rate is the knob.", flush=True)
             else:
                 model = PPO("MlpPolicy", venv, verbose=1, device=args.torch_device,
                             gamma=args.gamma, learning_rate=args.learning_rate,
