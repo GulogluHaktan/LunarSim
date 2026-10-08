@@ -903,17 +903,30 @@ def main():
                         model._n_half = n_c // 2
                         # `load` restores a plain ReplayBuffer, which carries no terminal
                         # stream, so it has to be replaced before any data is collected.
-                        from lunarsim.rl.dual_gamma import DualRewardReplayBuffer
-                        model.replay_buffer_class = DualRewardReplayBuffer
-                        model.replay_buffer = DualRewardReplayBuffer(
+                        #
+                        # Built from `_buf_kw` rather than from a hard-coded class name.
+                        # This line used to name DualRewardReplayBuffer directly while
+                        # `_buf_kw` sat unused two lines above, so --altitude-replay
+                        # reached `_dual_gamma_kwargs`, produced the right class there,
+                        # and was then discarded on every warm start -- which is the
+                        # third time in this project a mechanism flag has been accepted
+                        # and silently dropped on exactly this path (--layer-norm twice,
+                        # and the whole CQLSAC class once). The assertion added with the
+                        # flag is what caught it, before the run rather than after.
+                        _buf_cls = _buf_kw["replay_buffer_class"]
+                        _buf_extra = dict(_buf_kw.get("replay_buffer_kwargs") or {})
+                        model.replay_buffer_class = _buf_cls
+                        model.replay_buffer_kwargs = _buf_extra
+                        model.replay_buffer = _buf_cls(
                             model.buffer_size, model.observation_space,
                             model.action_space, device=model.device,
                             n_envs=model.n_envs,
-                            optimize_memory_usage=model.optimize_memory_usage)
+                            optimize_memory_usage=model.optimize_memory_usage,
+                            **_buf_extra)
                         print(f"[dual-gamma] shaping={model.dual_gamma[0]} "
                               f"terminal={model.dual_gamma[1]}, "
                               f"{model._n_half} critics per stream, "
-                              f"buffer -> DualRewardReplayBuffer", flush=True)
+                              f"buffer -> {_buf_cls.__name__}", flush=True)
                 if args.layer_norm:
                     # Critic ONLY. add_layer_norm_to_sac also rebuilds the actor's latent_pi
                     # and reinitialises it, which on a warm start would destroy the behaviour

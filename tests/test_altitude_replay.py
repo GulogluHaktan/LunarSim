@@ -10,6 +10,8 @@ statistics, so the fixture below encodes each transition's identity INTO its rew
 reward_terminal = altitude * 1000 + env_index. Any mispairing then shows up as an exact
 mismatch rather than as a distribution that still looks plausible.
 """
+import re
+
 import numpy as np
 import pytest
 
@@ -119,3 +121,29 @@ def test_optimize_memory_usage_is_refused():
             64, spaces.Box(-np.inf, np.inf, (OBS_DIM,), np.float32),
             spaces.Box(-1.0, 1.0, (4,), np.float32), device="cpu", n_envs=1,
             optimize_memory_usage=True)
+
+
+def test_realised_fraction_is_reported_periodically(capsys):
+    """The quota-unmet warning fires once, so it cannot report the steady state.
+
+    An early shortfall is expected -- before anything reaches the ground the buffer holds
+    only the first seconds of each episode -- so a single warning line says nothing about
+    the batches the critic actually trained on. The periodic line is what does.
+    """
+    buf = _fill(AltitudeStratifiedReplayBuffer, decisive_alt_m=DECISIVE_M,
+                decisive_frac=0.5, report_every=5)
+    capsys.readouterr()
+    for _ in range(5):
+        buf.sample(128)
+    out = capsys.readouterr().out
+    assert "last 5 batches" in out, out
+    m = re.search(r"last 5 batches: ([\d.]+)% of sampled", out)
+    assert m, out
+    assert abs(float(m.group(1)) - 50.0) < 5.0, out
+
+
+def test_reporting_can_be_switched_off():
+    buf = _fill(AltitudeStratifiedReplayBuffer, decisive_alt_m=DECISIVE_M,
+                decisive_frac=0.5, report_every=0)
+    for _ in range(3):
+        buf.sample(64)   # must not raise on the modulo with 0

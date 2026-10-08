@@ -57,7 +57,7 @@ class AltitudeStratifiedReplayBuffer(DualRewardReplayBuffer):
     """
 
     def __init__(self, *args, decisive_alt_m: float = 5.0, decisive_frac: float = 0.5,
-                 oversample: int = 8, **kwargs):
+                 oversample: int = 8, report_every: int = 2000, **kwargs):
         super().__init__(*args, **kwargs)
         if not 0.0 < decisive_frac < 1.0:
             raise ValueError(f"decisive_frac must be in (0,1), got {decisive_frac}")
@@ -65,6 +65,16 @@ class AltitudeStratifiedReplayBuffer(DualRewardReplayBuffer):
         self.decisive_frac = float(decisive_frac)
         self.oversample = int(oversample)
         self._short_warned = False
+        # The quota-unmet warning fires ONCE, which was the right call against log spam
+        # and the wrong one for knowing whether the mechanism is working: an early
+        # shortfall is expected (the buffer holds only the first seconds of each episode
+        # before anything reaches the ground), so the one line it prints says nothing
+        # about the steady state. These counters report the REALISED fraction
+        # periodically, which is the number that says whether the batches the critic
+        # actually trained on were stratified.
+        self._n_batches = 0
+        self._sum_low = 0.0
+        self.report_every = int(report_every)
         if self.optimize_memory_usage:
             # With optimize_memory_usage the next observation is the NEXT position's
             # observation, so position `self.pos` must be excluded from any draw -- a
@@ -124,4 +134,13 @@ class AltitudeStratifiedReplayBuffer(DualRewardReplayBuffer):
             pos_inds = np.concatenate([cand_pos[chosen], extra_pos])
             env_inds = np.concatenate([cand_env[chosen], extra_env])
             return self._get_samples_pairs(pos_inds, env_inds, env)
-        return self._get_samples_pairs(cand_pos[chosen], cand_env[chosen], env)
+        pos_inds, env_inds = cand_pos[chosen], cand_env[chosen]
+        self._n_batches += 1
+        self._sum_low += float(np.mean(
+            self._altitudes(pos_inds, env_inds) <= self.decisive_alt_m))
+        if self.report_every and self._n_batches % self.report_every == 0:
+            print(f"[altitude-replay] last {self._n_batches} batches: "
+                  f"{self._sum_low / self._n_batches:.1%} of sampled transitions were "
+                  f"below {self.decisive_alt_m:g} m (target {self.decisive_frac:.0%})",
+                  flush=True)
+        return self._get_samples_pairs(pos_inds, env_inds, env)
