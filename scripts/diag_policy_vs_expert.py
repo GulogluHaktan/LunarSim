@@ -53,6 +53,28 @@ args = p.parse_args()
 from lunarsim.rl.eval_loader import load_with_critic_for_diag  # noqa: E402
 from lunarsim.rl.obs_norm import OBS_SCALE  # noqa: E402
 
+
+def _deterministic_actions(path, o):
+    """The policy's mean action, for a SAC-shaped OR a PPO-shaped checkpoint.
+
+    PPO's ActorCriticPolicy has no `.actor`, so `load_with_critic_for_diag` -- which
+    rebuilds an SACPolicy and loads 'actor.'/'critic.' prefixes -- cannot read it. Both
+    algorithms are being compared on this task now, so both have to be loadable here or
+    the comparison is only available for one of them.
+    """
+    from stable_baselines3.common.save_util import load_from_zip_file
+    data, params, _ = load_from_zip_file(path, device="cpu")
+    is_ppo = any(k.startswith("action_net") or k.startswith("mlp_extractor")
+                 for k in params.get("policy", {}))
+    if is_ppo:
+        from stable_baselines3 import PPO
+        m = PPO.load(path, device="cpu")
+        with th.no_grad():
+            return th.as_tensor(m.policy(o, deterministic=True)[0].numpy())
+    m, _ = load_with_critic_for_diag(path, "cpu")
+    with th.no_grad():
+        return m.policy.actor(o, deterministic=True)
+
 demos = args.demos or ["out/zemzev_orbit_demos_s20000.npz"]
 ALT = float(OBS_SCALE[2])
 
@@ -82,9 +104,7 @@ hdr = "".join(f"{(f'{lo}-{hi:g}m' if hi < 1e9 else f'{lo}+m'):>9}" for lo, hi in
 print(f"  {'checkpoint':<34}{'overall':>9}{hdr}")
 acts = {}
 for ck in args.checkpoint:
-    m, _ = load_with_critic_for_diag(ck, "cpu")
-    with th.no_grad():
-        a = m.policy.actor(o, deterministic=True)
+    a = _deterministic_actions(ck, o)
     dist = th.norm(a - a_exp, dim=1).numpy()
     row = "".join(f"{dist[(alt >= lo) & (alt < hi)].mean():>9.4f}"
                   if ((alt >= lo) & (alt < hi)).sum() >= 20 else f"{'-':>9}"
@@ -97,9 +117,7 @@ if args.vs:
     print(f"\n  distance BETWEEN policies -- how far a run moved from its warm start")
     print(f"  {'pair':<34}{'overall':>9}{hdr}")
     for ref in args.vs:
-        m, _ = load_with_critic_for_diag(ref, "cpu")
-        with th.no_grad():
-            a_ref = m.policy.actor(o, deterministic=True)
+        a_ref = _deterministic_actions(ref, o)
         for ck, a in acts.items():
             if ck == ref:
                 continue
