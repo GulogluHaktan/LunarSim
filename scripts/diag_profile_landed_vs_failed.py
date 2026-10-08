@@ -33,6 +33,31 @@ within 0.02 m/s below 2 m, and both sit AT the field's -0.80 target, against a -
 There is 0.2 m/s of margin there, which is why v_z still binds on 28% of touchdowns while
 v_xy binds on 62%.
 
+AND WHICH CRITERION ACTUALLY BINDS. Separating failures from successes over 32 clone
+touchdowns (17 exceeded a limit, 15 were inside every one), by how far each criterion is
+over its limit rather than by the saturating margins:
+
+    on the FAILURES          on the SUCCESSES (tightest criterion)
+      v_xy   16  (94%)         v_z    9  (60%)
+      tilt    1   (6%)         v_xy   4  (27%)
+      v_z     0                tilt   2  (13%)
+      leg_diff 0
+    v_xy overshoot on the failures: median 1.39x, max 3.90x
+
+So the whole gap between 51% and 100% is ONE scalar: lateral speed at touchdown, arriving
+at about 1.67 m/s against a 1.2 m/s limit. Nothing fails on leg_diff, which rules out
+terrain slope -- the one thing in the state that the observation genuinely does not carry
+-- as the ceiling. The failures are control error, not missing information.
+
+It does NOT follow that the lateral penalty should simply be weighted up. The two channels
+are physically coupled: killing lateral speed needs tilt, tilt costs vertical thrust, and
+vertical speed is already the tightest criterion on 60% of the SUCCESSES, sitting on the
+field's -0.80 target against a -1.0 limit. Charging lateral error harder would buy v_xy
+margin with v_z margin that is not there to spend. The equal weighting in
+`_velocity_field_penalty`'s Euclidean error may be a reasonable point on that trade-off,
+and a change to it has to be measured on BOTH criteria, not on the one that currently
+fails.
+
 Run:
     .venv/bin/python scripts/diag_profile_landed_vs_failed.py
 """
