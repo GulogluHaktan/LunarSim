@@ -209,8 +209,18 @@ def main():
     # on 6000 held-out expert states:
     #
     #     |pi - a_expert|       overall   0-2 m   5-20 m   80+ m
-    #       SAC clone (pre-tanh) 0.0590  0.0654   0.1285  0.0449   -> lands 47% (block 7000)
-    #       PPO clone (raw)      0.0405  0.0405   0.0874  0.0306   -> lands 54%
+    #       SAC clone (pre-tanh) 0.0590  0.0654   0.1285  0.0449
+    #       PPO clone (raw)      0.0405  0.0405   0.0874  0.0306
+    #
+    # The IMITATION gap is real and held-out. The LANDING gap is not: over both seed
+    # blocks the SAC clone lands 98/192 (51.0%) and the PPO clone 101/192 (52.6%) --
+    # +7 landings on block 7000 and -4 on block 41000, i.e. +1.6 points against a 3.6
+    # point standard error. An earlier version of this comment read "costs it 7 landing
+    # points" from the first block alone, which is the single-seed-block error this
+    # project keeps making. So a 1.46x better action fit buys a noise-level change in
+    # landing rate, which says the outcome is not very sensitive to the action error in
+    # this range -- the same thing v78 showed by moving the policy 0.047 in action space
+    # for zero change in landing rate.
     #
     #     split by how saturated the expert action is:
     #       max|a_exp| 0.0-0.9    SAC 0.0818  PPO 0.0447   1.83x worse
