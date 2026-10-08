@@ -82,6 +82,7 @@ class CQLSAC(SAC):
     def __init__(self, *args, cql_alpha: float = 5.0, cql_n_samples: int = 10,
                  calql_ref: float | None = None,
                  dual_gamma: tuple[float, float] | None = None,
+                 mc_terminal: bool = False,
                  td3bc_alpha: float | None = None,
                  pex_temperature: float | None = None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -93,6 +94,14 @@ class CQLSAC(SAC):
         # lunarsim/rl/dual_gamma.py for the measurement that motivates it.
         self.dual_gamma = None if dual_gamma is None else (float(dual_gamma[0]),
                                                            float(dual_gamma[1]))
+        # Fit the terminal heads to the EXACT terminal value instead of bootstrapping it.
+        # The terminal stream has no intermediate rewards, so its value is exactly
+        # r_term * gamma_t^(steps remaining) -- a closed form that TD was solving by an
+        # iteration which, at gamma_t = 0.999, contracts 0.1% per step and so multiplies
+        # any per-step bias by 1000. Measured: the conservative term's +0.0123/step
+        # became +12.3 in the terminal head against a true value of about +0.5, and that
+        # head was 89% of the critic's total error. See lunarsim/rl/dual_gamma.py.
+        self.mc_terminal = bool(mc_terminal)
         # PEX (Zhang, Xu, Yu -- arXiv:2302.00935). `pex_actor` is a FROZEN copy of the
         # warm-start actor; `pex_temperature` is the softmax temperature for choosing
         # between its action and the learnable actor's. None disables the whole thing.
@@ -218,6 +227,16 @@ class CQLSAC(SAC):
                     nq_s = nq_s - ent_coef * next_log_prob.reshape(-1, 1)
                     tgt_s = r_shape + (1 - replay_data.dones) * g_s * nq_s
                     tgt_t = r_term + (1 - replay_data.dones) * g_t * nq_t
+                    if self.mc_terminal and replay_data.mc_valid is not None:
+                        # EXACT where the episode's outcome is known, bootstrapped where
+                        # it is not (transitions still in flight). Mixing rather than
+                        # dropping keeps the batch size -- and therefore the effective
+                        # learning rate -- unchanged.
+                        exact = (replay_data.mc_terminal_r
+                                 * th.pow(th.tensor(g_t, device=tgt_t.device),
+                                          replay_data.mc_steps))
+                        v = replay_data.mc_valid
+                        tgt_t = v * exact + (1.0 - v) * tgt_t
 
                 current_q_values = self.critic(replay_data.observations, replay_data.actions)
                 critic_loss = 0.5 * (

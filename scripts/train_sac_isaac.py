@@ -131,6 +131,18 @@ parser.add_argument("--calql-ref", type=float, default=None,
                           "recorded ramp_35m episodes in training reward units. That is 26 "
                           "to 37 units of over-conservatism and it left the actor nothing "
                           "to climb. Omit for plain CQL.")
+parser.add_argument("--mc-terminal", action="store_true",
+                     help="fit the TERMINAL critic heads to the exact closed-form value "
+                          "r_term * gamma_terminal^(steps remaining) instead of "
+                          "bootstrapping it. The terminal stream has no intermediate "
+                          "reward, so that value is available exactly once the episode "
+                          "ends, and bootstrapping it at gamma_terminal=0.999 contracts "
+                          "0.1%% per step -- any per-step bias arrives in the value "
+                          "multiplied by 1000. Measured: the conservative term's "
+                          "+0.0123/step became +12.3 in the terminal head against a true "
+                          "value of about +0.5, and that head was 89%% of the critic's "
+                          "total error while carrying 68%% of the land-versus-crash value "
+                          "difference. Requires --dual-gamma.")
 parser.add_argument("--altitude-replay", type=float, default=0.0, metavar="FRAC",
                      help="fraction of every critic batch drawn from BELOW "
                           "--decisive-alt-m, instead of the ~14%% uniform sampling gives "
@@ -444,6 +456,9 @@ def _dual_gamma_kwargs(args):
             # better than silently ignoring the flag.
             raise SystemExit("--altitude-replay needs --dual-gamma (the stratified "
                              "buffer is a dual-reward buffer)")
+        if getattr(args, "mc_terminal", False):
+            raise SystemExit("--mc-terminal needs --dual-gamma (there is no terminal "
+                             "head to fit without a split critic)")
         return {}, {}
     frac = float(getattr(args, "altitude_replay", 0.0) or 0.0)
     if frac > 0.0:
@@ -459,7 +474,10 @@ def _dual_gamma_kwargs(args):
     else:
         from lunarsim.rl.dual_gamma import DualRewardReplayBuffer
         buf_kwargs = {"replay_buffer_class": DualRewardReplayBuffer}
-    return (buf_kwargs, {"dual_gamma": (args.dual_gamma[0], args.dual_gamma[1])})
+    critic_kwargs = {"dual_gamma": (args.dual_gamma[0], args.dual_gamma[1])}
+    if getattr(args, "mc_terminal", False):
+        critic_kwargs["mc_terminal"] = True
+    return (buf_kwargs, critic_kwargs)
 
 
 def _sac_class(args):
@@ -955,6 +973,12 @@ def main():
                     raise SystemExit("--dual-gamma did not reach the model")
                 if args.cql_alpha > 0 and not getattr(model, "cql_alpha", 0):
                     raise SystemExit("--cql-alpha did not reach the model")
+                if getattr(args, "mc_terminal", False) and not getattr(
+                        model, "mc_terminal", False):
+                    raise SystemExit("--mc-terminal did not reach the model")
+                if getattr(args, "mc_terminal", False):
+                    print("[mc-terminal] terminal heads fitted to the exact "
+                          "r_term*gamma_t^k, not bootstrapped", flush=True)
                 if getattr(args, "altitude_replay", 0.0):
                     # A warm start that goes through SAC.load can bring its OWN buffer
                     # class back with it, so the flag reaching `_dual_gamma_kwargs` does

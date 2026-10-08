@@ -55,6 +55,13 @@ class DualRewardSamples(NamedTuple):
     rewards: th.Tensor
     discounts: th.Tensor | None
     rewards_terminal: th.Tensor
+    # The EXACT terminal-stream value, as two ingredients rather than a number, because
+    # the buffer does not know gamma_terminal: the episode's terminal reward and how many
+    # steps remained until it arrived. `mc_valid` is 0 for transitions whose episode had
+    # not ended when they were sampled, which have no exact target yet.
+    mc_terminal_r: th.Tensor | None = None
+    mc_steps: th.Tensor | None = None
+    mc_valid: th.Tensor | None = None
 
 
 class DualRewardReplayBuffer(ReplayBuffer):
@@ -75,6 +82,24 @@ class DualRewardReplayBuffer(ReplayBuffer):
         super().__init__(*args, **kwargs)
         self.rewards_terminal = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self._missing_info_warned = False
+        # ---- the EXACT terminal-stream value, filled in when the episode ends ----
+        #
+        # WHY. The terminal stream has NO intermediate rewards: its value is exactly
+        # r_term * gamma_t^(steps remaining). Bootstrapping it is therefore solving by
+        # iteration something that is available in closed form, and at gamma_t = 0.999
+        # that iteration contracts by 0.1% per step -- it barely contracts at all over a
+        # 700-step episode, so any per-step bias lands in the value multiplied by 1000.
+        # That is measured: the conservative term's +0.0123/step showed up as +12.3 in
+        # the terminal head while the true value there is about +0.5, and the terminal
+        # head was 89% of the critic's total error.
+        #
+        # So the ingredients of the exact target are retro-filled once the episode's
+        # outcome is known. `mc_valid` marks the transitions that have one.
+        self.mc_terminal_r = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+        self.mc_steps = np.zeros((self.buffer_size, self.n_envs), dtype=np.int32)
+        self.mc_valid = np.zeros((self.buffer_size, self.n_envs), dtype=np.uint8)
+        # positions written since each env's last episode boundary, oldest first
+        self._pending: list[list[int]] = [[] for _ in range(self.n_envs)]
 
     def add(self, obs, next_obs, action, reward, done, infos):  # type: ignore[override]
         pos = self.pos                      # super().add advances it
@@ -94,6 +119,27 @@ class DualRewardReplayBuffer(ReplayBuffer):
                 self._missing_info_warned = True
         super().add(obs, next_obs, action, reward, done, infos)
         self.rewards_terminal[pos] = term
+
+        # This position now belongs to an in-flight episode, so whatever exact target it
+        # held from a previous pass through the ring is no longer valid.
+        self.mc_valid[pos, :] = 0
+        done_arr = np.atleast_1d(done)
+        for i in range(self.n_envs):
+            self._pending[i].append(pos)
+            # A pending list longer than the buffer means the ring has wrapped inside a
+            # single episode and the oldest entries have been overwritten by it; drop
+            # them rather than filling a position that no longer belongs to this episode.
+            if len(self._pending[i]) > self.buffer_size:
+                del self._pending[i][:-self.buffer_size]
+            if not bool(done_arr[i] if i < len(done_arr) else False):
+                continue
+            seq = self._pending[i]
+            r_fin = float(term[i])
+            for k, pp in enumerate(reversed(seq)):
+                self.mc_terminal_r[pp, i] = r_fin
+                self.mc_steps[pp, i] = k
+                self.mc_valid[pp, i] = 1
+            self._pending[i] = []
 
     def _get_samples(self, batch_inds, env=None):  # type: ignore[override]
         env_indices = np.random.randint(0, high=self.n_envs, size=(len(batch_inds),))
@@ -125,4 +171,12 @@ class DualRewardReplayBuffer(ReplayBuffer):
         term = self.to_torch(
             self._normalize_reward(
                 self.rewards_terminal[batch_inds, env_indices].reshape(-1, 1), env))
-        return DualRewardSamples(*tensors, discounts=None, rewards_terminal=term)
+        mc_r = self.to_torch(
+            self._normalize_reward(
+                self.mc_terminal_r[batch_inds, env_indices].reshape(-1, 1), env))
+        mc_n = self.to_torch(
+            self.mc_steps[batch_inds, env_indices].astype(np.float32).reshape(-1, 1))
+        mc_v = self.to_torch(
+            self.mc_valid[batch_inds, env_indices].astype(np.float32).reshape(-1, 1))
+        return DualRewardSamples(*tensors, discounts=None, rewards_terminal=term,
+                                 mc_terminal_r=mc_r, mc_steps=mc_n, mc_valid=mc_v)
