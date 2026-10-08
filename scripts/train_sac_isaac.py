@@ -1035,8 +1035,14 @@ def main():
                 if args.pex_temperature is not None:
                     if not hasattr(model, "install_pex"):
                         raise SystemExit(
-                            "--pex-temperature needs the CQLSAC class; pass --cql-alpha "
-                            "(any value, 0 is fine) so the model is built from it.")
+                            "--pex-temperature needs the CQLSAC class; pass a POSITIVE "
+                            "--cql-alpha so the model is built from it. 0 is NOT fine: "
+                            "_sac_class tests `> 0.0`, so --cql-alpha 0 returns plain "
+                            "SAC and every CQLSAC-only flag -- dual_gamma included -- "
+                            "then reaches a constructor that does not accept it. Use the "
+                            "smallest alpha you want: 0.1 is the value measured to leave "
+                            "the critic calibrated (shaping head +1.0) once the "
+                            "conservative term is confined to the shaping heads.")
                     # AFTER the ensemble expansion and the LayerNorm rebuild, so the frozen
                     # copy is of the actor that will actually be deployed. Before them it
                     # would freeze a model that the rebuild then replaces.
