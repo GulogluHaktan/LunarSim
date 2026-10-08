@@ -40,6 +40,22 @@ not need Q(s,a):
   * an analytic/model-based policy gradient uses the reward's own slope, which is dense,
     continuous and -- measured separately -- tighter than the controller at every altitude.
 
+ON ACTION REPEAT SPECIFICALLY, since it is the cheapest-looking of the three and the
+measurement makes it the most attractive: the lateral channel's leverage grows as k^3 in
+the hold length, because thrust is fixed along the body axis and lateral acceleration is
+four integrations from the command (torque -> angular acceleration -> rate -> tilt ->
+lateral acceleration). With I_tilt = 57,666 kg m^2 and a 1584 N m RCS couple
+(alpha = 0.0275 rad/s^2), a command held for one 0.05 s step tilts the vehicle 0.002
+degrees; held for 1 s it reaches 0.79 degrees and 0.0074 m/s, and for 5 s, 19.7 degrees
+and 0.91 m/s. So k = 20 moves the lateral signal four orders of magnitude.
+
+It must be implemented INSIDE the env, not as a VecEnvWrapper. A wrapper has to keep
+stepping every env while it accumulates k sub-steps, so an env that terminates early
+auto-resets and the first up-to-k steps of its NEXT episode are discarded -- and those
+steps are the release state, where the hardest decisions are made. That is a silent
+dataset bias of exactly the kind this file exists to help find. The correct place is the
+env holding the action across k physics steps and checking termination at each one.
+
 Run:
     .venv/bin/python scripts/diag_action_signal_to_noise.py \
         --checkpoint out/sac_v81_calibrated/snapshots/orbit_descent_60000_steps.zip
