@@ -50,6 +50,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from lunarsim.rl.spawn_range import upper as _spawn_upper
+
 from lunarsim.core.vehicle.apollo_lm import ApolloLMSpecs
 
 
@@ -856,7 +858,12 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
         dx = float(s["x"]) - float(getattr(p, "target_x", 0.0))
         dy = float(s["y"]) - float(getattr(p, "target_y", 0.0))
         shaping = (
-            -_descent_progress_reward(w, alt, float(s["vz"]), p.spawn_altitude_m)
+            # spawn_altitude_m may be a RANGE: `land_handoff` releases from [8, 25] m so
+            # that the handoff an approach policy produces is covered rather than assumed.
+            # `upper` takes the top of it, which is what "release altitude" means for a
+            # progress term, and passes a scalar through unchanged.
+            -_descent_progress_reward(w, alt, float(s["vz"]),
+                                      _spawn_upper(p.spawn_altitude_m))
             + _descent_envelope_penalty(w, alt, float(s["vz"]))
             + _velocity_field_penalty(w, alt, dx, dy,
                                        float(s["vx"]), float(s["vy"]), float(s["vz"]))

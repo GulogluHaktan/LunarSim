@@ -64,6 +64,8 @@ from typing import Callable, Optional
 import gymnasium as gym
 import numpy as np
 
+from lunarsim.rl.spawn_range import upper as _spawn_upper
+
 from lunarsim.rl.spawn_range import sample_range
 from gymnasium import spaces
 
@@ -497,8 +499,9 @@ class AnalyticLanderEnv(gym.Env):
         dirs = pattern.ray_directions()[: self.lidar_n_rays]
         pc = raycast_lidar(
             self.tile.height, self.tile.res_m,
-            np.array([s["x"], s["y"], s["z"]]), dirs, max_range_m=self.params.spawn_altitude_m * 2,
+            np.array([s["x"], s["y"], s["z"]]), dirs,
+            max_range_m=_spawn_upper(self.params.spawn_altitude_m) * 2,
         )
         ranges = pc.range_m.copy()
-        ranges[np.isnan(ranges)] = self.params.spawn_altitude_m * 2
+        ranges[np.isnan(ranges)] = _spawn_upper(self.params.spawn_altitude_m) * 2
         return ranges.tolist()
