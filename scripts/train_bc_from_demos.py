@@ -200,6 +200,30 @@ def main():
     x_tr = torch.as_tensor(obs_tr, device=args.device)
     x_va = torch.as_tensor(obs_va, device=args.device)
 
+    # MEASURED COST OF THIS CHOICE, recorded rather than changed. The reasoning above is
+    # right about the extremes and wrong about the middle. Minimising (u - u*)^2 makes the
+    # ACTION error |a - a*| ~ (1 - tanh^2(u))|u - u*|, and that factor is ~0 at saturation
+    # and ~1 mid-range -- so equal effort in pre-tanh space buys far less action-space
+    # accuracy in the middle, which is where the reward grades. Against the PPO-shaped
+    # clone fitted on the SAME 480 episodes in RAW action space (scripts/bc_to_ppo.py),
+    # on 6000 held-out expert states:
+    #
+    #     |pi - a_expert|       overall   0-2 m   5-20 m   80+ m
+    #       SAC clone (pre-tanh) 0.0590  0.0654   0.1285  0.0449   -> lands 47% (block 7000)
+    #       PPO clone (raw)      0.0405  0.0405   0.0874  0.0306   -> lands 54%
+    #
+    #     split by how saturated the expert action is:
+    #       max|a_exp| 0.0-0.9    SAC 0.0818  PPO 0.0447   1.83x worse
+    #       max|a_exp| 0.9-0.99   SAC 0.0612  PPO 0.0458   1.33x
+    #       max|a_exp| 0.99-1.0   SAC 0.0478  PPO 0.0381   1.25x
+    #
+    # The gap is LARGEST where the expert action is NOT saturated, which is the signature
+    # of the Jacobian weighting rather than of the vanishing gradient this fit was chosen
+    # to avoid. Left as it is because the PPO line is the one being pursued (the measured
+    # action signal-to-noise says a learned Q cannot rank actions on this task); the fix
+    # for a future SAC clone is a final fine-tune phase with the loss in action space,
+    # after the pre-tanh phase has done the conditioning.
+    #
     # atanh of a near-bound action is large; clamp so a handful of saturated
     # samples cannot dominate the regression.
     tgt_tr = tgt_tr.clamp(-5.0, 5.0)
