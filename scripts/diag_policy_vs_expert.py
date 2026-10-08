@@ -42,6 +42,12 @@ p = argparse.ArgumentParser()
 p.add_argument("--checkpoint", action="append", required=True)
 p.add_argument("--demos", action="append", default=None)
 p.add_argument("--samples", type=int, default=6000)
+p.add_argument("--vs", action="append", default=None,
+               help="also report the distance BETWEEN policies: each --checkpoint "
+                    "against this one. Distance to the expert cannot answer 'how far did "
+                    "RL move from its warm start' -- two policies can sit equally far "
+                    "from the expert in opposite directions, and reading it that way led "
+                    "to the claim that v77 moved 0.002 when it had moved 0.078.")
 args = p.parse_args()
 
 from lunarsim.rl.eval_loader import load_with_critic_for_diag  # noqa: E402
@@ -74,6 +80,7 @@ print(f"(action box is [-1,1]^4; the observation's own floor is ~0.047)\n")
 bands = ((0, 2), (2, 5), (5, 20), (20, 80), (80, 1e9))
 hdr = "".join(f"{(f'{lo}-{hi:g}m' if hi < 1e9 else f'{lo}+m'):>9}" for lo, hi in bands)
 print(f"  {'checkpoint':<34}{'overall':>9}{hdr}")
+acts = {}
 for ck in args.checkpoint:
     m, _ = load_with_critic_for_diag(ck, "cpu")
     with th.no_grad():
@@ -84,3 +91,22 @@ for ck in args.checkpoint:
                   for lo, hi in bands)
     name = ck.replace("out/", "").replace("/snapshots/orbit_descent", "@")
     print(f"  {name[-34:]:<34}{dist.mean():>9.4f}{row}")
+    acts[ck] = a
+
+if args.vs:
+    print(f"\n  distance BETWEEN policies -- how far a run moved from its warm start")
+    print(f"  {'pair':<34}{'overall':>9}{hdr}")
+    for ref in args.vs:
+        m, _ = load_with_critic_for_diag(ref, "cpu")
+        with th.no_grad():
+            a_ref = m.policy.actor(o, deterministic=True)
+        for ck, a in acts.items():
+            if ck == ref:
+                continue
+            dist = th.norm(a - a_ref, dim=1).numpy()
+            row = "".join(f"{dist[(alt >= lo) & (alt < hi)].mean():>9.4f}"
+                          if ((alt >= lo) & (alt < hi)).sum() >= 20 else f"{'-':>9}"
+                          for lo, hi in bands)
+            short = lambda q: q.replace("out/", "").replace(
+                "/snapshots/orbit_descent", "@").replace("_steps.zip", "")[-15:]
+            print(f"  {short(ref) + ' -> ' + short(ck):<34}{dist.mean():>9.4f}{row}")
