@@ -36,6 +36,21 @@ done
 #     clone's sigma = 0.031. At sigma = 1.0 the normal 3e-4 is appropriate.
 #   * --ent-coef 0.01 rather than 0.003, since there is no clone to protect and
 #     exploration is the binding constraint.
+#
+# AND gamma 0.999, not the 0.99 these runs were first written with. Measured on 480 demo
+# episodes, the terminal reward's weight in a gamma=0.99 return is 0.786 at touchdown but
+# 0.0054 at a 200 m release -- and the lateral speed that causes 94% of the failures is
+# already +5.86 m/s worse in the failing episodes at 100-200 m. So at 0.99 the part of the
+# objective that separates a landing from a crash is invisible exactly where the decision
+# is made, and a failure would have been uninterpretable:
+#
+#     gamma    return std   noise at a state   terminal signal   signal/noise
+#     0.990       2.27          0.272               0.004            0.01
+#     0.999       7.63          0.693               2.260            3.26
+#
+# The noise grows 2.5x and the signal 565x. SAC could not use 0.998 because a bootstrap
+# fixed point amplifies a per-step error by 1/(1-gamma); PPO's value is a regression onto
+# the realised return, so that failure mode does not apply.
 # ===================================================================== #
 
 for STAGE in land_handoff orbit_descent; do
@@ -43,7 +58,7 @@ for STAGE in land_handoff orbit_descent; do
   $PY scripts/train_sac_isaac.py --algo ppo \
     --only-stage "$STAGE" --steps-per-stage 1000000 --checkpoint-every 250000 \
     --max-rocks-per-env 0 --learning-rate 3e-4 \
-    --gamma 0.99 --ppo-gae-lambda 0.99 --ppo-n-steps 512 --ppo-n-epochs 10 \
+    --gamma 0.999 --ppo-gae-lambda 0.99 --ppo-n-steps 512 --ppo-n-epochs 10 \
     --ppo-batch-size 1024 --ppo-clip-range 0.2 --ent-coef 0.01 \
     --ppo-target-kl 0.03 \
     --proxy-log-every 20000 \
