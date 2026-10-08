@@ -47,7 +47,11 @@ from lunarsim.rl.curriculum import STAGES_BY_NAME  # noqa: E402
 from lunarsim.rl.obs_norm import OBS_SCALE  # noqa: E402
 
 p = argparse.ArgumentParser()
-p.add_argument("--demos", required=True)
+p.add_argument("--demos", required=True, action="append",
+               help="repeatable; all files are pooled. The orbit demo set is five files "
+                    "(the original 96 episodes plus four 120-episode blocks), and fitting "
+                    "on one of them is what left the first clone 4.7x worse on held-out "
+                    "expert states than on its own training set.")
 p.add_argument("--stage", required=True)
 p.add_argument("--out", required=True)
 p.add_argument("--net-arch", type=int, nargs="+", default=[512, 512])
@@ -78,23 +82,34 @@ args = p.parse_args()
 if args.stage not in STAGES_BY_NAME:
     raise SystemExit(f"no stage named {args.stage!r}")
 
-d = np.load(args.demos, allow_pickle=True)
-obs, act = d["obs"].astype(np.float32), d["actions"].astype(np.float32)
-if obs.shape[1] != len(OBS_SCALE):
-    raise SystemExit(
-        f"{args.demos} has {obs.shape[1]}-wide observations but the envs produce "
-        f"{len(OBS_SCALE)}. Re-record the demos; a clone fitted to a stale layout trains and "
-        f"saves without complaint and is wrong at every step.")
-if not args.include_failures and "landed" in d:
-    ends, landed = d["episode_ends"], d["landed"].astype(bool)
-    starts = np.concatenate([[0], ends[:-1]])
-    keep = np.zeros(len(obs), bool)
-    for s, e, lg in zip(starts, ends, landed):
-        if lg:
-            keep[s:e] = True
-    obs, act = obs[keep], act[keep]
-    print(f"[bc-ppo] {args.demos}: {len(obs)} transitions from "
-          f"{int(landed.sum())}/{len(landed)} episodes (landings only)", flush=True)
+_obs_l, _act_l, _n_ep, _n_land = [], [], 0, 0
+for _f in args.demos:
+    d = np.load(_f, allow_pickle=True)
+    o_f, a_f = d["obs"].astype(np.float32), d["actions"].astype(np.float32)
+    if o_f.shape[1] != len(OBS_SCALE):
+        raise SystemExit(
+            f"{_f} has {o_f.shape[1]}-wide observations but the envs produce "
+            f"{len(OBS_SCALE)}. Re-record the demos; a clone fitted to a stale layout "
+            f"trains and saves without complaint and is wrong at every step.")
+    if not args.include_failures and "landed" in d:
+        ends, landed = d["episode_ends"], d["landed"].astype(bool)
+        starts = np.concatenate([[0], ends[:-1]])
+        keep = np.zeros(len(o_f), bool)
+        for s, e, lg in zip(starts, ends, landed):
+            if lg:
+                keep[s:e] = True
+        o_f, a_f = o_f[keep], a_f[keep]
+        _n_ep += len(landed)
+        _n_land += int(landed.sum())
+        print(f"[bc-ppo] {_f}: {len(o_f)} transitions from "
+              f"{int(landed.sum())}/{len(landed)} episodes (landings only)", flush=True)
+    _obs_l.append(o_f)
+    _act_l.append(a_f)
+obs = np.concatenate(_obs_l)
+act = np.concatenate(_act_l)
+if len(args.demos) > 1:
+    print(f"[bc-ppo] pooled {len(obs)} transitions from {_n_land}/{_n_ep} episodes "
+          f"across {len(args.demos)} files", flush=True)
 
 rng = np.random.default_rng(0)
 perm = rng.permutation(len(obs))
