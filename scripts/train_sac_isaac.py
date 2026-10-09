@@ -143,6 +143,22 @@ parser.add_argument("--mc-terminal", action="store_true",
                           "value of about +0.5, and that head was 89%% of the critic's "
                           "total error while carrying 68%% of the land-versus-crash value "
                           "difference. Requires --dual-gamma.")
+parser.add_argument("--obs-field-default", action="store_true",
+                     help="build OBSERVATION slots 16-19 from the DEFAULT guidance field "
+                          "even when --reward-weight moves it, i.e. decouple the reward's "
+                          "target from the observation's feature. Measured reason: the "
+                          "field does two jobs and they want opposite things. Refitting "
+                          "the descent schedule onto what landing trajectories actually "
+                          "fly improves the REWARD (the 2-5 m band's outcome AUC goes "
+                          "0.516 -> 0.746) and destroys the OBSERVATION: the BC clone "
+                          "refitted on the matching slots fell from 52.6%% to 39.1%% over "
+                          "192 episodes. A guidance error that tracks the behaviour "
+                          "perfectly is always ~0 and carries no information -- the "
+                          "'wrong' slow schedule was informative precisely because it was "
+                          "offset, encoding how fast the vehicle is descending. This flag "
+                          "keeps the informative feature and the corrected target at the "
+                          "same time, and it also removes the train/eval skew risk, since "
+                          "an evaluation env at its defaults then matches by construction.")
 parser.add_argument("--altitude-replay", type=float, default=0.0, metavar="FRAC",
                      help="fraction of every critic batch drawn from BELOW "
                           "--decisive-alt-m, instead of the ~14%% uniform sampling gives "
@@ -822,6 +838,9 @@ def main():
                 env_spacing_m=max_tile * 1.5, seed=args.terrain_seed,
                 max_rocks_per_env=args.max_rocks_per_env,
                 reward_fn=_reward_fn_from_args(args),
+                # See --obs-field-default: the observation's guidance field is pinned to
+                # the defaults while the reward uses the overrides.
+                reward_weights=(RewardWeights() if args.obs_field_default else None),
             )
         else:
             venv.params = stage.params
