@@ -458,6 +458,12 @@ class RewardWeights:
     vfield_vxy_c: float = 0.170
     vfield_vxy_p: float = 0.870
     vfield_vxy_floor_m_s: float = 0.30
+    # Altitude normalisation of the field error; see `_velocity_field_penalty`. p = 0.0
+    # reproduces the absolute-error form exactly. p = 0.75 with c = 3.8171 is the measured
+    # pair that gives the decisive 0-5 m band its step share of the shaping reward (15.8%
+    # against 14.8% of steps, up from 2.0%) while preserving the mean penalty.
+    vfield_norm_p: float = 0.0
+    vfield_norm_c: float = 1.0
     # ---- TILE BOUNDARY ----
     # Added because the first learner able to actually optimise this reward found that it
     # does not protect against leaving the map. PPO, warm-started and run 2M steps on
@@ -689,6 +695,40 @@ def _velocity_field_penalty(w: RewardWeights, alt_m: float, dx: float, dy: float
     # direction is the vehicle's own, so the lateral error is a scalar speed difference.
     lat = float(np.hypot(vx, vy))
     err = float(np.sqrt((lat - speed_t) ** 2 + (vz - vz_t) ** 2))
+
+    # ---- ALTITUDE NORMALISATION -------------------------------------------------- #
+    # The absolute error is not where the task is decided. The field's own targets run
+    # from 17 m/s at a 200 m release to 0.30 m/s at touchdown, so the error available to
+    # be charged scales with altitude -- and measured over 480 demo episodes that put
+    # 82.5% of the shaping reward in the 50-200 m cruise and 1.5% in the decisive 0-5 m
+    # band, which is 14.8% of the steps and 94% of the failures (lateral speed at
+    # touchdown, median overshoot 1.39x against a 1.2 m/s limit).
+    #
+    # v86 measured the consequence from the other side: PPO at gamma 0.999 improved the
+    # proxy return with a 95% interval EXCLUDING zero (+0.027 to +2.408 per 1M steps) and
+    # left the landing rate unresolved (+0.92 pts/1M, CI -3.90 to +5.74). The landing rate
+    # not moving means the terminal contribution did not move, so the whole proxy gain came
+    # from the cruise. The agent did exactly what it was paid to do.
+    #
+    # Dividing by target^p rebalances it. The exponent was MEASURED rather than picked --
+    # the 0-5 m band's share of the shaping reward against each candidate:
+    #
+    #     p = 0.00 (absolute, current)    2.0%
+    #     p = 0.50                        8.5%
+    #     p = 0.75                       15.8%   <- step share is 14.8%
+    #     p = 1.00 (fully relative)      26.8%
+    #
+    # 1.0 over-corrects: the lateral speed that causes the failures is SET UP high up
+    # (failing episodes are already +5.86 m/s faster at 100-200 m), so the cruise must
+    # stay priced. `vfield_norm_c` then restores the MEAN penalty exactly, so this changes
+    # the distribution across altitude and not the shaping-to-terminal balance -- 3.8171
+    # is the constant measured to do that at p = 0.75.
+    #
+    # Default p = 0.0 and c = 1.0, i.e. the old behaviour bit-for-bit, so no earlier run's
+    # number moves.
+    if w.vfield_norm_p > 0.0:
+        scale = max(speed_t, w.vfield_vxy_floor_m_s) ** w.vfield_norm_p
+        err = err * w.vfield_norm_c / max(scale, 1e-6)
     return min(w.vfield_k * err, w.vfield_cap)
 
 
