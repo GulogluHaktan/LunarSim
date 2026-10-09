@@ -51,6 +51,15 @@ parser.add_argument("--stochastic", action="store_true",
                           "large gap between the two means exploration noise is costing "
                           "landings that the mean policy would make -- which poisons the "
                           "replay buffer with failures the policy did not intend.")
+parser.add_argument("--reward-weight", action="append", default=[], metavar="NAME=VALUE",
+                     help="override a RewardWeights field, repeatable. REQUIRED whenever "
+                          "the checkpoint was trained under non-default weights that move "
+                          "the GUIDANCE FIELD, because observation slots 16-19 are "
+                          "target_velocity() evaluated at the current state and the env "
+                          "reads them off the reward_fn's own weights. Without it a clone "
+                          "fitted on a refitted schedule is evaluated against the old one "
+                          "and reads 7%% instead of its real rate -- measured, not "
+                          "hypothetical.")
 parser.add_argument("--headless", action="store_true", default=True)
 args = parser.parse_args()
 
@@ -107,7 +116,24 @@ def main():
     stage = STAGES_BY_NAME[args.stage]
     params = stage.params
     tile = generate_tile(terrain_config(stage, args.terrain_seed, args.terrain_grid_n))
-    env = IsaacLanderEnv(tile=tile, params=params, reward_fn=default_reward_fn,
+    # The reward_fn carries the weights the env builds observation slots 16-19 from
+    # (obs_norm.resolve_reward_weights reads them off the closure), so a checkpoint
+    # trained under a refitted guidance field has to be evaluated under the same one.
+    from dataclasses import fields as _fields
+
+    from lunarsim.rl.reward import RewardWeights as _RW, make_apollo_reward_fn as _mk
+    _valid = {f.name for f in _fields(_RW)}
+    _over = {}
+    for _it in args.reward_weight:
+        _n, _, _v = _it.partition("=")
+        _n = _n.strip()
+        if _n not in _valid:
+            raise SystemExit(f"no RewardWeights field named {_n!r}")
+        _over[_n] = float(_v)
+    _rfn = _mk(_RW(**_over)) if _over else default_reward_fn
+    if _over:
+        print(f"[eval] guidance field from overridden weights: {_over}", flush=True)
+    env = IsaacLanderEnv(tile=tile, params=params, reward_fn=_rfn,
                           seed=args.seed0, lunarsim_root=args.lunarsim_root,
                           legacy_obs15=args.legacy_obs15,
                           legacy_obs16=args.legacy_obs16)
