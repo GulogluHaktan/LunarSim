@@ -51,6 +51,17 @@ parser.add_argument("--stochastic", action="store_true",
                           "large gap between the two means exploration noise is costing "
                           "landings that the mean policy would make -- which poisons the "
                           "replay buffer with failures the policy did not intend.")
+parser.add_argument("--handoff-checkpoint", type=str, default=None,
+                     help="a SECOND policy to fly below --handoff-alt, making this a "
+                          "composite of an approach policy and a landing specialist. The "
+                          "two-model split only counts for the orbital-landing goal if the "
+                          "halves compose, and a specialist measured on land_handoff alone "
+                          "is a means rather than a result -- this is how the composition "
+                          "gets measured on orbit_descent itself.")
+parser.add_argument("--handoff-alt", type=float, default=25.0,
+                     help="altitude (m) at which --handoff-checkpoint takes over. The "
+                          "default matches land_handoff's upper entry bound, so the "
+                          "specialist is used exactly where it was trained.")
 parser.add_argument("--reward-weight", action="append", default=[], metavar="NAME=VALUE",
                      help="override a RewardWeights field, repeatable. REQUIRED whenever "
                           "the checkpoint was trained under non-default weights that move "
@@ -141,6 +152,28 @@ def main():
     # made SAC.load raise and turned six evaluation cells into blank lines.
     from lunarsim.rl.eval_loader import load_actor_for_eval
     model = load_actor_for_eval(args.checkpoint, device="cpu")
+    if args.handoff_checkpoint:
+        _below = load_actor_for_eval(args.handoff_checkpoint, device="cpu")
+        _above = model
+        from lunarsim.rl.obs_norm import OBS_SCALE as _OSC
+
+        class _Composite:
+            """Approach policy above the handoff altitude, specialist below it.
+
+            The switch reads the observation's own altitude slot (2, scaled by
+            OBS_SCALE[2]) rather than the env's state, so the composite sees exactly what
+            the policies see and the threshold cannot drift from what they were trained on.
+            """
+            def predict(self, obs, state=None, episode_start=None, deterministic=False):
+                import numpy as _np
+                o = _np.asarray(obs)
+                alt = float(o[..., 2]) * float(_OSC[2])
+                m = _below if alt <= args.handoff_alt else _above
+                return m.predict(obs, state, episode_start, deterministic)
+
+        model = _Composite()
+        print(f"[composite] {args.handoff_checkpoint} below {args.handoff_alt:g} m, "
+              f"{args.checkpoint} above", flush=True)
     max_steps = int(params.max_episode_s / params.dt_s) + 5
 
     n_safe = n_lost = n_timeout = n_left = n_crash = 0
