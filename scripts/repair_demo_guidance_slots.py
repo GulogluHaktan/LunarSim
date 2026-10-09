@@ -31,9 +31,31 @@ from lunarsim.rl.reward import RewardWeights  # noqa: E402
 ap = argparse.ArgumentParser()
 ap.add_argument("files", nargs="+")
 ap.add_argument("--dry-run", action="store_true")
+ap.add_argument("--reward-weight", action="append", default=[], metavar="NAME=VALUE",
+                help="override a RewardWeights field, repeatable. REQUIRED when the "
+                     "field's own constants are what changed: the slots must be rebuilt "
+                     "with the SAME weights the run will use, or the policy is trained on "
+                     "a guidance error computed from one schedule while the reward grades "
+                     "it against another. Without this the script silently used the "
+                     "defaults, which is the train/eval skew that took this project's "
+                     "orbit clone from 22%% to 2%% on an unchanged checkpoint.")
 args = ap.parse_args()
 
-w = RewardWeights()
+from dataclasses import fields as _fields  # noqa: E402
+
+_valid = {f.name for f in _fields(RewardWeights)}
+_over = {}
+for _item in args.reward_weight:
+    if "=" not in _item:
+        raise SystemExit(f"--reward-weight wants NAME=VALUE, got {_item!r}")
+    _n, _, _v = _item.partition("=")
+    _n = _n.strip()
+    if _n not in _valid:
+        raise SystemExit(f"no RewardWeights field named {_n!r}")
+    _over[_n] = float(_v)
+w = RewardWeights(**_over)
+print(f"[repair] rebuilding slots 16-19 with weights: "
+      f"{_over if _over else 'DEFAULTS'}", flush=True)
 for path in args.files:
     d = dict(np.load(path, allow_pickle=True))
     for key in ("obs", "next_obs"):
