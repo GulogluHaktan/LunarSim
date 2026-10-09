@@ -36,7 +36,7 @@ seed 7, `scripts/diag_stage_landing_rate.py`.
 |---|---|---|
 | controller | 12.0% (23/192) | the bar on this stage |
 | **landing clone** | **11.5% (22/192)** | matches its teacher exactly |
-| PPO from it, 200k-800k | 10% per block | at or below the clone |
+| PPO from it, 200k/400k/600k/800k/1M | **10/96 at every one** | identical, and below the clone |
 | SAC from scratch | 0.0% | |
 | PPO from scratch | 0.0-1.2% | |
 
@@ -117,7 +117,11 @@ never on the training log; score it on K **fresh** blocks. ±14.1 at one block,
   AUC 0.516 → 0.746) took the clone to 39.1%; decoupled, it sat flat.
 - **Horizon length is not the obstacle.** land_handoff has a 150-400 step
   credit distance, a weak 11.5% clone, 88 points of headroom and n≈92 episodes
-  per reading — and the trained policy measures 10% against the clone's 11%.
+  per reading — every one of the five conditions that were supposed to make RL
+  work — and all five checkpoints measure 10/96 against the clone's 11/96.
+  Five identical readings over 1M steps. This is the strongest single
+  constraint in this handover: it rules out horizon length, baseline strength
+  and measurement power together.
 - **The task is feasible and the stage is not mis-sized.** 100% of
   land_handoff's entry distribution is vertically feasible (T/W 2.52, worst
   corner needs 5.1 m of the 8 m available), and a vehicle entering at 6 m/s
@@ -155,8 +159,10 @@ v87 was predictable from a table that takes a minute.
 Nothing should be running. Check with
 `ps -eo cmd | grep -E "train_sac_isaac|diag_stage" | grep -v "grep -E"`.
 
-The last pipeline (`land_warm.sh`) was finishing its block-7000 selection sweep:
-200k/400k/600k/800k all 10/96. The 1M cell may still be in flight.
+The last pipeline (`land_warm.sh`) completed. Its block-7000 selection sweep read
+**10/96 at all five checkpoints** (200k, 400k, 600k, 800k, 1M) against the clone's
+11/96 — five identical readings across 1M steps, while the policy moved 0.032 in
+action space. The movement was real and its effect on the outcome was nil.
 
 Artefacts worth keeping:
 - `out/bc_ppo_orbit_v2.zip` — the 52.6% PPO clone (policy + value head, γ=0.99)
