@@ -1,108 +1,110 @@
+🇬🇧 English · 🇹🇷 [Türkçe](README.tr.md)
+
 # LunarSim
 
-**Isaac Sim / Isaac Lab'a bağlanabilen, yeniden kullanılabilir Ay arazisi, ışık, LiDAR ve RL ortamı simülasyon kütüphanesi.**
+**A reusable lunar terrain, lighting, LiDAR and RL-environment simulation library that can plug into Isaac Sim / Isaac Lab.**
 
-`lunarsim/core` Isaac'e bağımlı değildir (numpy/scipy/rasterio/skyfield); `lunarsim/adapters/isaac` bunu Isaac Sim USD sahnesine bağlar. Gerçek Ay verisiyle arazi, güneş/gölge, LiDAR ground-truth, toz ve iniş (lander) RL ortamları üretir.
+`lunarsim/core` does not depend on Isaac (numpy/scipy/rasterio/skyfield); `lunarsim/adapters/isaac` attaches it to an Isaac Sim USD scene. It produces terrain from real lunar data, sun/shadow, LiDAR ground truth, dust and lander RL environments.
 
-![LunarSim iniş panosu](docs/assets/img/landing_dashboard_poster.jpg)
-*Ay iniş görevi için RL dashboard'u (poster kare).*
+![LunarSim landing dashboard](docs/assets/img/landing_dashboard_poster.jpg)
+*RL dashboard for the lunar landing task (poster frame).*
 
-## Özet
+## Summary
 
 | | |
 |---|---|
-| **Problem** | Ay'a iniş (özellikle dağlık bölge / tehlike kaçınma) için gerçekçi, tekrarlanabilir arazi ve sensör simülasyonu; RL/ES/MPC karşılaştırması |
-| **Yöntem** | Gerçek DEM/LOLA verisiyle arazi, hazard/kriter analizi; RL (PPO/SAC), evrimsel stratejiler (ES), MPC ve guided-gain kontrolcüleri |
-| **Simülasyon / donanım** | Isaac Sim 6.0.1 + Isaac Lab (Docker, NVIDIA GPU); çekirdek Isaac'siz de çalışır |
-| **Makale** | Raporlar: [`report/`](report/) (RL, ES, MPC, krater, problem kataloğu PDF'leri) |
+| **Problem** | Realistic, repeatable terrain and sensor simulation for lunar landing (especially highlands / hazard avoidance); RL/ES/MPC comparison |
+| **Method** | Terrain from real DEM/LOLA data, hazard/criterion analysis; RL (PPO/SAC), evolution strategies (ES), MPC and guided-gain controllers |
+| **Simulation / hardware** | Isaac Sim 6.0.1 + Isaac Lab (Docker, NVIDIA GPU); the core also runs without Isaac |
+| **Paper** | Reports: [`report/`](report/) (RL, ES, MPC, crater, problem-catalogue PDFs) |
 
-### Sistem mimarisi
+### System architecture
 
-![Arazi / ROI detay](assets/plots/roi_differential_detail.png)
-*Alan-bazlı detay kontrolü (Gaussian ROI) farkı.*
+![ROI detail](assets/plots/roi_differential_detail.png)
+*Difference from area-based detail control (Gaussian ROI).*
 
-`lunarsim/core` (arazi, ışık, LiDAR, toz) → `lunarsim/adapters/isaac` (USD sahne) → `lunarsim/rl`, `lunarsim/evo`, `lunarsim/control` (ortamlar ve kontrolcüler). Ayrıntılı kullanım: [docs/README_ayrintili.md](docs/README_ayrintili.md).
+`lunarsim/core` (terrain, light, LiDAR, dust) → `lunarsim/adapters/isaac` (USD scene) → `lunarsim/rl`, `lunarsim/evo`, `lunarsim/control` (environments and controllers). Detailed usage: [docs/README_ayrintili.md](docs/README_ayrintili.md) (Turkish).
 
-### Akış şeması (nasıl çalışır)
+### Flow diagram (how it works)
 
 ```mermaid
 flowchart TD
-  DATA["Gerçek Ay verisi - DEM / LOLA"] --> CORE["core: arazi, ışık, LiDAR, toz"]
-  CORE --> ISAAC["adapters/isaac: USD sahne"]
-  CORE --> AN["Analitik backend - Isaac'siz"]
-  ISAAC --> ENVS["RL / ES / MPC ortamları"]
+  DATA["Real lunar data - DEM / LOLA"] --> CORE["core: terrain, light, LiDAR, dust"]
+  CORE --> ISAAC["adapters/isaac: USD scene"]
+  CORE --> AN["Analytic backend - no Isaac"]
+  ISAAC --> ENVS["RL / ES / MPC environments"]
   AN --> ENVS
-  ENVS --> RUN["Eğitim ve değerlendirme betikleri"]
-  RUN --> REP["report/: PDF raporlar"]
+  ENVS --> RUN["Training and evaluation scripts"]
+  RUN --> REP["report/: PDF reports"]
 ```
 
-Çekirdek Isaac'ten bağımsızdır; aynı ortamlar hem hızlı analitik backend'de hem Isaac sahnesinde çalışır.
+The core is independent of Isaac; the same environments run both on the fast analytic backend and in an Isaac scene.
 
-## Seçilmiş sonuçlar
+## Selected results
 
-Sonuçlar ve grafikler raporlarda toplanmıştır:
+Results and plots are collected in the reports:
 
-- RL iniş raporu: [`report/lunarsim_rl_rapor.pdf`](report/lunarsim_rl_rapor.pdf)
+- RL landing report: [`report/lunarsim_rl_rapor.pdf`](report/lunarsim_rl_rapor.pdf)
 - RL vs ES: [`report/lunarsim_rl_vs_es_rapor.pdf`](report/lunarsim_rl_vs_es_rapor.pdf)
 - MPC: [`report/lunarsim_mpc_rapor.pdf`](report/lunarsim_mpc_rapor.pdf)
-- Evrimsel arama: [`report/lunarsim_evo_rapor.pdf`](report/lunarsim_evo_rapor.pdf)
-- Krater karşılaştırması: [`report/lunarsim_krater_rapor.pdf`](report/lunarsim_krater_rapor.pdf)
+- Evolutionary search: [`report/lunarsim_evo_rapor.pdf`](report/lunarsim_evo_rapor.pdf)
+- Crater comparison: [`report/lunarsim_krater_rapor.pdf`](report/lunarsim_krater_rapor.pdf)
 
 ![landing map](docs/assets/img/landing_map_final.jpg)
-*İniş sonrası harita görünümü.*
+*Map view after landing.*
 
-*TODO: README'ye sayısal özet tablosu (başarı oranı, ortalama hız) raporlardan taşınacak.*
+*TODO: move a numeric summary table (success rate, mean speed) from the reports into the README.*
 
-*Tüm şekiller `report/` ve `docs/assets/` klasöründe.*
+*All figures are in `report/` and `docs/assets/`.*
 
-## Kurulum
+## Installation
 
-### Gereksinimler
-- Linux, Python 3; Isaac kısmı için Docker + NVIDIA Container Toolkit + GPU (~25 GB imaj)
+### Requirements
+- Linux, Python 3; for the Isaac part Docker + NVIDIA Container Toolkit + GPU (~25 GB images)
 
-### Adımlar
+### Steps
 ```bash
 git clone https://github.com/GulogluHaktan/LunarSim.git
 cd LunarSim
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/python -m pytest tests/ -v
-./scripts/install_isaac_docker.sh      # opsiyonel: Isaac Sim / Isaac Lab imajları
+./scripts/install_isaac_docker.sh      # optional: Isaac Sim / Isaac Lab images
 ```
 
-## Kullanım
+## Usage
 
-Çekirdek (Isaac'siz) arazi/LiDAR/RL üretimi ve Isaac doğrulaması için komutlar: [docs/README_ayrintili.md](docs/README_ayrintili.md) (*Hızlı kullanım*, *Script indeksi*).
-Beklenen çıktı: `pytest` testlerinin geçmesi; betikler `out/` altına video/veri üretir (git dışı).
+Commands for core (Isaac-free) terrain/LiDAR/RL generation and Isaac validation: [docs/README_ayrintili.md](docs/README_ayrintili.md) (*Hızlı kullanım*, *Script indeksi*).
+Expected output: `pytest` passes; scripts write videos/data under `out/` (git-ignored).
 
-## Sonuçları yeniden üret
+## Reproducing the results
 
-| Çıktı | Komut |
+| Output | Command |
 |---|---|
-| RL raporu | `python report/build_report.py` |
-| RL vs ES raporu | `python report/build_rl_vs_es_report.py` |
-| MPC raporu | `python report/build_mpc_report.py` |
-| Evo raporu | `python report/build_evo_report.py` |
-| Krater raporu | `python report/build_krater_rapor.py` |
+| RL report | `python report/build_report.py` |
+| RL vs ES report | `python report/build_rl_vs_es_report.py` |
+| MPC report | `python report/build_mpc_report.py` |
+| Evo report | `python report/build_evo_report.py` |
+| Crater report | `python report/build_krater_rapor.py` |
 
-## Proje yapısı
+## Project structure
 
 ```
 LunarSim/
 ├── lunarsim/
-│   ├── core/         # arazi, ışık, LiDAR, toz (Isaac'siz)
-│   ├── adapters/     # isaac: USD sahne bağlayıcıları
-│   ├── rl/           # RL ortamları, ödül, curriculum
-│   ├── evo/          # ES / MPC / politika kodları
-│   └── control/      # klasik kontrolcüler
-├── scripts/          # eğitim, değerlendirme, kayıt, rapor hattı
+│   ├── core/         # terrain, light, LiDAR, dust (Isaac-free)
+│   ├── adapters/     # isaac: USD scene bindings
+│   ├── rl/           # RL environments, reward, curriculum
+│   ├── evo/          # ES / MPC / policy code
+│   └── control/      # classical controllers
+├── scripts/          # training, evaluation, recording, report pipeline
 ├── tests/            # pytest
-├── report/           # rapor üreticileri ve PDF çıktıları
-├── docs/ assets/     # dokümanlar, README görselleri
+├── report/           # report builders and PDF outputs
+├── docs/ assets/     # documents, README images
 └── pyproject.toml
 ```
 
-## Atıf, lisans, iletişim
+## Citation, license, contact
 
 ```bibtex
 @misc{lunarsim2026,
@@ -112,4 +114,4 @@ LunarSim/
   url    = {https://github.com/GulogluHaktan/LunarSim}
 }
 ```
-Lisans: TODO. İletişim: MTA Yapay Zeka Merkezi, Haktan Güloğlu.
+License: TODO. Contact: MTA Artificial Intelligence Center, Haktan Güloğlu.
