@@ -23,6 +23,21 @@
 
 `lunarsim/core` (arazi, ışık, LiDAR, toz) → `lunarsim/adapters/isaac` (USD sahne) → `lunarsim/rl`, `lunarsim/evo`, `lunarsim/control` (ortamlar ve kontrolcüler). Ayrıntılı kullanım: [docs/README_ayrintili.md](docs/README_ayrintili.md).
 
+### Akış şeması (nasıl çalışır)
+
+```mermaid
+flowchart TD
+  DATA["Gerçek Ay verisi - DEM / LOLA"] --> CORE["core: arazi, ışık, LiDAR, toz"]
+  CORE --> ISAAC["adapters/isaac: USD sahne"]
+  CORE --> AN["Analitik backend - Isaac'siz"]
+  ISAAC --> ENVS["RL / ES / MPC ortamları"]
+  AN --> ENVS
+  ENVS --> RUN["Eğitim ve değerlendirme betikleri"]
+  RUN --> REP["report/: PDF raporlar"]
+```
+
+Çekirdek Isaac'ten bağımsızdır; aynı ortamlar hem hızlı analitik backend'de hem Isaac sahnesinde çalışır.
+
 ## Seçilmiş sonuçlar
 
 Sonuçlar ve grafikler raporlarda toplanmıştır:
