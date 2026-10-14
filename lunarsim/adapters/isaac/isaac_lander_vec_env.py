@@ -72,13 +72,30 @@ _STATE_FIELDS = (
 
 class _EnvView:
     """Scalar-state stand-in for one env, so an unmodified single-env
-    `reward_fn` (only ever touches `.params`/`.state`) can be called per-env
-    against this vectorized backend."""
-    __slots__ = ("params", "state")
+    `reward_fn` (only ever touches `.params`/`.state`/`.tile`) can be called
+    per-env against this vectorized backend.
 
-    def __init__(self, params, state):
+    `tile` IS LOAD-BEARING AND WAS MISSING. `reward._edge_penalty` reads the
+    tile through `getattr(getattr(env, "tile", None), "size_m", 0.0)`, and its
+    first guard is `if w.edge_k <= 0.0 or not tile_size_m: return 0.0`. With no
+    `tile` slot that lookup yielded 0.0, so the term was identically zero in
+    THIS env -- the only one `scripts/train_sac_isaac.py` trains against --
+    while being live in `AnalyticLanderEnv` and `IsaacLanderEnv`, which both
+    carry a real `.tile`. Measured: at `tile_size_m=1680` and r=800 m the
+    penalty is 2328.4; at 0.0 it is 0.0.
+
+    That matters because the term is not decorative. `reward.py:467-500`
+    records a learner exploiting exactly this: `left_tile` truncation pays no
+    timeout penalty, so flying off the map was a free exit from a crash worth
+    -6 to -24, and `edge_k = 6400.0` exists to price it. Every RL run in this
+    project to date trained with that price set to zero.
+    """
+    __slots__ = ("params", "state", "tile")
+
+    def __init__(self, params, state, tile=None):
         self.params = params
         self.state = state
+        self.tile = tile
 
 
 class IsaacLanderVecEnv(VecEnv):
@@ -244,7 +261,8 @@ class IsaacLanderVecEnv(VecEnv):
             self._ground_z(i, x_world + radius * np.cos(a), y_world + radius * np.sin(a))
             for a in np.deg2rad([0.0, 90.0, 180.0, 270.0])
         ]
-        return float(max(heights) - min(heights))
+        from lunarsim.core.terrain.criterion import effective_leg_diff
+        return float(effective_leg_diff(heights, radius))
 
     def _reset_one(self, i: int):
         p = self.params
@@ -564,7 +582,7 @@ class IsaacLanderVecEnv(VecEnv):
             # guidance-field observation depends on.
             scalar_state["x"] = scalar_state["x"] - self.env_origins[i][0]
             scalar_state["y"] = scalar_state["y"] - self.env_origins[i][1]
-            view = _EnvView(p, scalar_state)
+            view = _EnvView(p, scalar_state, self._tiles[i])
             rewards[i] = self.reward_fn(view, info)
             done = terminated or truncated
             dones[i] = done

@@ -46,7 +46,8 @@ construction rather than by tuning.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
+from typing import Sequence
 
 import numpy as np
 
@@ -522,6 +523,55 @@ class RewardWeights:
     touchdown_k: float = 120.0
     touchdown_penalty_cap: float = 480.0
 
+    # A STEP paid only when `landed_safely` holds, ON TOP of the continuous ramp
+    # above. Default 0.0, so every checkpoint and every recorded number predating
+    # this weight reproduces exactly.
+    #
+    # WHY IT IS NEEDED, measured on 192 paired validation episodes. The metric
+    # this project is judged on is binary, and the ramp above is continuous
+    # THROUGH ZERO at exactly that boundary:
+    #
+    #     terminal = max(120*(1 - severity), -480) * 0.05
+    #     sev 0.99 -> +0.060     sev 1.00 -> 0.000     sev 1.01 -> -0.060
+    #
+    # so crossing the success boundary by 1% of a limit is worth 0.120 units.
+    # Against that, two guided-gain runs scored:
+    #
+    #     run    landed        mean return    on converted eps   on still-failing eps
+    #     v2     60/192 31.2%     -20.54            +2.52               -5.21
+    #     v2b    42/192 21.9%     -15.94            +2.60               +1.62
+    #     base   19/192  9.9%     -17.52
+    #
+    # The run that landed MORE scored a WORSE return, and PPO maximises return --
+    # so its objective preferred the weaker-landing policy. The reason is in the
+    # last two columns: per episode, v2's 41 conversions pay +0.54 while its 132
+    # still-failing episodes move -3.58. The gradient belongs to the ~85% that do
+    # not land, and the event being measured contributes +-0.06 at the margin.
+    #
+    # This is NOT a mis-ranking. AUC(return -> landed) is 1.000 on the controller
+    # arm and 0.973-0.987 on the policies, so given a touchdown the reward orders
+    # outcomes correctly. The defect is in the gradient across policies.
+    #
+    # The shape is Gaudet/Linares/Furfaro's (arXiv:1810.08719): kappa is paid as a
+    # step, only when position, velocity, attitude AND rate are all inside their
+    # limits. `rl-cokus-literatur-taramasi.md` section 7 already recorded that
+    # ("Their terminal bonus IS a step function ... exactly the shape this project
+    # replaced") without drawing the consequence.
+    #
+    # It is added to the ramp rather than replacing it. The ramp was introduced
+    # because a pure step gave gradient methods nothing to climb toward -- the old
+    # form jumped 411 points across the boundary against a 32-point dense sum, and
+    # the actor learned "commit and crash". That reason still holds; what was
+    # missing was any weight on the boundary itself.
+    #
+    # SIZING. The measured shaping range of a failing episode is ~5 units, so the
+    # step has to be at least that order to outweigh it: 100.0 here is 5.0 units
+    # after `reward_total_scale`. Screen a value with
+    # `scripts/diag_reward_separation.py` before spending a run on it -- that costs
+    # a minute, and this project has twice shipped a reward change that improved
+    # the reward and moved the landing rate the wrong way.
+    landed_step_k: float = 0.0
+
     # ---- DEPRECATED: the old two-branch terminal. Kept so that older configs
     # and recorded `reward_weights` blobs still load; no longer read by
     # `_terminal_reward`.
@@ -880,7 +930,15 @@ def _terminal_reward(w: RewardWeights, info: dict, severity: float | None = None
     # outcomes and the two boundaries cannot drift apart the way they did when a
     # label fix and a grading fix were applied to different states.
     sev = float(severity) if severity is not None else 1.0
-    return float(max(w.touchdown_k * (1.0 - sev), -w.touchdown_penalty_cap))
+    out = max(w.touchdown_k * (1.0 - sev), -w.touchdown_penalty_cap)
+    # The step for actually landing, on top of the ramp. Gated on the SAME
+    # `sev < 1.0` expression the ramp uses rather than on `info["landed_safely"]`,
+    # so the reward's notion of success and the env's label cannot drift apart --
+    # which is exactly how a label fix and a grading fix once got applied to two
+    # different states. See the `landed_step_k` block in RewardWeights.
+    if w.landed_step_k > 0.0 and sev < 1.0:
+        out += w.landed_step_k
+    return float(out)
 
 
 def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMSpecs | None = None):
@@ -982,3 +1040,37 @@ def make_apollo_reward_fn(weights: RewardWeights | None = None, specs: ApolloLMS
 
 
 default_reward_fn = make_apollo_reward_fn()
+
+
+def weights_from_overrides(pairs: Sequence[str] | None) -> RewardWeights:
+    """`["landed_step_k=100", "vfield_norm_p=0.75"]` -> a `RewardWeights`.
+
+    ONE parser, because this project's documented failure mode is exactly this
+    code existing in several places and drifting: `train_sac_isaac.py`,
+    `diag_stage_landing_rate.py`, `repair_demo_guidance_slots.py` and
+    `recompute_demo_rewards.py` each carry their own copy, and they do not
+    agree -- one lacks the `"=" in` guard, another lacks `.strip()` on the name.
+
+    An unknown field is a hard error rather than a warning. A silently ignored
+    reward override is how this project once read 7% for a clone whose real
+    rate was 39.1%.
+    """
+    w = RewardWeights()
+    if not pairs:
+        return w
+    valid = {f.name for f in fields(RewardWeights)}
+    upd: dict[str, float] = {}
+    for item in pairs:
+        if "=" not in item:
+            raise SystemExit(f"--reward-weight wants NAME=VALUE, got {item!r}")
+        name, _, raw = item.partition("=")
+        name = name.strip()
+        if name not in valid:
+            raise SystemExit(
+                f"RewardWeights has no field {name!r}. "
+                f"Closest: {sorted(n for n in valid if name[:4] in n) or sorted(valid)[:8]}")
+        try:
+            upd[name] = float(raw)
+        except ValueError:
+            raise SystemExit(f"--reward-weight {name} wants a number, got {raw!r}")
+    return replace(w, **upd)

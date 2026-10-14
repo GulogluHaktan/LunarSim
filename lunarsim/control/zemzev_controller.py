@@ -196,9 +196,22 @@ class ZemZevController:
         # COVERAGE limit: the clone is fitted on 48 landed episodes / 33,758 transitions,
         # and more demonstrations attack that directly.
         self.stateless_tgo = bool(stateless_tgo)
+        # Lateral aim: a horizontal velocity the damping channel steers toward instead of zero
+        # (world frame, m/s). Faded to zero between `aim_fade_alt_m` and the final-approach altitude,
+        # so touchdown is still a zero-lateral-velocity touchdown. (0, 0) reproduces the original law.
+        self.v_ref = (0.0, 0.0)
+        self.aim_fade_alt_m = 40.0
+        # Optional horizontal aim POINT (world frame, m): the horizontal channel becomes full ZEM/ZEV towards it.
+        self.aim_pos: tuple[float, float] | None = None
+        self.pos_fade_alt_m = 40.0      # the aim point's weight falls to zero at the final-approach altitude
+        self._pos_w = 1.0
+        self.final_pos_kp = 0.0
+        self.terrain_ahead = False
 
     def reset(self) -> None:
         self.tgo = None
+        self.v_ref = (0.0, 0.0)
+        self.aim_pos = None
 
     def _mass_kg(self, s: dict) -> float:
         return self.p.dry_mass_kg + s["fuel_kg"]
@@ -243,7 +256,7 @@ class ZemZevController:
 
     @staticmethod
     def _a_cmd(relx: float, rely: float, alt: float, vx: float, vy: float, vz: float,
-               grav: float, tgo: float) -> np.ndarray:
+               grav: float, tgo: float, pos_aim: float = 0.0) -> np.ndarray:
         """Vertical channel: full D'Souza ZEM/ZEV feedback guidance to the
         ground plane (position AND velocity both matter there -- touchdown
         must happen at z=ground with vz within the safe limit). Gravity is
@@ -271,11 +284,12 @@ class ZemZevController:
         """
         zem_z = -(alt + vz * tgo - 0.5 * grav * tgo ** 2)
         zev_z = -(vz - grav * tgo)
-        return np.array([
-            -2.0 * vx / tgo,
-            -2.0 * vy / tgo,
-            6.0 * zem_z / tgo ** 2 - 2.0 * zev_z / tgo,
-        ])
+        ax, ay = -2.0 * vx / tgo, -2.0 * vy / tgo
+        if pos_aim > 0.0:   # blend in full ZEM/ZEV on the horizontal channel: arrive over (relx, rely) = 0 with zero velocity
+            fx = 6.0 * (-(relx + vx * tgo)) / tgo ** 2 - 2.0 * (-vx) / tgo
+            fy = 6.0 * (-(rely + vy * tgo)) / tgo ** 2 - 2.0 * (-vy) / tgo
+            ax, ay = (1 - pos_aim) * ax + pos_aim * fx, (1 - pos_aim) * ay + pos_aim * fy
+        return np.array([ax, ay, 6.0 * zem_z / tgo ** 2 - 2.0 * zev_z / tgo])
 
     def _solve_feasible_tgo(self, relx: float, rely: float, alt: float, vx: float, vy: float, vz: float,
                              grav: float, engine_a_max: float, tgo0: float) -> tuple[float, np.ndarray]:
@@ -290,7 +304,8 @@ class ZemZevController:
         `thrust_authority_margin` of what the engine can actually deliver.
         """
         tgo = max(tgo0, self.g.tgo_floor_s)
-        a_cmd = self._a_cmd(relx, rely, alt, vx, vy, vz, grav, tgo)
+        pa = self._pos_w if self.aim_pos is not None else 0.0
+        a_cmd = self._a_cmd(relx, rely, alt, vx, vy, vz, grav, tgo, pa)
         for _ in range(60):
             # REAL BUG FOUND via this feasibility test: this only checked
             # the vector's MAGNITUDE against the engine's max thrust -- it
@@ -314,7 +329,7 @@ class ZemZevController:
             if feasible:
                 return tgo, a_cmd
             tgo *= self.g.tgo_relax_factor
-            a_cmd = self._a_cmd(relx, rely, alt, vx, vy, vz, grav, tgo)
+            a_cmd = self._a_cmd(relx, rely, alt, vx, vy, vz, grav, tgo, pa)
         return tgo, a_cmd  # best effort -- genuinely infeasible within the search cap
 
     def act(self, env: AnalyticLanderEnv) -> np.ndarray:
@@ -325,6 +340,8 @@ class ZemZevController:
         ground_z = env._ground_z(s["x"], s["y"])
         alt = s["z"] - ground_z
         relx, rely = s["x"] - p.target_x, s["y"] - p.target_y
+        if self.aim_pos is not None:
+            relx, rely = s["x"] - self.aim_pos[0], s["y"] - self.aim_pos[1]
         vx, vy, vz = s["vx"], s["vy"], s["vz"]
         v_xy = math.hypot(vx, vy)
         grav = p.gravity_m_s2
@@ -355,8 +372,12 @@ class ZemZevController:
         final_approach_trigger_alt = max(g.final_approach_alt_m, stopping_alt)
         if alt <= final_approach_trigger_alt:
             self.tgo = None  # re-arm guidance if we ever bounce back up
+            vrx = vry = 0.0
             ax_des = -g.kd_xy_final * vx  # velocity-only, see _a_cmd's docstring on why position doesn't matter
             ay_des = -g.kd_xy_final * vy
+            if self.aim_pos is not None and self.final_pos_kp > 0.0:   # aim point: gentle position hold, capped
+                ax_des += float(np.clip(-self.final_pos_kp * relx, -0.25, 0.25))
+                ay_des += float(np.clip(-self.final_pos_kp * rely, -0.25, 0.25))
             tilt_y_des = float(np.clip(math.atan2(ax_des, grav), -g.max_tilt_cmd_final_rad, g.max_tilt_cmd_final_rad))
             tilt_x_des = float(np.clip(math.atan2(-ay_des, grav), -g.max_tilt_cmd_final_rad, g.max_tilt_cmd_final_rad))
             a_needed_z = grav + g.kp_vz_final * (g.final_approach_vz_m_s - vz)  # a_total + grav = a_thrust
@@ -387,7 +408,20 @@ class ZemZevController:
                 self.tgo = max(tgo_vert, tgo_horiz, dt * 5)
             tgo0 = max(self.tgo - dt, g.tgo_floor_s)
 
-            tgo, a_thrust = self._solve_feasible_tgo(relx, rely, alt, vx, vy, vz, grav, engine_a_max, tgo0)
+            fade = float(np.clip((alt - g.final_approach_alt_m) / max(self.aim_fade_alt_m - g.final_approach_alt_m, 1.0), 0.0, 1.0))
+            vrx, vry = self.v_ref[0] * fade, self.v_ref[1] * fade
+            self._pos_w = float(np.clip((alt - g.final_approach_alt_m) / max(self.pos_fade_alt_m - g.final_approach_alt_m, 1.0), 0.0, 1.0))
+            alt_g = alt
+            if self.terrain_ahead:
+                # vertical guidance targets the ground UNDER THE TOUCHDOWN POINT, not under the vehicle:
+                # over rising terrain the flat-ground assumption under-brakes by (slope * ground speed).
+                if self.aim_pos is not None:
+                    px, py = self.aim_pos
+                else:
+                    horiz = min(tgo0, 40.0)
+                    px, py = s["x"] + vx * horiz, s["y"] + vy * horiz
+                alt_g = max(s["z"] - env._ground_z(px, py), 0.5 * alt, 1.0)
+            tgo, a_thrust = self._solve_feasible_tgo(relx, rely, alt_g, vx - vrx, vy - vry, vz, grav, engine_a_max, tgo0)
             self.tgo = tgo
 
             # attitude target: direction of the desired accel vector. The DPS
@@ -414,7 +448,7 @@ class ZemZevController:
             # itself (not with time or altitude) forces the guidance to
             # start leveling out while there's still speed left to using it
             # on, giving the slow attitude loop the lead time it needs.
-            dynamic_max_tilt = g.max_tilt_cmd_rad * float(np.clip(v_xy / g.tilt_taper_v_xy_m_s, 0.1, 1.0))
+            dynamic_max_tilt = g.max_tilt_cmd_rad * float(np.clip(math.hypot(vx - vrx, vy - vry) / g.tilt_taper_v_xy_m_s, 0.1, 1.0))
             tilt_x_des = float(np.clip(tilt_x_des, -dynamic_max_tilt, dynamic_max_tilt))
             tilt_y_des = float(np.clip(tilt_y_des, -dynamic_max_tilt, dynamic_max_tilt))
 

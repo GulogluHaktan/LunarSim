@@ -657,7 +657,7 @@ with open(telemetry_path, "w", newline="") as tf, \
                     tile.height, tile.res_m,
                     pos_w[0] + _pad_r * np.cos(np.deg2rad([0.0, 90.0, 180.0, 270.0])),
                     pos_w[1] + _pad_r * np.sin(np.deg2rad([0.0, 90.0, 180.0, 270.0])))
-                touchdown_leg_diff = float(_pad_h.max() - _pad_h.min())
+                from lunarsim.core.terrain.criterion import effective_leg_diff as _eld; touchdown_leg_diff = float(_eld(_pad_h, _pad_r))
                 landed_safely = bool(
                     abs(touchdown_vz) <= p.safe_landing_v_z_m_s
                     and touchdown_vxy <= p.safe_landing_v_xy_m_s

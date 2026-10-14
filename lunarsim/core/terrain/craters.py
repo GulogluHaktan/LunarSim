@@ -69,7 +69,8 @@ def _single_crater_profile(r_norm: np.ndarray) -> np.ndarray:
 
 
 def rasterize_craters(
-    height: np.ndarray, res_m: float, field: CraterField, age_blur_max_sigma_px: float = 2.5
+    height: np.ndarray, res_m: float, field: CraterField, age_blur_max_sigma_px: float = 2.5,
+    taper: bool = False,
 ) -> np.ndarray:
     """Stamp each crater's profile into the heightfield (additive, in-place copy returned).
 
@@ -103,6 +104,9 @@ def rasterize_craters(
             continue
 
         patch = _single_crater_profile(r_norm) * depth
+        if taper:  # fade to zero at the patch border: no square footprints for large craters
+            t_ = np.clip((1.5 - r_norm) / 0.5, 0.0, 1.0)
+            patch = patch * (t_ * t_ * (3.0 - 2.0 * t_))
 
         sigma_px = age * age_blur_max_sigma_px
         if sigma_px > 0.3:

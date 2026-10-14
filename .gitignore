@@ -8,3 +8,6 @@ __pycache__/
 *.tf
 *.bpc
 *.tpc
+
+# uretilen HTML raporlar (PDF ve build betikleri izlenir)
+report/*.html

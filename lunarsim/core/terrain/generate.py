@@ -47,6 +47,15 @@ def _coarse_elevation(cfg: TerrainConfig, n: int, res_m: float, hills: dict, rng
                 "coarse_source='dem' requires terrain.dem_path pointing at a LOLA/LRO "
                 "GeoTIFF (see lunarsim/core/terrain/dem.py for supported products)."
             )
+        _low = str(cfg.dem_path).lower()
+        if _low.endswith(".img") or ("nac_dtm" in _low and _low.endswith((".tif", ".tiff"))):
+            # Real NASA elevation read without GDAL: LOLA PDS3 LDEM tile (30 m) or LROC NAC DTM (2 m),
+            # plus a thin layer of metre-scale roughness the raster cannot hold.
+            from lunarsim.core.terrain.lola import open_dem
+
+            h = open_dem(cfg.dem_path).read_tile(cfg.site_lat_deg, cfg.site_lon_deg, n * res_m, res_m)
+            return h + fbm_heightfield(n, amplitude_m=0.06, wavelength_m=14.0, res_m=res_m, hurst=0.8, rng=rng)
+
         from lunarsim.core.terrain.dem import DemSource
 
         dem = DemSource(cfg.dem_path)
@@ -65,7 +74,8 @@ def _coarse_elevation(cfg: TerrainConfig, n: int, res_m: float, hills: dict, rng
     raise ValueError(f"unknown coarse_source: {cfg.coarse_source!r} (expected 'dem' or 'procedural')")
 
 
-def _add_craters(height: np.ndarray, res_m: float, size_m: float, params: SampledParams, rng: np.random.Generator) -> tuple[np.ndarray, CraterField]:
+def _add_craters(height: np.ndarray, res_m: float, size_m: float, params: SampledParams, rng: np.random.Generator,
+                 taper: bool = False) -> tuple[np.ndarray, CraterField]:
     craters = params.craters
     field = sample_crater_field(
         size_m=size_m,
@@ -77,27 +87,29 @@ def _add_craters(height: np.ndarray, res_m: float, size_m: float, params: Sample
         age_range=craters["age_range"],
         rng=rng,
     )
-    return rasterize_craters(height, res_m, field), field
+    return rasterize_craters(height, res_m, field, taper=taper), field
 
 
 def generate_tile(cfg: TerrainConfig) -> Tile:
     rng = np.random.default_rng(cfg.seed)
     params = sample_params(cfg, rng)
 
+    _low = str(cfg.dem_path or "").lower()
+    _taper = cfg.coarse_source == "dem" and (_low.endswith(".img") or "nac_dtm" in _low)
     n_fine = int(round(cfg.size_m / cfg.res_m))
     apply_curvature = cfg.curvature and cfg.coarse_source == "procedural"
 
     if cfg.mode == "coarse":
         n_coarse = int(round(cfg.size_m / cfg.coarse_res_m))
         coarse_h = _coarse_elevation(cfg, n_coarse, cfg.coarse_res_m, params.hills, rng)
-        coarse_h, field = _add_craters(coarse_h, cfg.coarse_res_m, cfg.size_m, params, rng)
+        coarse_h, field = _add_craters(coarse_h, cfg.coarse_res_m, cfg.size_m, params, rng, taper=_taper)
         from scipy.ndimage import zoom
 
         height = zoom(coarse_h, n_fine / n_coarse, order=3)[:n_fine, :n_fine]
 
     elif cfg.mode == "fine":
         fine_h = _coarse_elevation(cfg, n_fine, cfg.res_m, params.hills, rng)
-        height, field = _add_craters(fine_h, cfg.res_m, cfg.size_m, params, rng)
+        height, field = _add_craters(fine_h, cfg.res_m, cfg.size_m, params, rng, taper=_taper)
 
     elif cfg.mode == "blend":
         n_coarse = int(round(cfg.size_m / cfg.coarse_res_m))
@@ -111,7 +123,7 @@ def generate_tile(cfg: TerrainConfig) -> Tile:
             hurst=params.hills.get("hurst", 0.75),
             rng=rng,
         )
-        fine_h, field = _add_craters(fine_h, cfg.res_m, cfg.size_m, params, rng)
+        fine_h, field = _add_craters(fine_h, cfg.res_m, cfg.size_m, params, rng, taper=_taper)
 
         roi = params.roi
         regions = roi.get("regions", None)

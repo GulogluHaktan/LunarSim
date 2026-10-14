@@ -15,6 +15,8 @@ different scenario than the trainer is worse than none.
 """
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -499,7 +501,17 @@ _CRATER_D_MAX_M = 60.0
 # has to cook per reset (12482 -> 50562), which cannot be measured without
 # a GPU run. Try it with a short --steps-per-stage first and compare
 # wall-clock before committing a long run to it.
-_DEFAULT_TERRAIN_GRID_N = 80
+_DEFAULT_TERRAIN_GRID_N = int(os.environ.get("LUNARSIM_TERRAIN_GRID_N", "80"))
+
+# Opt-in crater-rich terrain (default off, so every earlier result is unchanged):
+# LUNARSIM_CRATER_FIELD=<n> puts about n landing-scale craters (12-70 m, power law)
+# on each tile. The stock field is ~1.4e2 craters of 1-60 m, almost all too small to
+# resolve on the 21 m grid and none large enough to matter for a 9.4 m footprint.
+_CRATER_FIELD_N = float(os.environ.get("LUNARSIM_CRATER_FIELD", "0"))
+# Opt-in boulder-strewn terrain (default off): LUNARSIM_ROCK_DENSITY multiplies the reference
+# rock density (0.02 /m^2 at 1.0); LUNARSIM_ROCK_DMAX is the largest rock diameter in metres.
+_ROCK_DENSITY = float(os.environ.get("LUNARSIM_ROCK_DENSITY", "0"))
+_ROCK_DMAX = float(os.environ.get("LUNARSIM_ROCK_DMAX", "1.0"))
 
 # NOT part of the sequential curriculum. `STAGES` is a difficulty ramp that a single
 # policy walks up; the landing specialist is one half of a two-model split and shares no
@@ -557,20 +569,68 @@ SPECIALIST_STAGES = [
 ]
 
 STAGES_BY_NAME = {s.name: s for s in list(STAGES) + SPECIALIST_STAGES}
+if os.environ.get("LUNARSIM_TMAX"):   # diagnostic: override the episode budget of every stage (seconds)
+    from dataclasses import replace as _rep
+    STAGES_BY_NAME = {k: _rep(v, params=_rep(v.params, max_episode_s=float(os.environ["LUNARSIM_TMAX"])))
+                      for k, v in STAGES_BY_NAME.items()}
+
+
+# Opt-in REAL lunar terrain (default off): LUNARSIM_LOLA_IMG points at a NASA LOLA PDS3 LDEM tile
+# (`ldem_<ppd>_*.img`); LUNARSIM_LOLA_SITE="lat,lon,half_range_deg" is the box each episode's site is
+# drawn from. The DEM carries the real >30 m relief; craters below its resolution are added with the
+# lunar equilibrium size-frequency law N(>D) = f * 1.54 * D^-2 (D in km, per km^2) at
+# LUNARSIM_LOLA_SATURATION = f (default 0.03, i.e. 3 % of geometric saturation, mare-like).
+_LOLA_IMG = os.environ.get("LUNARSIM_LOLA_IMG", "")
+_LOLA_SITE = tuple(float(v) for v in os.environ.get("LUNARSIM_LOLA_SITE", "0.674,23.473,0.5").split(","))
+_LOLA_SAT = float(os.environ.get("LUNARSIM_LOLA_SATURATION", "0.03"))
+_LOLA_SPLIT = os.environ.get("LUNARSIM_LOLA_SPLIT", "")
+# Pre-generated tile pool (pickle list of Tile): LUNARSIM_TILE_POOL=path. Tiles take ~10 s each to
+# build, so training/eval draw from a pool instead (see scripts/build_tile_pool.py).
+_TILE_POOL = os.environ.get("LUNARSIM_TILE_POOL", "")
+_POOL_CACHE: dict = {}
 
 
 def terrain_config(stage: Stage, seed: int, grid_n: int = _DEFAULT_TERRAIN_GRID_N) -> TerrainConfig:
+    if _LOLA_IMG:
+        from lunarsim.core.terrain.lola import sample_site
+
+        rng = np.random.default_rng(seed + 7919)
+        size = stage.tile_size_m; res = max(0.5, size / grid_n)
+        lat, lon = sample_site(_LOLA_IMG, size, rng, _LOLA_SITE, _LOLA_SPLIT)
+        dmin = 2.0 * res
+        # a 2 m NAC DTM already holds real craters down to ~10 m: only add what it cannot resolve
+        dmax_syn = 10.0 if _LOLA_IMG.lower().endswith((".tif", ".tiff")) else 300.0
+        n_t = _LOLA_SAT * 1.54 * ((dmin / 1000.0) ** -2 - (dmax_syn / 1000.0) ** -2) * (size / 1000.0) ** 2
+        rd = _ROCK_DENSITY if _ROCK_DENSITY > 0 else 2.0
+        rm = _ROCK_DMAX if _ROCK_DENSITY > 0 else 2.5
+        return TerrainConfig(
+            mode="fine", size_m=size, res_m=res, seed=seed, coarse_source="dem", dem_path=_LOLA_IMG,
+            site_lat_deg=lat, site_lon_deg=lon,
+            hills={"amplitude_m": 0.1, "wavelength_m": 40.0, "hurst": 0.8},
+            craters={"count_scale": n_t / (size * size * 5e-4), "d_min_m": dmin, "d_max_m": dmax_syn,
+                     "b": 2.0, "depth_ratio": [0.04, 0.17], "age": [0.05, 1.0]},
+            rocks={"density_scale": rd, "d_max_m": rm},
+            roi={"sigma_m": size / 4.0, "centers": None}, curvature=False)
     r = stage.terrain_roughness_scale
+    craters = {"count_scale": 0.1 * r, "d_min_m": 1.0, "d_max_m": _CRATER_D_MAX_M, "b": 2.5,
+               "depth_ratio": 0.08, "age": 0.5}
+    if _CRATER_FIELD_N > 0:
+        area = stage.tile_size_m ** 2
+        craters = {"count_scale": _CRATER_FIELD_N / (area * 5e-4),
+                   "d_min_m": float(os.environ.get("LUNARSIM_CRATER_DMIN", "12")),
+                   "d_max_m": float(os.environ.get("LUNARSIM_CRATER_DMAX", "70")),
+                   "b": float(os.environ.get("LUNARSIM_CRATER_B", "1.5")),
+                   "depth_ratio": 0.10, "age": 0.4}
     return TerrainConfig(
         mode="fine", size_m=stage.tile_size_m, res_m=max(0.5, stage.tile_size_m / grid_n), seed=seed,
         coarse_source="procedural",
         hills={"amplitude_m": 0.3 * r, "wavelength_m": _HILL_WAVELENGTH_M, "hurst": 0.75},
-        craters={"count_scale": 0.1 * r, "d_min_m": 1.0, "d_max_m": _CRATER_D_MAX_M, "b": 2.5,
-                 "depth_ratio": 0.08, "age": 0.5},
+        craters=craters,
         # real, PHYSICAL (collidable) rocks -- see IsaacLanderVecEnv's
         # `_rebuild_terrain` docstring on the real `tile.rocks` field this
         # spawns from (capped per-env regardless of density, for reset cost).
-        rocks={"density_scale": r, "d_max_m": 1.0},
+        rocks={"density_scale": _ROCK_DENSITY if _ROCK_DENSITY > 0 else r,
+               "d_max_m": _ROCK_DMAX if _ROCK_DENSITY > 0 else 1.0},
         roi={"sigma_m": stage.tile_size_m / 4.0, "centers": None},
         curvature=False,
     )
@@ -578,6 +638,17 @@ def terrain_config(stage: Stage, seed: int, grid_n: int = _DEFAULT_TERRAIN_GRID_
 
 def make_tile_fn(stage: Stage, grid_n: int = _DEFAULT_TERRAIN_GRID_N):
     """A fresh-terrain-per-episode `tile_fn` for this stage."""
+    if _TILE_POOL:
+        import pickle
+
+        def pool_tile_fn(rng: np.random.Generator) -> Tile:
+            if _TILE_POOL not in _POOL_CACHE:
+                with open(_TILE_POOL, "rb") as fh:
+                    _POOL_CACHE[_TILE_POOL] = pickle.load(fh)
+            pool = _POOL_CACHE[_TILE_POOL]
+            return pool[int(rng.integers(0, len(pool)))]
+        return pool_tile_fn
+
     def tile_fn(rng: np.random.Generator) -> Tile:
         return generate_tile(terrain_config(stage, int(rng.integers(0, 2 ** 31 - 1)), grid_n))
     return tile_fn

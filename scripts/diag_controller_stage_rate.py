@@ -45,10 +45,51 @@ from lunarsim.rl.reward import default_reward_fn  # noqa: E402
 
 
 class _View:
-    """`ZemZevController.act` wants an env with `.params`, `.state` and `._ground_z`."""
+    """`ZemZevController.act` wants an env with `.params`, `.state` and
+    `._ground_z` -- and it must be handed the altitude the env actually flies
+    at, not the rigid body's centre height.
+
+    REAL BUG THIS FIXES. This class used to forward every attribute straight
+    through to `IsaacLanderEnv`, including `state` and `_ground_z`. The
+    controller computes `alt = state["z"] - _ground_z(x, y)`, which is correct
+    for `AnalyticLanderEnv` (a zero-height point model) but wrong here:
+    `IsaacLanderEnv.state["z"]` is the body CENTRE, and `reset` places it at
+    `ground_z + alt + half_height_m` with `half_height_m = 7.04/2 = 3.52`. So
+    the controller believed it was 3.52 m higher than it was at zero tilt, and
+    `3.52*cos(tilt) + 4.70*sin(tilt)` = 4.62 m higher at 15 deg -- while its
+    ZEM/ZEV vertical channel solved for touchdown that far BELOW the ground.
+
+    It mattered most on exactly the stage it was used to measure. This script
+    is the source of the `land_handoff` controller baseline, and that stage
+    releases from `spawn_altitude_m = (8.0, 25.0)`, so the bias was 14-58% of
+    the whole altitude budget. Concretely, the controller's final-approach
+    trigger `alt <= max(8.0, ...)` fired at a TRUE clearance of 4.48 m (zero
+    tilt) to 3.38 m (15 deg) instead of 8 m, cutting the terminal descent
+    window from 10.0 s to 5.6-4.2 s -- against the ~8.7 s the RCS needs to
+    slew to its 20 deg final-approach cap. Any baseline this script printed
+    measured the harness, not the controller.
+
+    `collect_zemzev_demos._BellyStateView` and
+    `scripts/isaaclab_controller_eval_capture.py` already did this correctly;
+    this was the one remaining site that did not. Using `env._contact()` means
+    "altitude 0" denotes the same thing to the controller, to
+    `info["altitude_m"]`, to observation slot 2 and to the termination test.
+    """
 
     def __init__(self, env):
         self._env = env
+        self.params = env.params
+        self.state: dict = {}
+        self._ground_z_m = 0.0
+
+    def sync(self) -> None:
+        clearance_m, ground_z = self._env._contact()
+        self.state = dict(self._env.state)
+        self.state["z"] = ground_z + clearance_m
+        self._ground_z_m = ground_z
+
+    def _ground_z(self, x: float, y: float) -> float:
+        return self._ground_z_m
 
     def __getattr__(self, name):
         return getattr(self._env, name)
@@ -67,12 +108,13 @@ def main():
     view = _View(env)
     max_steps = int(params.max_episode_s / params.dt_s) + 5
 
-    safe = crash = timeout = lost = 0
+    safe = crash = timeout = lost = left = 0
     for ep in range(args.episodes):
         env.reset(seed=args.seed0 + ep)
         ctrl.reset()
         info = {}
         for _ in range(max_steps):
+            view.sync()
             a = ctrl.act(view)
             _o, _r, term, trunc, info = env.step(np.asarray(a, dtype=np.float32))
             if term or trunc:
@@ -81,8 +123,14 @@ def main():
             safe += 1
         elif info.get("lost_control"):
             lost += 1
-        elif info.get("timed_out", False) or (not info.get("terminated")):
+        elif info.get("timed_out", False):
             timeout += 1
+        elif not info.get("terminated"):
+            # Truncated without timing out is `left_tile`, a different failure
+            # from running out of clock -- it used to be counted as a timeout,
+            # which hid flying off the map inside the one bucket nobody reads
+            # as a failure of control.
+            left += 1
         else:
             crash += 1
         if (ep + 1) % 24 == 0:
@@ -90,7 +138,8 @@ def main():
 
     n = args.episodes
     print(f"\ncontroller on {args.stage}: {safe}/{n} landed_safely "
-          f"({safe / n:.0%}), {crash} crash, {lost} lost_control, {timeout} timeout "
+          f"({safe / n:.0%}), {crash} crash, {lost} lost_control, "
+          f"{timeout} timeout, {left} left_tile "
           f"(seed0={args.seed0}, terrain_seed={args.terrain_seed})")
 
 

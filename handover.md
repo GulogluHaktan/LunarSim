@@ -1,272 +1,69 @@
-# LunarSim — Handover (2026-10-09)
+# LunarSim — handover (2026-10-14)
 
-Read this fully before doing anything. It replaces the 2026-10-01 handover.
-The short version: **the goal is not met**, every competent policy in this
-project is a behaviour clone, and the reason RL cannot improve on one is now
-measured rather than guessed.
+Eski handover `handover_old_2026-10-13.md` olarak saklandı (içindeki Q-gürültüsü kök nedeni ve bazı başlık sayıları yanlış — bkz. memory `lunarsim-handover-errors`). Bu dosya yalnızca bu oturumda **ölçülen** şeyleri içerir.
 
----
+## 0. Hedef (kullanıcı, /goal)
+MPC, ES ve PPO **en az %50 iniş başarısı** almalı. Kullanıcı kararı: **iki araziyi de raporla** — Apollo 16 (zor) ve Apollo 11 (orta); %50 hedefi Apollo 11 için, Apollo 16 için bulunan en iyi sonuç. Teslim: videolar (inişin tamamı, sonda ışınlanma yok) + Türkçe PDF (yöntemler, akış şemaları, grafikler, sonuçlar, kısıtlar). Mobilde indirilebilir; tek dosya ≤ 30 MiB (bölerek gönder). Video sıkıştırma istemiyor. Kullanıcı internet kotasına dikkat ediyor (günlük 8 GB izin verdi, daha fazla indirme için sor).
 
-## 1. Where the numbers stand
+## 1. Ortam / komutlar
+- Python: `/home/haktan/isaac-env/bin/python` (Isaac Sim 6.1; rasterio yok → GeoTIFF'i PIL ile okuyoruz).
+- Her koşuda: `export PYTHONPATH=$PWD LUNARSIM_LOLA_IMG=<TIF> LUNARSIM_TILE_POOL=<pool.pkl>`.
+- Veri: `~/lunarsim_data/lroc/NAC_DTM_APOLLO16.TIF` ve `..._APOLLO11.TIF` (2 m/px LROC NAC DTM, `.f32.npy` önbellekli).
+- Tile havuzları: `out/a16/pool_{train,val}.pkl` (train = batı yarı lon 15.176–15.508, val = doğu yarı 15.574–15.904), `out/a11/pool_{train,val}.pkl` (val=24 tile; `pool_val48.pkl` yapılıyorsa 48). Grid 384 (4.4 m), orbit_descent 1680 m.
+- Kullanılan stage: `orbit_descent` (200 m, 10–30 m/s yanal, 60 s bütçe, 20 Hz). İniş kriteri: |vz|≤1.0, vxy≤1.2, tilt≤15°, |w|≤0.5, ayak-pedi yükseklik farkı ≤0.16 m (pad yarıçapı 4.7 m, 4 nokta).
+- `pkill -f` kendi shell'ini öldürür (komut metni pattern'i içerir) → `pkill -f "pat[t]ern"` biçimi kullan. Zsh'te `$args` kelime bölmez → argümanları ayrı yaz.
+- Hiçbir şey commit edilmedi (git status uzun). Commit isteyince yap.
 
-All deterministic, 96 episodes x 2 seed blocks (7000, 41000) = 192, terrain
-seed 7, `scripts/diag_stage_landing_rate.py`.
+## 2. Arazi gerçeği (en önemli bulgu)
+Güvenli-hücre oranı (footpad farkı ≤0.12 m) val havuzu ortalaması: **Apollo 16 %0,6** (11/24 tile'da <%0,2), **Apollo 11 %8,8**. DTM'de çöp yükseklik (1e22 m'ye kadar) vardı: PhysX'i çökertiyordu → `lola.py`'da validity ±1e4 m + medyan-spike filtresi + site için ≥%99,5 geçerli piksel.
+- Hazard haritası: `lunarsim/core/terrain/hazard.py` (`diff`=footpad spread, `dist`=en yakın güvenli hücreye EDT mesafesi; `LUNARSIM_HAZ_DIFFMAX` eşiği geçersiz kılar).
+- Kör (araziyi görmeyen) politikaların tavanı ≈ güvenli hücre oranı.
 
-### orbit_descent (the stage the goal is stated on)
-
-| artefact | total | note |
-|---|---|---|
-| controller (ZemZev) | ~50% | the bar |
-| SAC clone | 51.0% (98/192) | imitation |
-| **PPO clone** | **52.6% (101/192)** | imitation, current best baseline |
-| v77 SAC (from the 19.8% clone) | 27.1% | +7.3 over ITS clone — the only measured RL gain |
-| v78 SAC @410k | 51.0% | +0.0 |
-| v79 SAC @410k | 50.5% | |
-| v86 PPO @1.5M | **54.2% (104/192)** | +1.6 over its clone, p=0.76 |
-| v87 PPO @750k | 55.7% | peak of a DECLINING run — do not count |
-| v87 PPO @1.5M | 46.9% | below its clone; trend -4.06 pts/1M |
-| v88 clone (coupled schedule refit) | 39.1% | the refit broke the observation |
-| v89 PPO (decoupled refit) | ~49.9% train-time, flat | |
-| PPO from scratch | 0.0% (0/192) | |
-| SAC from scratch | 0.0% | |
-
-### land_handoff (the split's landing half)
-
-| artefact | total | note |
-|---|---|---|
-| controller | 12.0% (23/192) | the bar on this stage |
-| **landing clone** | **11.5% (22/192)** | matches its teacher exactly |
-| PPO from it, 200k/400k/600k/800k/1M | **10/96 at every one** | identical, and below the clone |
-| SAC from scratch | 0.0% | |
-| PPO from scratch | 0.0-1.2% | |
-
-**Nothing in this table is a success.** The largest honest estimate is +5.2
-points and the measurement cannot resolve it (see §3).
-
----
-
-## 2. The measured root cause
-
-**A learned Q(s,a) cannot rank actions on this task.** `scripts/diag_action_signal_to_noise.py`:
-
-```
-two independent policy samples differ by   0.0428   in action space
-the full action box spans                  3.663 m/s^2 (11-tonne vehicle)
-  -> one 0.05 s step turns that into       0.0039 m/s
-dV/dv, from the realised return            0.1936 value units per m/s
-  -> SIGNAL, one step                      0.00074
-calibrated critic residual std (NOISE)     1.884
-      horizon      signal      ratio
-            1    0.000736   1 : 2559
-          100    0.073615    1 : 26
-          714    0.525611     1 : 4   (a whole episode)
-```
-
-And the LATERAL channel — which causes **94% of the failures** — is far worse,
-because thrust is fixed along the body axis so lateral acceleration is four
-integrations from the command (torque → angular accel → rate → tilt → accel):
-a 0.05 s command tilts the vehicle 0.002° and the signal is **1 : 10,495,747**
-under the noise.
-
-That single fact explains, at once: the action gradient reading 52.6% toward
-the expert (a coin flip), best-of-16 selection being WORSE than random on every
-checkpoint, and CQL / Cal-QL / TD3+BC / PEX / LayerNorm / dual-gamma each
-failing in turn — they were all improving properties of a quantity that never
-carried the signal. It also explains why the analytic controller works: it
-inverts the dynamics instead of estimating values.
-
-**PPO was chosen from this measurement**, not by trying another algorithm: its
-advantage is (realised return − V(s)), so it never needs Q(s,a), and the
-on-policy estimator is quieter AND unbiased (`diag_onpolicy_noise.py`):
-critic residual 1.884 *systematic*, realised-return spread 0.266 *zero-mean*.
-
----
-
-## 3. What the measurement budget can and cannot say
-
-`scripts/diag_power.py`. At 192 episodes per arm, the smallest resolvable
-effect is **~14 points** and the 95% interval on a difference is **±10 points**.
-
-- v86's +1.6 points would need 15,258 episodes per arm. It was never resolvable.
-- So "statistically indistinguishable", said a dozen times in the last session,
-  means *the measurement cannot say*, not *RL added nothing*. Every RL result
-  here is consistent with anywhere from −10 to +10 points.
-- The target itself IS measurable: 50% → 75% is +25 points, which 166
-  episodes/arm resolves comfortably. The unmeasurable part is the +2 to +5
-  point steps on the way.
-
-**The protocol, declared in advance** (`scripts/run_highpower_validation.sh`):
-pick the checkpoint on block **7000 alone**, never on the pooled number and
-never on the training log; score it on K **fresh** blocks. ±14.1 at one block,
-±10.0 at two, ±7.1 at four, ±5.0 at eight. Do not report a gain without it.
-
----
-
-## 4. What has been ruled out
-
-- **Imitation is not the bottleneck any more.** More demos took the clone from
-  19.8% → 52.6% (48 → 255 landed episodes). Its held-out action error is 0.059
-  against an observation floor of ~0.047, so ~25% of the imitation gap is left,
-  not 80%.
-- **The reward is dense and continuous.** `diag_reward_continuity.py`: 0
-  discontinuities over 8000 states × 11 dimensions, 100% response in every
-  velocity channel.
-- **Three reward changes with MEASURABLE improvements to the reward all failed
-  to move the landing rate**: altitude-normalised shaping (decisive band's share
-  1.5% → 16%) trended −4.06 pts/1M; the schedule refit coupled (2-5 m outcome
-  AUC 0.516 → 0.746) took the clone to 39.1%; decoupled, it sat flat.
-- **Horizon length is not the obstacle.** land_handoff has a 150-400 step
-  credit distance, a weak 11.5% clone, 88 points of headroom and n≈92 episodes
-  per reading — every one of the five conditions that were supposed to make RL
-  work — and all five checkpoints measure 10/96 against the clone's 11/96.
-  Five identical readings over 1M steps. This is the strongest single
-  constraint in this handover: it rules out horizon length, baseline strength
-  and measurement power together.
-- **The task is feasible and the stage is not mis-sized.** 100% of
-  land_handoff's entry distribution is vertically feasible (T/W 2.52, worst
-  corner needs 5.1 m of the 8 m available), and a vehicle entering at 6 m/s
-  travels 17 m while braking against 50 m to the tile edge. Fuel is at 96% at
-  touchdown, so braking harder is always available.
-- **Terrain observability is not the ceiling.** 0 of 17 failures bind on
-  `leg_diff`; 94% bind on `v_xy` at touchdown (median overshoot 1.39× against
-  a 1.2 m/s limit).
-
----
-
-## 5. The pattern every RL run shows
-
-Measured with `diag_policy_vs_expert.py --vs <its own clone>`. A random walk
-grows as sqrt(n); a directed move grows linearly.
-
-| run | 250k | 500k/600k | 1M-1.5M | verdict |
-|---|---|---|---|---|
-| v86 (γ=0.999) | 0.0170 | 0.0240 | 0.0386 | sqrt(n) exactly — **diffusion** |
-| v87 (altitude norm) | 0.0159 | 0.0223 | 0.0572 | 1.47× sqrt(n) — directed, toward WORSE |
-| land specialist | 0.0152 | 0.0276 | 0.0322 | sqrt(n) — **diffusion** |
-
-So the policies move as far as their clone's entire remaining error and gain
-nothing. v87 is the informative exception: a reward that separates landing from
-crashing *half as well* (`diag_reward_separation.py`) produced a *stronger*
-gradient pointing at worse landings. A stronger gradient on a worse objective.
-
-**Use `diag_reward_separation.py` before spending a run on a reward change.**
-v87 was predictable from a table that takes a minute.
-
----
-
-## 6. State of the machine
-
-Nothing should be running. Check with
-`ps -eo cmd | grep -E "train_sac_isaac|diag_stage" | grep -v "grep -E"`.
-
-The last pipeline (`land_warm.sh`) completed. Its block-7000 selection sweep read
-**10/96 at all five checkpoints** (200k, 400k, 600k, 800k, 1M) against the clone's
-11/96 — five identical readings across 1M steps, while the policy moved 0.032 in
-action space. The movement was real and its effect on the outcome was nil.
-
-Artefacts worth keeping:
-- `out/bc_ppo_orbit_v2.zip` — the 52.6% PPO clone (policy + value head, γ=0.99)
-- `out/bc_ppo_orbit_g999.zip` — same policy, value head at γ=0.999
-- `out/bc_orbit_big.zip` — the 51.0% SAC clone
-- `out/bc_ppo_land.zip` — the 11.5% land_handoff clone
-- `out/ppo_v86_g999/snapshots/orbit_descent_1500000_steps.zip` — the 54.2%
-- `out/zemzev_orbit_demos_s2[0-3]000.npz` + `..._v20.npz` — 576 episodes, 303 landed
-- `out/zemzev_band25.npz` — the 0-25 m band, 61,837 transitions
-
----
-
-## 7. Diagnostics built (use these before running anything)
-
-| script | answers |
+## 3. Ölçülen sonuçlar (Isaac, aksi belirtilmedikçe val havuzu, 96 bölüm)
+**Apollo 16 (zor):**
+| Yöntem | İniş |
 |---|---|
-| `diag_action_signal_to_noise.py` | can a learned Q rank this policy's actions? (no) |
-| `diag_onpolicy_noise.py` | is the on-policy estimator quieter? (7×, and unbiased) |
-| `diag_reward_separation.py` | does a reward change help the reward tell landing from crashing? |
-| `diag_critic_vs_true_value.py` | Q against the realised two-stream reward-to-go, per altitude band |
-| `diag_policy_vs_expert.py --vs` | how far a run moved from its clone; diffusion vs learning |
-| `diag_training_trend.py` | a run's landed-rate slope WITH a confidence interval |
-| `diag_power.py` | what a given episode budget can resolve |
-| `diag_reward_continuity.py` | cliffs vs kinks over the whole envelope |
-| `diag_shaping_weight_by_altitude.py` | where the shaping reward lives |
-| `diag_field_schedule_fit.py` | does the field's schedule match what lands? |
-| `diag_profile_landed_vs_failed.py` | where landed and failed trajectories separate |
-| `diag_best_of_n.py` | can the critic rank in-distribution actions? (no) |
-| `diag_handoff_envelope.py` | where a landing specialist succeeds, by entry condition |
-| `diag_controller_stage_rate.py` | the controller's rate on ANY stage, on real Isaac |
+| ZEM/ZEV kontrolcü | 0/96 |
+| Kör ES / kör MPC / kör PPO | 1 / 2 / 1 /96 |
+| MPC + hazard terimi (eski ağırlıklar, düz-zemin rollout) | 5/96 (%5,2) |
+| ES-haz (27-d doğrusal, kötü havuzda eğitilmişti) | 0/96 |
+| PPO-haz (hazard özellikli guided-gain) | 1/96 |
+| Hedef-noktalı ZEM/ZEV kuralı (öğrenme yok, "aim") | 5/96 (%5,2) |
+| ES (aim uzayında, 13 sabit sayı) | 5/96 (%5,2) |
+| **MPC v3 (arazi-farkında rollout + yeniden dengelenmiş ağırlık, `out/a16/mpc_v3.npy`)** | **17/96 (%17,7)** |
+| MPC v3b / v3c (w_time 0,73 / 1,2) | 15/96 / 13/96 |
+- PPO-aim eğitimi (`out/a16/ppo_rule`, 90k karar): seçim bloğu 12,5/8,3/2,1/6,2/4,2% — taban 4,2%, gürültü içinde; doğrulaması **yapılmadı** (`best_on_selection_block.zip`).
+- Damıtma (MPC→MLP, DAgger): öğrenci %0–8 (öğretmen %48–58 analitik). Çalışmıyor.
+- ES (linear/MLP) analitikte 150–400 nesil: seçim fitness'ı iyileşiyor, iniş kural tabanını geçmiyor.
 
----
+**Apollo 11 (orta):** analitik (48 bölüm) MPC v3 **32/48 = %67**, aim-kuralı 11/48, kontrolcü 4/48. **Isaac MPC v3 doğrulaması çalışıyor** (`out/a11/mpc_v3.log`, ara: 20/36). ES/PPO henüz A11'de denenmedi.
 
-## 8. The trap this project keeps falling into
+## 4. Bu oturumda bulunan kök nedenler (MPC'yi 5% → 18% yapan)
+1. **MPC rollout'u zemini düz varsayıyordu.** Yüksek arazide yanal hızla zemin yükseliyor → touchdown zamanı yanlış, sert iniş. Düzeltme: `MPPIMPC.set_hazard(..., height_maps)` + `_hgt_at` ile rollout'ta `alt = alt0 + dz − (h(px,py) − h0)`; `LUNARSIM_MPC_TERRAIN=0` kapatır.
+2. **Tehlike maliyeti iniş yumuşaklığından ~300× büyüktü** (w_haz log 2,58 vs w_td log 0,11) → MPC güvenli hücreye sert iniyordu (vxy sınırın 2,5 katı). `w_td=0.3, w_haz=2.2, w_time=0` analitikte 5/36 → 21/36.
+3. `w_time`>0 + `k_ref` yükseltmek analitikte crash'e çevirir (k_ref yalnız yüksek irtifada geçerli olsun diye `_target`'te `LUNARSIM_MPC_KBLEND` karışımı eklendi; kazanç yok/nötr).
+4. Seçim bloğu (12 bölüm) her nesilde sabitti → eski "SEL %67–83" **aşırı uyum**; gerçek analitik val ≈ %14 (eski ağırlık) / %37 (v3, taze tohum).
+5. Isaac ≠ analitik: v3 analitik ~%37–58, Isaac %18 (Apollo 16). 100 s bütçeyle Isaac'ta crash'lerin 28/29'u `leg_diff` (yani site hassasiyeti), süre aşımı değil.
+6. Kontrolcü zaten yumuşak iniyor (vz 0,8, vxy 0,6, tilt 7°); 0/N sadece **site** yüzünden. Yanal kanalı yalnız hız sönümlemedir → ES/PPO "nereye ineceğini" etkileyemiyordu. Çözüm denemesi: kontrolcüye `v_ref`, `aim_pos` (tam ZEM/ZEV hedef noktası), `pos_fade_alt_m`, `final_pos_kp`, `terrain_ahead` (varsayılan kapalı, eski davranış korunur).
 
-**Nine times in the last session a mechanism flag was accepted and silently
-dropped**, and each one would have been read as "the method does not work":
-`--layer-norm` (twice: ignored on warm start, then built on CPU so dead on
-GPU), the whole `CQLSAC` class (v68's 18% was plain SAC), `--altitude-replay`
-(computed and thrown away on the warm-start path), `ent_coef` (missing from
-`PPO.load`'s kwargs), `--reward-weight` on the slot-repair script (defaults
-used silently), and `--reward-weight` on the EVALUATION script (which read 7%
-for a clone whose real rate was 39.1%).
+## 5. Kod değişiklikleri (hepsi commit edilmemiş)
+- `lunarsim/core/terrain/{lola,hazard,generate,craters}.py` — NAC/LOLA DEM, hazard haritası, krater taper.
+- `lunarsim/evo/mpc.py` — `w_haz` (11. parametre), hazard + yükseklik rollout'u, env: `LUNARSIM_HAZ_SCALE`, `LUNARSIM_MPC_TERRAIN`, `LUNARSIM_MPC_KBLEND`.
+- `lunarsim/evo/hazfeat.py` — 7 radar özelliği, `safe_dir`, `aim_point`.
+- `lunarsim/control/zemzev_controller.py` — aim alanları (varsayılanda eski davranış).
+- `lunarsim/rl/guided_gain_env.py`, `guided_gain_vec_env.py` — `aim_scale`/`LUNARSIM_AIM_SCALE`, `hazard_obs`/`LUNARSIM_HAZ_OBS`, `LUNARSIM_HAZ_LAMBDA_PPO` şekillendirme, truncated `terminal_observation` genişliği düzeltmesi.
+- `lunarsim/rl/curriculum.py` — havuz örnekleyici, `LUNARSIM_TMAX` (tanı amaçlı bütçe geçersiz kılma).
+- Scriptler: `build_tile_pool.py`, `add_hazard_to_pool.py`, `evo_analytic_train_haz.py`, `evo_guided_aim_train.py` (ES, aim uzayı; `--bias-only 1`), `mpc_tune.py`, `mpc_analytic_eval.py` (`LUNARSIM_MPC_HANDOFF`, `LUNARSIM_TMAX`), `mpc_isaac_eval.py`, `mpc_record_isaac.py`, `mpc_distill_dagger.py`, `aim_rule_probe.py`, `validate_guided_gain_isaac.py` (+ `.npz` ES desteği), `record_guided_gain_isaac.py` (+ `.npz` ES).
 
-**The rule:** assert on the OBJECT, never print an attribute you just set.
-A print of a value you assigned proves nothing.
+## 6. Yapılacaklar (sırayla)
+1. `out/a11/mpc_v3.json` bitince A11 Isaac MPC sonucunu not et (hedef ≥%50).
+2. **A11'de ES ve PPO'yu başarılı yap (≥%50).** Denenmemiş fikirler: (a) A11'de aim-uzayında ES/PPO (kural tabanı analitikte %23, süre aşımı çok), (b) A11 havuzunda DAgger damıtma (hedef daha toleranslı, öğrenci A16'dan iyi olabilir), (c) "MPC ağırlıklarını modüle eden PPO" / ES-ayarlı MPC — bu **kontrolcüsüz politika değildir**, raporda açıkça etiketle. Dürüst raporla: hangisi gerçekten öğrenilmiş politika.
+3. Isaac'ta paired doğrulama (8 dalga × 12 = 96; McNemar, Wilson CI). `pool_val48` kullanılacaksa dalga başına farklı tile gelir; tohumları 90000..97000.
+4. Videolar: dalga 96000, env 1 (A16'da kural+ES+MPC üçü de indi); A11 için aynı yöntemle uygun env'i seç. Pipeline: `evo_extend_recording.py` → `isaaclab_replay_capture.py` → `synth_lidar_scans.py` → `compose_capture_video.py` → `evo_compose_dashboard_video.py` (bkz. `out/crater2/run.sh`).
+5. PDF: `report/build_krater_rapor.py` genişlet — arazi (LOLA/NAC, güvenli hücre oranı), neden kör politikalar tavanda, hazard haritası, MPC arazi-farkında rollout + ağırlık dengesi, aim kontrolcüsü, ES/PPO sonuçları ve **negatif sonuçlar** (damıtma, ES-haz, PPO-haz), Isaac–analitik farkı, sınırlar (hazard haritası önsel DEM bilgisi; train/val coğrafi ayrık; n=96 geniş CI; MPC dinamiği biliyor).
+6. `lunarsim_krater_paket_3.zip` (PPO videosu) hiç teslim edilmedi — hatırlat.
 
-**And the one that costs most:** a parameter that feeds BOTH the reward and the
-observation (anything in `target_velocity`) must be passed at *every* entry
-point — trainer, demo repair, evaluation, demo collection. Slots 16-19 are
-`target_velocity()` evaluated at the current state; shifting them under a
-trained policy took this clone from 22% to 2% once, and from 52.6% to an
-apparent 7% a second time. `--obs-field-default` now lets the reward's field
-and the observation's field differ on purpose.
-
-Also: `pgrep -f` self-matches (use `ps -eo cmd | grep -F`); zsh does not
-word-split `$VAR` (use arrays); piping a long-running command through `tail`
-hides its output until it exits.
-
----
-
-## 9. Open leads, in the order the measurements favour
-
-1. **The guidance field does two jobs and they conflict.** Refitting the
-   descent schedule onto what lands improves the reward and destroys the
-   observation feature, because `vz - vz_target` is informative BECAUSE the old
-   target is offset — a target that tracks the behaviour perfectly makes the
-   feature ~0 and subtracts the signal out. `--obs-field-default` decouples
-   them; v89 tried it and was flat, but the *observation* side is unexplored:
-   what feature SHOULD slot 17 carry?
-2. **Compose the split and measure it where the goal lives.**
-   `diag_stage_landing_rate.py --handoff-checkpoint X --handoff-alt 25` flies a
-   specialist below 25 m and an approach policy above, on orbit_descent. The
-   specialist is currently no better than its clone, so this is on hold — but
-   the harness exists and `diag_handoff_envelope.py` maps where a specialist
-   succeeds, which is what an approach policy's terminal reward should be built
-   from.
-3. **n-step returns.** `NStepReplayBuffer` exists and has never been used. The
-   action-SNR table says the signal grows with the horizon over which an
-   action's effect accumulates; this is the one estimator change that attacks
-   the numerator and has not been tried.
-4. **Action repeat.** The lateral channel's leverage grows as k³ in the hold
-   length (0.002° at one step, 0.79° at 1 s, 19.7° at 5 s). It must be
-   implemented INSIDE the env, not as a VecEnvWrapper — a wrapper discards the
-   first k steps of episodes that terminate early, and those are the release
-   state. Note recorded in `diag_action_signal_to_noise.py`.
-5. **Analytic / model-based policy gradient.** The reward is dense, continuous
-   and tighter than the controller at every altitude; its slope is available in
-   closed form through a simple thrust model. No critic, no bootstrapping.
-   Biggest build, strongest measured justification.
-
----
-
-## 10. What NOT to do
-
-- Do not trust a training-time landing rate. n=12-31 on orbit_descent misled
-  four separate conclusions. (n≈92 on land_handoff is better but still showed
-  15.0% where the deterministic rate was 10%.)
-- Do not pick the best checkpoint from a run. Two of five runs peaked
-  mid-training and declined (v77 at 310k, v87 at 750k).
-- Do not read a single seed block. The PPO clone looked 7 points better than
-  the SAC clone on block 7000 and 4 points worse on 41000; pooled, +1.6.
-- Do not enable `action_saturation_k`. Measured twice: it does not reduce
-  saturation (95.8% → 96.2%) and it takes ramp_35m from 22.9% to 8%.
-- Do not use `--stateless-tgo`. The controller's `tgo` is a carried integrator;
-  re-solving it every step gives 0/200 landings because the estimate never
-  shrinks and the ZEM/ZEV command scales with 1/tgo.
+## 7. Dikkat
+- Analitik sayılar iyimser (Isaac'a göre 2×); karar sayısı Isaac'tan çıkmalı.
+- Tarama ile seçilen ağırlıkların analitik skorları seçim yanlılığı taşır; taze tohumla ölç.
+- `out/` daha önce silinmişti (memory `lunarsim-out-wiped`): önemli sonuçları (`out/a16/mpc_v3.npy`, `out/a16/final/*.json`, `out/a11/*`) repo dışına da yedekle.

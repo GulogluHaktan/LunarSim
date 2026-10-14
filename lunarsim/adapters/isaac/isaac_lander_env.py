@@ -375,7 +375,8 @@ class IsaacLanderEnv(gym.Env):
             self._ground_z(x + radius * np.cos(a), y + radius * np.sin(a))
             for a in np.deg2rad([0.0, 90.0, 180.0, 270.0])
         ]
-        return float(max(heights) - min(heights))
+        from lunarsim.core.terrain.criterion import effective_leg_diff
+        return float(effective_leg_diff(heights, radius))
 
     # ------------------------------------------------------------------
     # Gymnasium API
