@@ -1,5 +1,14 @@
 \subsection{Terrain pipeline and sites}\label{sec:terrain}
-LunarSim builds a landing tile from a real coarse elevation source plus synthetic layers. The coarse layer is a LROC NAC digital terrain model; we use the Apollo~11 and Apollo~16 products (about 2~m per pixel). Crater, rock and fine-detail layers are added on top because no raster resolves them. Fine detail is injected as a high-pass component weighted by a Gaussian region-of-interest mask, so the coarse layer keeps the low frequencies. A separate high-resolution patch can be generated around a point of interest. Tiles are pre-generated into pools (a training half and a held-out half per site); all experiments here draw from the held-out pools. \todo{state pool sizes and the longitude ranges after P0 confirms them}
+LunarSim builds a landing tile from a real coarse elevation source plus synthetic layers. The coarse layer is a LROC NAC digital terrain model; we use the Apollo~11 and Apollo~16 products (about 2~m per pixel). Crater, rock and fine-detail layers are added on top because no raster resolves them. Fine detail is injected as a high-pass component weighted by a radial fade around the landing target, so the coarse layer keeps the low frequencies; the fade shape is the blend method under study. A separate high-resolution patch can be generated around a point of interest. Tiles are pre-generated into pools (a training half and a held-out half per site); all experiments here draw from the held-out pools. \todo{state pool sizes and the longitude ranges after P0 confirms them}
+
+Figure~\ref{fig:flow-terrain} shows the full path from the elevation model to the collision surface in Isaac. The detail weight $w(r)$ is the quantity that differs between the blend methods compared in this paper.
+
+\begin{figure*}[t]
+  \centering
+  \resizebox{\textwidth}{!}{\input{figures/flow_terrain}}
+  \caption{Terrain generation. A real elevation model gives the coarse layer; a procedural fine layer (fractal detail and craters) is faded in around the landing target by a weight $w(r)$ that is exactly zero beyond radius $R$. The blend method is the choice of $w$. Tiles are pooled and loaded into Isaac as heightfield collision meshes, and the landing criterion reads the same collision mesh.}
+  \label{fig:flow-terrain}
+\end{figure*}
 
 \subsection{Landing criterion}\label{sec:criterion}
 A landing counts as safe when touchdown speed, tilt, body rate and footpad flatness are inside their limits: vertical speed $\leq 1.0$~m/s, horizontal speed $\leq 1.2$~m/s, tilt $\leq 15^{\circ}$, body rate $\leq 0.5$~rad/s, and an effective footpad term $\leq 0.16$~m. The default footpad term (\texttt{plane}) folds two checks into one number: the terrain slope under the four pads ($\leq 10^{\circ}$ by default) and the roughness, i.e.\ the pad-height residual after removing the best-fit plane. A legacy definition (\texttt{spread}) uses the raw maximum-minus-minimum of the four pad heights. Every result file stores the active criterion so that numbers are never compared across definitions.

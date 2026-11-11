@@ -25,6 +25,7 @@ p.add_argument("--eps-per-cand", type=int, default=4)
 p.add_argument("--sigma", type=float, default=0.15)
 p.add_argument("--lr", type=float, default=0.05)
 p.add_argument("--sel", type=int, default=24)
+p.add_argument("--sel-every", type=int, default=3, help="selection block every N generations (and at the last)")
 p.add_argument("--n-envs", type=int, default=12)
 p.add_argument("--seed", type=int, default=0)
 p.add_argument("--aim-scale", type=float, default=15.0)
@@ -85,7 +86,7 @@ def main():
 
     es = OpenAIES(np.zeros(n_act), a.sigma, a.lr, a.pairs, seed=a.seed)
     os.makedirs(a.out, exist_ok=True)
-    rows = []
+    rows = []; best = [-1e18]
     t_all = time.time()
     print(f"ES on ISAAC {a.stage}: {a.gens} gens, {a.pairs} pairs x2 x {a.eps_per_cand} eps = "
           f"{2 * a.pairs * a.eps_per_cand} episodes/gen, {n} envs/wave", flush=True)
@@ -96,10 +97,14 @@ def main():
         es.tell(eps, fit)
         t_train = time.time() - t0
         t_sel = 0.0; sel_land = float("nan")
-        if g % 3 == 0 or g == a.gens - 1:
+        if g % a.sel_every == a.sel_every - 1 or g == a.gens - 1:
             ts = time.time()
-            _, sl = evaluate(es.theta[None, :], 150000, a.sel)
+            sf, sl = evaluate(es.theta[None, :], 150000, a.sel)
             sel_land = float(sl[0]); t_sel = time.time() - ts
+            if float(sf[0]) > best[0]:
+                best[0] = float(sf[0])
+                np.savez(os.path.join(a.out, "best_on_selection.npz"), theta=es.theta.copy(), sizes=np.array([0, n_act]),
+                         mu=np.zeros(1), sd=np.ones(1), aim_scale=a.aim_scale, gain_set="attitude")
         rows.append(dict(gen=g, gen_seconds=t_train, sel_seconds=t_sel, cand_land=float(land.mean()), sel_land=sel_land))
         print(f"g{g:3d} gen {t_train:6.1f}s  sel {t_sel:5.1f}s  cand land {land.mean():.2f}  sel land {sel_land:.2f}", flush=True)
     json.dump(dict(stage=a.stage, n_envs=n, pairs=a.pairs, eps_per_cand=a.eps_per_cand, rows=rows,

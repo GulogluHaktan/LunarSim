@@ -1,0 +1,21 @@
+Two learning algorithms are trained inside Isaac Lab. Neither is compared with the other: each is compared with itself across terrain blend methods (Section~\ref{sec:protocol}). Both act through the same guided-gain interface: the learner does not command thrust directly but multiplies the gains of the ZEM/ZEV controller, which keeps flying the vehicle. The mapping is $g\cdot r^{a}$ per gain, so the action $a=0$ reproduces the stock controller exactly. The learner starts from the controller's own behaviour, and any change it makes is a measurable departure from it. The gain set \texttt{attitude} has 11 gains, and each action is held for 20 control steps (1\,s).
+
+\subsection{Proximal policy optimisation}\label{sec:ppo}
+Proximal policy optimisation (PPO) trains a two-layer MLP policy (64--64 units) with 12 parallel Isaac environments. Each update uses a rollout of 64 steps $\times$ 12 environments (768 decisions), 10 epochs, batch size 192, discount $\gamma=0.995$, GAE $\lambda=0.99$ and a KL target of 0.05. Every 15\,000 decisions a 48-episode selection block picks the best checkpoint. Figure~\ref{fig:flow-ppo} shows the loop.
+
+\begin{figure}[t]
+  \centering
+  \resizebox{\linewidth}{!}{\input{figures/flow_ppo}}
+  \caption{PPO training loop on Isaac. The policy outputs gain multipliers; the ZEM/ZEV controller flies each one-second hold; rollouts update the policy; the best checkpoint on a selection block is scored by paired validation on held-out episodes.}
+  \label{fig:flow-ppo}
+\end{figure}
+
+\subsection{Evolution strategies}\label{sec:es}
+Evolution strategies (ES) optimise a vector of 13 numbers (11 gain multipliers and 2 lateral-aim components) with OpenAI-style antithetic sampling: 16 pairs $\theta\pm\sigma\epsilon$ per generation (32 candidates), 4 episodes per candidate, centred-rank fitness shaping and an Adam step (learning rate 0.05, $\sigma=0.15$). The action is constant within an episode, $a=\tanh\theta$. Every third generation a 24-episode selection block evaluates the current $\theta$. Training runs for 30 generations. Figure~\ref{fig:flow-es} shows the loop. Fitness is the episode return plus 100 for a safe landing; the hazard-distance term of earlier analytic prototypes is not used in this Isaac implementation.
+
+\begin{figure}[t]
+  \centering
+  \resizebox{\linewidth}{!}{\input{figures/flow_es}}
+  \caption{ES training loop on Isaac. Antithetic candidates fly in parallel waves; centred ranks give a gradient estimate; Adam updates $\theta$; the best $\theta$ on a selection block is scored by paired validation on held-out episodes.}
+  \label{fig:flow-es}
+\end{figure}

@@ -1,0 +1,16 @@
+\begin{tikzpicture}[node distance=5mm and 6mm]
+  \node[key]  (theta) {Parameters $\theta$\\13 numbers\\(11 gains + 2 aim)};
+  \node[proc,right=of theta] (samp) {Sample 16 antithetic\\pairs $\theta\pm\sigma\epsilon$\\= 32 candidates};
+  \node[proc,right=of samp] (fly) {Each candidate flies\\4 episodes\\(12-env waves)};
+  \node[proc,below=of fly] (map) {Action $a=\tanh\theta$\\$\rightarrow$ gain map\\$\rightarrow$ ZEM/ZEV};
+  \node[proc,left=of map] (fit) {Fitness\\return $+\,100\cdot$landed};
+  \node[proc,left=of fit] (rank) {Centered ranks\\gradient estimate};
+  \node[key,below=of rank] (adam) {Adam step\\lr 0.05, $\sigma$ 0.15};
+  \node[proc,right=of adam] (sel) {Every 3 generations:\\24-episode selection\\eval of $\theta$};
+  \node[goal,right=of sel] (val) {Best $\theta\rightarrow$ paired\\validation, 192\\held-out episodes};
+  \draw[arr] (theta)--(samp); \draw[arr] (samp)--(fly); \draw[arr] (fly)--(map);
+  \draw[arr] (map)--(fit); \draw[arr] (fit)--(rank); \draw[arr] (rank)--(adam);
+  \draw[arr] (adam)--(sel); \draw[arr] (sel)--(val);
+  \draw[arr,dashed] (adam.west) -- ++(-5mm,0) |- (theta.south west);
+  \node[lbl,left=1mm of adam,xshift=-6mm,yshift=5mm] {next generation};
+\end{tikzpicture}

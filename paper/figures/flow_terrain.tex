@@ -1,0 +1,18 @@
+\begin{tikzpicture}[node distance=5mm and 7mm]
+  \node[src]  (dtm)  {LROC NAC DTM\\Apollo 11 / 16\\(about 2\,m per pixel)};
+  \node[proc,right=of dtm] (crop) {Site sample\\1680\,m tile\\train / held-out split};
+  \node[proc,right=of crop] (coarse) {Coarse layer\\DEM resampled to\\384$\times$384 grid};
+  \node[proc,below=of crop] (fine) {Fine layer\\fBm detail\\+ craters (size law)};
+  \node[key,below=of coarse,text width=40mm] (w) {Detail weight $w(r)$, zero for $r\ge R$\\method: smoothstep, Gaussian ($k{=}1$ or $\ln 1000$), Wendland C2, hybrid};
+  \node[proc,right=of coarse] (blend) {Blend\\$h = h_c + w\cdot \mathrm{HP}(h_f)$\\high-pass split 20\,m};
+  \node[proc,below=of blend] (rocks) {Rocks\\size-frequency,\\capped per tile};
+  \node[goal,right=of blend] (pool) {Tile pool\\(pickle,\\train / val)};
+  \node[goal,below=of pool] (isaac) {Isaac Sim\\heightfield collision\\mesh per env};
+  \node[goal,below=of isaac,yshift=2mm] (crit) {Footpad criterion\\read from the\\collision mesh};
+  \draw[arr] (dtm)--(crop); \draw[arr] (crop)--(coarse);
+  \draw[arr] (crop)--(fine); \draw[arr] (coarse)--(blend);
+  \draw[arr] (fine.south)--++(0,-3mm)-|(rocks.south);
+  \draw[arr] (w)--(blend);
+  \draw[arr] (blend)--(pool); \draw[arr] (rocks)--(pool);
+  \draw[arr] (pool)--(isaac); \draw[arr] (isaac)--(crit);
+\end{tikzpicture}

@@ -6,7 +6,7 @@ Status: plan v2, 2026-11-11. Nothing here has been run yet.
 
 | Item | Decision |
 |---|---|
-| Scope | Simulation only. No learning models (training time is unknown) |
+| Scope | Simulation study. **Update 2026-11-11: learned models are IN** (PPO, ES), but they are never compared with each other. Each learner is compared across blend methods only (e.g. smoothstep-PPO vs wendland-PPO; Gaussian-ES vs smoothstep-ES). The deterministic controller stays as the fixed probe for E0-E6 |
 | Backend | **Every reported result comes from Isaac Sim / Isaac Lab.** The analytic backend is a last resort, for debugging scripts only (a similar article was rejected for analytic tests). No analytic number enters the paper. Repo docs and `analytic_lander_env.py` now say so |
 | Venue | Same as the first version: *Autonomous Intelligent Systems* (Springer, ISSN 2730-616X, no APC) |
 | Format | LaTeX, Springer Nature `sn-jnl` class. Reuse the package in `LunarRocket/experiments/terrain_transition/paper/paper_sn/` (`sn-jnl.cls`, `sn-mathphys-num.bst`, build with `tectonic -X compile main_sn.tex`) |
@@ -196,3 +196,55 @@ Reuse from the old project: `metrics.py`, `blend_functions.py`, `ablation_experi
 
 1. Journal length limit and reference style: check the AIS author guidelines at P6 start.
 2. Is MPC allowed as a second probe, given run cost?
+
+## 12. Learner extension (decided 2026-11-11)
+
+Question (RQ7): does the blend method change what PPO and ES learn, measured as paired landing rate of the trained policy on held-out episodes? The comparison is always same learner, different blend method. PPO is never compared with ES.
+
+Rules carried over from the first version's lesson (n=1 looked significant, n=3 did not):
+- Several training seeds per (learner, blend method, site). Seeds are declared before training.
+- Evaluate every trained policy with the paired validator (`validate_guided_gain_isaac.py`, 192 episodes, fresh seeds, never the trainer's own eval).
+- Analyse per-seed final rates as the unit (not per-episode pooling). Report the minimum detectable difference. A null result is reported as "no difference above X".
+- Add a no-blend `fine` reference arm per learner so effects are read against a baseline.
+
+Measured cost (Isaac, orbit_descent, this machine class):
+
+| Item | Time |
+|---|---|
+| PPO training, 60k decisions | about 1.1 h (laptop 15.9 decisions/s; desktop 20.2/s) |
+| PPO training, 150k decisions | about 2.1-2.6 h |
+| ES training, 60 generations (128 episodes each) | about 7.0 h (396 s per generation + 72 s selection every 3 gens; measured) |
+| ES training, 30 generations | about 3.5 h |
+| Paired validation of one policy, 192 episodes | about 15 min |
+
+Budget = runs x time. Two machines run in parallel, so wall time is about half.
+
+| Design | Runs | GPU hours (1 machine) | Wall hours (2 machines) |
+|---|---|---|---|
+| PPO 60k, 3 methods x 2 sites x 3 seeds | 18 | about 20 + 5 validation | about 12 |
+| PPO 60k, 6 methods x 2 sites x 3 seeds | 36 | about 40 + 9 | about 25 |
+| PPO 150k, 3 methods x 2 sites x 3 seeds | 18 | about 45 + 5 | about 25 |
+| ES 60 gens, 3 methods x 1 site x 3 seeds | 9 | about 63 + 2 | about 33 |
+| ES 30 gens, 3 methods x 1 site x 3 seeds | 9 | about 32 + 2 | about 17 |
+| ES 60 gens, 3 methods x 2 sites x 3 seeds | 18 | about 126 + 5 | about 65 |
+
+Recommended starting point (to confirm): PPO 60k with smoothstep, wendland, gaussian_calibrated (+ `fine` reference) on both sites, 3 seeds; ES 30 gens on one site, same methods, 3 seeds. About 30 wall hours on two machines.
+
+Paper impact: the introduction currently says the probe is not learned. Revise it to "a fixed controller probe plus learned policies compared across blend methods". Add RQ7 and section "Learned policies" in results.
+
+## 13. Final experiment design under the 12-hour-per-machine cap (2026-11-11)
+
+Constraints from the authors: PPO runs on the laptop, ES runs on the HP desktop (`noron`), at most 12 hours each, ES at most 30 generations. Every experiment must produce a table and a figure, all in English. The terrain generator and each learning algorithm have a flow chart in the paper (`paper/figures/flow_*.tex`).
+
+Blend methods compared (each learner against itself only): smoothstep, Wendland C2, calibrated Gaussian (k = ln 1000). PPO also has a no-blend `fine` reference arm.
+
+| Learner | Machine | Design | Per run | Total |
+|---|---|---|---|---|
+| PPO | laptop | 4 arms (3 methods + fine) x 2 sites x 3 seeds = 24 runs would need 13.4 h, so the `fine` reference uses 1 seed per site: 3 x 2 x 3 + 2 = 20 runs | about 34 min: 15,360 decisions (20 updates), 3 selection blocks of 24 episodes, policy-only validation of 192 held-out episodes | about 11.3 h |
+| ES | HP desktop | 3 methods x Apollo 11 x 3 seeds = 9 runs, 18 generations x (8 pairs x 4 episodes x 2) = 64 episodes per generation | about 74 min: 60 min training, 2 selection blocks, validation 192 episodes | about 11.1 h |
+
+Reasons for the sizes, from measurements: PPO reached 77% on a 48-episode block at 15k decisions in the earlier Isaac run, so 15k decisions shows learning. ES generation time is 396 s for 128 episodes (3.1 s per episode); halving the population keeps 18 generations inside the cap. ES on Apollo 16 is not in this budget; it is the first thing to add if time remains.
+
+Validation: every trained policy is scored on the same held-out pool of the site (the canonical `pool_val.pkl`), with declared wave seeds 90000.. and 16 waves x 12 envs. The controller arm is measured once per site and is not repeated per policy (`--policy-only`). The per-seed final landing rate is the analysis unit.
+
+Honest limits to state in the paper: 3 seeds give low power; ES at 18 generations is a short run and may not improve on the controller; learners are not compared with each other. Each limit is reported with the minimum detectable difference.

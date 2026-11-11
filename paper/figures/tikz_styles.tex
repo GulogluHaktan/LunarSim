@@ -1,0 +1,13 @@
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,calc,backgrounds}
+\tikzset{
+  box/.style={rectangle,rounded corners=2pt,draw=black!70,fill=white,align=center,font=\footnotesize,
+              minimum height=8mm,inner sep=3pt,text width=27mm},
+  wide/.style={box,text width=40mm},
+  src/.style={box,fill=blue!8},
+  proc/.style={box,fill=black!4},
+  key/.style={box,fill=orange!18,draw=orange!70!black},
+  goal/.style={box,fill=green!10,draw=green!40!black},
+  dec/.style={diamond,aspect=2.2,draw=black!70,fill=yellow!14,align=center,font=\scriptsize,inner sep=1pt,text width=22mm},
+  arr/.style={-{Stealth[length=2.2mm]},thick,black!70},
+  lbl/.style={font=\scriptsize\itshape,black!70},
+}

@@ -57,6 +57,9 @@ parser.add_argument("--wave-seed0", type=int, default=90000,
 parser.add_argument("--terrain-seed", type=int, default=7)
 parser.add_argument("--terrain-grid-n", type=int, default=80)
 parser.add_argument("--max-rocks-per-env", type=int, default=0)
+parser.add_argument("--policy-only", action="store_true",
+                    help="skip the controller arm (its outcome on a declared wave seed is identical for every policy; "
+                         "measure it once per pool). Halves the validation time.")
 parser.add_argument("--out-json", type=str, default=None)
 parser.add_argument("--torch-device", type=str, default="cuda")
 parser.add_argument("--constant-action", type=str, default=None,
@@ -183,7 +186,10 @@ def main() -> None:
     base_ok, cand_ok = [], []
     base_ret, cand_ret = [], []
     for w, sd in enumerate(seeds):
-        bo, br, bs = wave(gvenv, None, sd, max_dec)
+        if args.policy_only and model is not None:
+            bo = np.zeros(args.n_envs, bool); br = np.zeros(args.n_envs); bs = np.ones(args.n_envs, bool)
+        else:
+            bo, br, bs = wave(gvenv, None, sd, max_dec)
         if not bs.all():
             print(f"  wave {w} seed {sd}: {int((~bs).sum())} controller "
                   f"episode(s) never terminated; dropped from both arms",

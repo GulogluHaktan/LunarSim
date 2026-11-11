@@ -1,0 +1,18 @@
+\begin{tikzpicture}[node distance=5mm and 6mm]
+  \node[src]  (pool) {Tile pool\\(blend method $m$)};
+  \node[proc,right=of pool] (env) {Isaac Lab env\\12 parallel envs\\120\,Hz physics};
+  \node[proc,right=of env] (obs) {Observation\\20 base + guidance\\terms};
+  \node[key,right=of obs] (pol) {PPO policy\\MLP 64--64\\$a\in[-1,1]^{11}$};
+  \node[proc,below=of pol] (gain) {Gain map\\$g\cdot r^{a}$ ($a{=}0$\\= stock controller)};
+  \node[proc,left=of gain] (zem) {ZEM/ZEV controller\\flies 20 steps\\(1\,s hold)};
+  \node[proc,left=of zem] (rew) {Reward\\terminal touchdown\\+ dense terms};
+  \node[proc,below=of rew] (buf) {Rollout buffer\\64 steps $\times$ 12 envs\\= 768 decisions};
+  \node[key,right=of buf] (upd) {PPO update\\10 epochs, batch 192\\$\gamma{=}0.995$, $\lambda{=}0.99$};
+  \node[proc,right=of upd] (sel) {Every 15k decisions:\\48-episode selection\\block eval};
+  \node[goal,below=of upd] (val) {Best checkpoint $\rightarrow$\\paired validation\\192 held-out episodes};
+  \draw[arr] (pool)--(env); \draw[arr] (env)--(obs); \draw[arr] (obs)--(pol);
+  \draw[arr] (pol)--(gain); \draw[arr] (gain)--(zem); \draw[arr] (zem)--(rew);
+  \draw[arr] (rew)--(buf); \draw[arr] (buf)--(upd);
+  \draw[arr] (upd)--(sel); \draw[arr] (upd)--(val);
+  \draw[arr,dashed] (upd.north) |- ++(0,3mm) -| (pol.south east);
+\end{tikzpicture}
