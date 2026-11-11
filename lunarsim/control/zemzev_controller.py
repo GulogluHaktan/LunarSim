@@ -207,6 +207,12 @@ class ZemZevController:
         self._pos_w = 1.0
         self.final_pos_kp = 0.0
         self.terrain_ahead = False
+        # Terrain-aligned touchdown attitude: below `slope_align_alt_m` the attitude target gets the tilt that
+        # puts the pad plane parallel to the terrain under the pads, so all four pads reach the ground together
+        # instead of two legs touching and the vehicle tipping/sliding. 0 disables (legacy: hold level).
+        import os as _os
+        self.slope_align_alt_m = float(_os.environ.get("LUNARSIM_SLOPE_ALIGN_ALT", "12.0"))
+        self.slope_align_max_rad = math.radians(float(_os.environ.get("LUNARSIM_SLOPE_ALIGN_MAX_DEG", "12.0")))
 
     def reset(self) -> None:
         self.tgo = None
@@ -454,6 +460,18 @@ class ZemZevController:
 
             thrust_mag_n = self._throttle_from_vertical_need(
                 float(a_thrust[2]), s["tilt_x"], s["tilt_y"], mass_kg, p.dps_thrust_min_n, p.dps_thrust_max_n)
+
+        if self.slope_align_alt_m > 0.0 and alt < self.slope_align_alt_m:
+            r_pad = 4.7
+            _tz = getattr(env, "_terrain_z", None) or env._ground_z
+            zp = [_tz(s["x"] + r_pad * math.cos(a_), s["y"] + r_pad * math.sin(a_))
+                  for a_ in (0.0, 0.5 * math.pi, math.pi, 1.5 * math.pi)]
+            gx = (zp[0] - zp[2]) / (2.0 * r_pad)
+            gy = (zp[1] - zp[3]) / (2.0 * r_pad)
+            w_al = float(np.clip((self.slope_align_alt_m - alt) / max(self.slope_align_alt_m - 2.0, 1.0), 0.0, 1.0))
+            m_ = self.slope_align_max_rad
+            tilt_y_des += w_al * float(np.clip(-math.atan(gx), -m_, m_))
+            tilt_x_des += w_al * float(np.clip(math.atan(gy), -m_, m_))
 
         pitch_cmd = g.kp_att * (tilt_x_des - s["tilt_x"]) - g.kd_att * s["wx"]
         roll_cmd = g.kp_att * (tilt_y_des - s["tilt_y"]) - g.kd_att * s["wy"]

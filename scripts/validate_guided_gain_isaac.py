@@ -128,7 +128,8 @@ def main() -> None:
     stage = STAGES_BY_NAME[args.stage]
     spec = GAIN_SETS[args.gain_set]
     max_dec = int(stage.params.max_episode_s / stage.params.dt_s
-                  / args.hold_steps) + 4
+                  / args.hold_steps) + 4 \
+        + int(float(os.environ.get("LUNARSIM_SETTLE_S", "4.0")) / stage.params.dt_s / args.hold_steps) + 2
 
     max_tile = max(s.tile_size_m for s in STAGES)
     venv = IsaacLanderVecEnv(

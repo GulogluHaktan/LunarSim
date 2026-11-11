@@ -63,7 +63,8 @@ def main():
     cfg = MPCConfig(K=512, M=20, hold=12, exec_steps=4, roll_sub=2, margin=0.7)
     lp = np.load(a.params_npy)
     mpc = MPPIMPC(st.params, RewardWeights(), cfg, lp)
-    max_raw = int(st.params.max_episode_s / st.params.dt_s) + 4
+    HANDOFF = float(os.environ.get('LUNARSIM_MPC_HANDOFF', '0'))
+    max_raw = int(st.params.max_episode_s / st.params.dt_s) + 4 + int(float(__import__("os").environ.get("LUNARSIM_SETTLE_S", "4.0")) / st.params.dt_s) + 8
     seeds = [a.wave_seed0 + 1000 * k for k in range(a.waves)]
     print(f"MPC on ISAAC {a.stage}: {a.waves} waves x {a.n_envs}, seeds {seeds[0]}..{seeds[-1]}", flush=True)
     C, P, times = [], [], []
@@ -84,6 +85,12 @@ def main():
         venv.reset(); mpc.reset(a.n_envs)
         mpc.U = None; mpc._since_shift = 0; mpc.reset(a.n_envs)
         res = [None] * a.n_envs; A = np.zeros((a.n_envs, 4), np.float32); tm = time.time(); tile_ids = []
+        handed = np.zeros(a.n_envs, bool)
+        if HANDOFF > 0:
+            from lunarsim.control.zemzev_controller import ZemZevController
+            from lunarsim.rl.guided_gain_vec_env import _EnvSlice
+            ctrls = [ZemZevController(st.params) for _ in range(a.n_envs)]
+            slices = [_EnvSlice(venv, i) for i in range(a.n_envs)]
         imp = [None] * a.n_envs
         for step in range(max_raw):
             if step % cfg.exec_steps == 0:
@@ -93,6 +100,11 @@ def main():
                         tl = [attach_hazard(t) for t in venv._tiles]
                         mpc.set_hazard([t.haz_dist for t in tl], tl[0].size_m, tl[0].res_m, [t.height for t in tl]); tile_ids = ids
                 A = mpc.act(mpc_state(venv, a.n_envs)).astype(np.float32)
+            if HANDOFF > 0:        # below HANDOFF m of clearance the ZEM/ZEV final approach flies the touchdown
+                for i in range(a.n_envs):
+                    if res[i] is None and (handed[i] or venv._contact(i)[0] < HANDOFF):
+                        handed[i] = True
+                        slices[i].sync(); A[i] = ctrls[i].act(slices[i])
             venv.step_async(A); _, _, dones, infos = venv.step_wait()
             for i in range(a.n_envs):
                 if res[i] is None and dones[i]:

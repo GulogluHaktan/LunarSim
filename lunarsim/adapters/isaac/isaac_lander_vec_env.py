@@ -44,6 +44,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+import os
+
 import numpy as np
 
 from lunarsim.rl.spawn_range import sample_range
@@ -68,6 +70,14 @@ _STATE_FIELDS = (
     "x", "y", "z", "vx", "vy", "vz", "tilt_x", "tilt_y", "yaw", "wx", "wy", "wz",
     "fuel_kg", "rcs_fuel_kg", "throttle", "rcs_pitch", "rcs_roll", "rcs_yaw",
 )
+
+
+PAD_RADIUS_M = float(os.environ.get("LUNARSIM_PAD_R", "0.47"))
+_PAD_DISC = [(0.0, 0.0)] + [(PAD_RADIUS_M * np.cos(t_), PAD_RADIUS_M * np.sin(t_))
+                             for t_ in np.deg2rad([0.0, 90.0, 180.0, 270.0])]
+REST_SPEED_M_S = float(os.environ.get("LUNARSIM_REST_SPEED", "0.30"))
+REST_W_RAD_S = float(os.environ.get("LUNARSIM_REST_W", "0.15"))
+REST_PAD_GAP_M = float(os.environ.get("LUNARSIM_REST_PAD_GAP", "0.20"))
 
 
 class _EnvView:
@@ -138,6 +148,10 @@ class IsaacLanderVecEnv(VecEnv):
         self._tiles: list[Tile | None] = [None] * num_envs
         self.state = {k: np.zeros(num_envs, dtype=np.float64) for k in _STATE_FIELDS}
         self._t = np.zeros(num_envs, dtype=np.float64)
+        # Post-touchdown settling (physics, engine cut). 0 disables (legacy: episode ends at first contact).
+        self._settle_steps = int(round(float(os.environ.get("LUNARSIM_SETTLE_S", "4.0")) / params.dt_s))
+        self._settle = np.zeros(num_envs, dtype=np.int64)
+        self._td = [None] * num_envs
         self._actions = np.zeros((num_envs, 4), dtype=np.float32)
 
         self._build_scene()
@@ -255,6 +269,47 @@ class IsaacLanderVecEnv(VecEnv):
             tile.height, tile.res_m, s["x"][i] - ox, s["y"][i] - oy, s["z"][i],
             s["tilt_x"][i], s["tilt_y"][i], self._half_height_m, self._specs.footpad_span_m / 2.0)
 
+    def _at_rest_all_pads_down(self, i: int) -> bool:
+        """After the post-touchdown settle window: upright, (nearly) motionless, and all four footpads
+        on the ground (pad heights, rotated by the vehicle's actual attitude, within REST_PAD_GAP_M of
+        the terrain under them). This is what 'the vehicle landed' physically means; a lander that
+        touched with two pads and froze with the other two in the air does not pass."""
+        s = self.state; p = self.params
+        speed = float(np.hypot(np.hypot(s["vx"][i], s["vy"][i]), s["vz"][i]))
+        w = float(np.sqrt(s["wx"][i] ** 2 + s["wy"][i] ** 2 + s["wz"][i] ** 2))
+        tilt = float(np.hypot(s["tilt_x"][i], s["tilt_y"][i]))
+        _dbg = os.environ.get("LUNARSIM_SETTLE_DEBUG", "0") == "1"
+        if speed > REST_SPEED_M_S or w > REST_W_RAD_S or tilt > p.safe_landing_tilt_rad:
+            if _dbg:
+                print(f"[settle] env{i} FAIL motion speed={speed:.2f} w={w:.3f} tilt={np.degrees(tilt):.1f}", flush=True)
+            return False
+        gap = self._pad_gap(i)
+        if _dbg:
+            td = self._td[i] or {}
+            print(f"[settle] env{i} gap_rest={gap:.2f} gap_touch={td.get('gap0', -1):.2f} speed={speed:.2f} w={w:.3f} "
+                  f"tilt={np.degrees(tilt):.1f} | touch vz={td.get('v_z', 0):.2f} vxy={td.get('v_xy', 0):.2f} "
+                  f"tilt0={np.degrees(td.get('tilt', 0)):.1f} legdiff0={td.get('leg_diff', -1):.2f}", flush=True)
+        return bool(gap <= REST_PAD_GAP_M)
+
+    def _pad_gap(self, i: int) -> float:
+        """Spread of (pad height in the vehicle's attitude - terrain under the pad): 0 when all four pads
+        rest on the ground, grows with attitude/slope mismatch."""
+        s = self.state
+        r = self._specs.footpad_span_m / 2.0
+        ph, th, ya = float(s["tilt_x"][i]), float(s["tilt_y"][i]), float(s["yaw"][i])
+        gaps = []
+        for a_ in np.deg2rad([0.0, 90.0, 180.0, 270.0]):
+            px, py = r * np.cos(a_), r * np.sin(a_)
+            qx = np.cos(th) * px + np.sin(th) * np.sin(ph) * py
+            qy = np.cos(ph) * py
+            qz = -np.sin(th) * px + np.cos(th) * np.sin(ph) * py
+            wx = s["x"][i] + np.cos(ya) * qx - np.sin(ya) * qy
+            wy = s["y"][i] + np.sin(ya) * qx + np.cos(ya) * qy
+            # a resting pad touches the HIGHEST surface under its disc, not the height under its centre
+            g_ = max(self._ground_z(i, wx + dx_, wy + dy_) for dx_, dy_ in _PAD_DISC)
+            gaps.append(float(qz) - g_)
+        return float(max(gaps) - min(gaps))
+
     def _footpad_height_diff_m(self, i: int, x_world: float, y_world: float) -> float:
         radius = self._specs.footpad_span_m / 2.0
         heights = [
@@ -266,6 +321,8 @@ class IsaacLanderVecEnv(VecEnv):
 
     def _reset_one(self, i: int):
         p = self.params
+        self._settle[i] = 0
+        self._td[i] = None
         ox, oy, _ = self.env_origins[i]
 
         tile = self.tile_fn(self._rng)
@@ -416,6 +473,11 @@ class IsaacLanderVecEnv(VecEnv):
         roll_cmd = np.where(no_rcs, 0.0, roll_cmd)
         yaw_cmd = np.where(no_rcs, 0.0, yaw_cmd)
 
+        _settling = self._settle > 0
+        throttle = np.where(_settling, 0.0, throttle)
+        pitch_cmd = np.where(_settling, 0.0, pitch_cmd)
+        roll_cmd = np.where(_settling, 0.0, roll_cmd)
+        yaw_cmd = np.where(_settling, 0.0, yaw_cmd)
         thrust_mag = np.where(throttle <= 0.0, 0.0, p.dps_thrust_min_n + throttle * (p.dps_thrust_max_n - p.dps_thrust_min_n))
         max_torque = p.rcs_thrust_n * p.rcs_quad_radius_m * p.rcs_jets_per_couple
 
@@ -498,6 +560,23 @@ class IsaacLanderVecEnv(VecEnv):
             touched_down = bool(clearance_m <= TOUCHDOWN_CONTACT_EPS_M)
             lost_control = bool(np.hypot(s["tilt_x"][i], s["tilt_y"][i]) > p.loss_of_control_tilt_rad)
             timed_out = bool(self._t[i] >= p.max_episode_s)
+            settle_done = False
+            if self._settle_steps > 0:
+                if self._settle[i] > 0:                       # already in contact, engine cut, letting it settle
+                    self._settle[i] -= 1
+                    timed_out = False
+                    touched_down = False
+                    if self._settle[i] == 0 or lost_control:
+                        settle_done = True
+                        touched_down = True
+                elif touched_down and not lost_control:      # first contact: store graded impact, start settling
+                    self._td[i] = dict(v_z=float(pre_vz[i]), v_xy=float(pre_vxy[i]), tilt=float(pre_tilt[i]),
+                                       w=float(pre_w[i]),
+                                       leg_diff=self._footpad_height_diff_m(i, s["x"][i], s["y"][i]),
+                                       gap0=self._pad_gap(i))
+                    self._settle[i] = self._settle_steps
+                    touched_down = False
+                    timed_out = False
             ox, oy, _ = self.env_origins[i]
             left_tile = out_of_tile(self._tiles[i], s["x"][i] - ox, s["y"][i] - oy,
                                      self._specs.footpad_span_m / 2.0)
@@ -517,13 +596,24 @@ class IsaacLanderVecEnv(VecEnv):
                 tilt = float(pre_tilt[i])
                 w = float(pre_w[i])
                 leg_diff = self._footpad_height_diff_m(i, s["x"][i], s["y"][i])
-                landed_safely = bool(
+                rest_ok = True
+                if settle_done and self._td[i] is not None:
+                    td = self._td[i]
+                    v_z, v_xy, tilt, w, leg_diff = td["v_z"], td["v_xy"], td["tilt"], td["w"], td["leg_diff"]
+                    rest_ok = bool(self._at_rest_all_pads_down(i))
+                landed_safely = rest_ok and bool(
                     abs(v_z) <= p.safe_landing_v_z_m_s
                     and v_xy <= p.safe_landing_v_xy_m_s
                     and tilt <= p.safe_landing_tilt_rad
                     and w <= p.safe_landing_w_rad_s
-                    and leg_diff <= p.safe_landing_max_leg_height_diff_m
+                    and (leg_diff <= p.safe_landing_max_leg_height_diff_m or self._settle_steps > 0)
                 )
+                if settle_done and os.environ.get("LUNARSIM_SETTLE_DEBUG", "0") == "1":
+                    _why = [n_ for n_, ok_ in (("vz", abs(v_z) <= p.safe_landing_v_z_m_s), ("vxy", v_xy <= p.safe_landing_v_xy_m_s),
+                                               ("tilt", tilt <= p.safe_landing_tilt_rad), ("w", w <= p.safe_landing_w_rad_s),
+                                               ("rest", rest_ok)) if not ok_]
+                    print(f"[final] env{i} landed={landed_safely} fail={_why} vz={v_z:.2f} vxy={v_xy:.2f} "
+                          f"tilt0={np.degrees(tilt):.1f} w={w:.2f}", flush=True)
                 landing_margins = {
                     "v_z": float(np.clip(1.0 - abs(v_z) / max(p.safe_landing_v_z_m_s, 1e-6), 0.0, 1.0)),
                     "v_xy": float(np.clip(1.0 - v_xy / max(p.safe_landing_v_xy_m_s, 1e-6), 0.0, 1.0)),
@@ -584,6 +674,8 @@ class IsaacLanderVecEnv(VecEnv):
             scalar_state["y"] = scalar_state["y"] - self.env_origins[i][1]
             view = _EnvView(p, scalar_state, self._tiles[i])
             rewards[i] = self.reward_fn(view, info)
+            if self._settle[i] > 0:
+                rewards[i] = 0.0
             done = terminated or truncated
             dones[i] = done
 

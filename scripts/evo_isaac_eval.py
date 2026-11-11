@@ -68,7 +68,7 @@ def main():
         env_spacing_m=max(s.tile_size_m for s in STAGES) * 1.5, seed=a.terrain_seed,
         max_rocks_per_env=0, reward_fn=make_apollo_reward_fn(w))
     gv = GuidedGainVecEnv(venv, gain_spec=GAIN_SETS["attitude"], hold_steps=20, residual_scale=0.0)
-    max_raw = int(st.params.max_episode_s / st.params.dt_s) + 4
+    max_raw = int(st.params.max_episode_s / st.params.dt_s) + 4 + int(float(__import__("os").environ.get("LUNARSIM_SETTLE_S", "4.0")) / st.params.dt_s) + 8
     seeds = [a.wave_seed0 + 1000 * k for k in range(a.waves)]
     print(f"stage {a.stage} on ISAAC, {a.waves} waves x {a.n_envs}, seeds {seeds[0]}..{seeds[-1]}", flush=True)
     pol = None

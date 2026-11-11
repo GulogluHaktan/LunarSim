@@ -92,6 +92,11 @@ class _EnvSlice:
     def _ground_z(self, x: float, y: float) -> float:
         return self._ground_z_m
 
+    def _terrain_z(self, x: float, y: float) -> float:
+        """Real collision-surface height at pad-relative (x, y); used for terrain-aligned touchdown attitude."""
+        ox, oy, _ = self._venv.env_origins[self._i]
+        return self._venv._ground_z(self._i, x + float(ox), y + float(oy))
+
 
 class GuidedGainVecEnv(VecEnv):
     """Policy sets ZEM/ZEV gains; `hold_steps` controller steps per decision."""

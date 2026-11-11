@@ -81,6 +81,8 @@ parser.add_argument("--torch-device", type=str, default="cuda")
 parser.add_argument("--reward-weight", action="append", default=None,
                     metavar="NAME=VALUE",
                     help="override a RewardWeights field for the whole run")
+parser.add_argument("--init-from", type=str, default=None,
+                    help="warm-start policy/value weights from this SB3 checkpoint (same obs/action dims)")
 parser.add_argument("--headless", action="store_true", default=True)
 args = parser.parse_args()
 
@@ -198,6 +200,9 @@ def main() -> None:
         f"log_std_init did not reach the policy: asked {args.log_std_init}, got {got}"
     assert abs(model.gae_lambda - args.gae_lambda) < 1e-12, "gae_lambda did not reach PPO"
     assert abs(model.ent_coef - args.ent_coef) < 1e-12, "ent_coef did not reach PPO"
+    if args.init_from:
+        model.set_parameters(args.init_from, exact_match=True)
+        print(f"[ppo] warm-started from {args.init_from}", flush=True)
     print(f"[ppo] sigma={np.round(np.exp(model.policy.log_std.detach().cpu().numpy()), 4)}"
           f"  rollout={args.n_steps * args.n_envs} decisions/update", flush=True)
 

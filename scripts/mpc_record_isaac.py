@@ -159,7 +159,7 @@ def save(path, steps, gains, outcome, tiles, gain_names, dt, hold):
 
 def main():
     stage = STAGES_BY_NAME[args.stage]
-    max_raw = int(stage.params.max_episode_s / stage.params.dt_s) + 4
+    max_raw = int(stage.params.max_episode_s / stage.params.dt_s) + 4 + int(float(__import__("os").environ.get("LUNARSIM_SETTLE_S", "4.0")) / stage.params.dt_s) + 8
     max_tile = max(s.tile_size_m for s in STAGES)
     venv = IsaacLanderVecEnv(
         num_envs=args.n_envs, tile_fn=make_tile_fn(stage, args.terrain_grid_n),
