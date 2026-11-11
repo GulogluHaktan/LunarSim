@@ -1,0 +1,16 @@
+\todo{Refresh this section with a new literature search (academic MCP sources) before submission, including at least one 2023--2026 lunar landing / terrain-relative navigation source. Every entry below comes from refs.bib, whose entries were DOI-checked in the first version of the project; new entries must be verified the same way.}
+
+\paragraph{Multi-resolution terrain and seams.}
+Geometry clipmaps~\cite{losasso2004}, ROAM~\cite{duchaineau1997} and geomipmapping~\cite{deboer2000} treat the join between a coarse and a fine mesh as a central engineering problem, and \citet{pajarola2007} survey the family. Work that continues this line still addresses transitions between levels~\cite{zhang2019,jain2024}. This literature optimises how a transition looks. Our RQ1 measures what a physics query returns at the join, which is the quantity a landing leg meets.
+
+\paragraph{Compact and infinite support.}
+Gaussian-type radial functions~\cite{hardy1971} never reach exactly zero at a finite radius, while compactly supported radial functions of minimal degree~\cite{wendland1995} and multi-scale compactly supported bases~\cite{ohtake2003,ohtake2003mpu} do. These results explain why the shape of a fade function can matter once a surface is truncated at a finite radius, and they supply the candidate fades compared in RQ1.
+
+\paragraph{Terrain accuracy in lunar landing.}
+Precise-landing programmes such as ALHAT rely on terrain-relative navigation and hazard detection~\cite{johnson2008,nasajpl}, and lunar elevation models quantify the terrain accuracy available at landing sites~\cite{barker2016}. Recent flight data from vision-based navigation and obstacle detection on SLIM~\cite{ishida2025} show that terrain representation reaches landing outcomes in flight, which motivates asking the same question of a simulator.
+
+\paragraph{Simulation platforms and evaluation practice.}
+Isaac Lab and its predecessor Orbit define the platform used here~\cite{mittal2023,nvidia2025}. Terrain curricula and randomisation are established practice~\cite{rudin2022,tobin2017}, and OmniLRS builds lunar scenes in Isaac Sim from a real elevation model plus procedural detail~\cite{richard2024}. Work on evaluation practice in reinforcement learning stresses repeated runs, interval estimates and stated statistical power~\cite{henderson2018,agarwal2021,colas2018,colas2019}. We adopt the same discipline for a simulator study: paired seeds, bootstrap intervals, an A/A noise floor, and a stated minimum detectable effect.
+
+\paragraph{Position of this study.}
+To our knowledge, the literature above does not report a controlled, paired measurement of terrain-resolution, detail-layer, criterion and PhysX-setting sensitivity for a lunar lander flown inside Isaac Sim. \todo{confirm this statement with the new literature search; soften or remove if a counterexample is found}

@@ -1,0 +1,28 @@
+Autonomous lunar landing demands precise positioning and safe contact in real time over cratered, rocky and sloped terrain. Before any such system flies, it is developed and judged in simulation, and GPU-parallel physics frameworks such as Isaac Lab now make large simulated campaigns practical~\cite{mittal2023,nvidia2025,rudin2022}. A simulator, however, is a stack of design choices: how finely the terrain is gridded, which detail layers sit on top of a real elevation model, how those layers are joined, which landing criterion declares success, and which contact and integration settings the physics engine uses. Each choice is cheap to make and easy to forget, yet each can change the number that a study finally reports.
+
+Reviews of physics simulators and of randomised simulation compare engines and catalogue randomisation axes~\cite{collins2021,muratore2022}. The terrain-rendering literature treats seams between resolution levels as a long-standing engineering problem~\cite{losasso2004,duchaineau1997,deboer2000,pajarola2007}. What is less often reported is a quantitative, controlled measurement of how such choices move landing-relevant outcomes on real lunar terrain, inside the physics engine in which the landing is flown. This paper provides that measurement for LunarSim, a lunar terrain, lighting, LiDAR and landing simulation library that runs in Isaac Sim and Isaac Lab.
+
+Our design has three deliberate properties. First, every reported result comes from Isaac Sim and Isaac Lab, the physics engine in which the vehicle actually lands. Second, the behavioural probe is a fixed, deterministic guidance controller rather than a learned policy, so differences between arms are caused by the simulator setting and not by training noise or training budget. Third, arms are paired by terrain seed, and an A/A experiment (the same seeds repeated with no change) measures the simulator's own run-to-run noise floor before any effect is claimed. We run all experiments on two real sites, Apollo~11 and Apollo~16, built from LROC NAC digital terrain models, which gives one comparatively benign and one demanding landing environment.
+
+We ask six research questions about the stage \texttt{orbit\_descent}, a descent from 200~m altitude with 10--30~m/s horizontal speed:
+
+\begin{itemize}
+\item \textbf{RQ1} Where do multi-resolution seams exist in the Isaac terrain, and how large are they (boundary C0 and C1 continuity)? Does a compact-support fade remove them at equal cost?
+\item \textbf{RQ2} How does terrain resolution change the footpad criterion, the hazard map and the safe-cell fraction?
+\item \textbf{RQ3} Do sub-grid layers (fine detail, craters, rocks) change the safe-site fraction and the controller landing rate?
+\item \textbf{RQ4} How sensitive is the landing rate to the definition of the landing criterion?
+\item \textbf{RQ5} How sensitive are outcomes to PhysX settings (collision representation, substep size, solver iterations)?
+\item \textbf{RQ6} What does each fidelity level cost in mesh-build time, memory and step time?
+\end{itemize}
+
+The main contributions of this study are as follows:
+
+\begin{enumerate}
+\item A controlled, seed-paired fidelity study of a lunar-landing simulator, run end to end in Isaac Sim and Isaac Lab on Apollo~11 and Apollo~16 terrain (Sections~\ref{sec:protocol} and~\ref{sec:results}).
+\item A measurement protocol that reports the simulator's own repeatability (A/A noise floor) and the minimum detectable effect next to every result, so readers can judge what each comparison can and cannot resolve (Section~\ref{sec:protocol}).
+\item Boundary-continuity measurements taken on the actual Isaac collision surface instead of on the source height array (RQ1).
+\item A cost table for every fidelity level, so that the choice of setting can be made with its price in view (RQ6).
+\item \todo{add result-dependent contributions after the experiments finish; each must be backed by a table or figure}
+\end{enumerate}
+
+The remainder of the paper is organised as follows. Section~\ref{sec:related} places the study in the literature. Section~\ref{sec:sim} describes the simulator. Section~\ref{sec:protocol} defines the experiments and statistics. Section~\ref{sec:results} reports the results, Section~\ref{sec:discussion} discusses them and their limits, and Section~\ref{sec:conclusion} concludes.

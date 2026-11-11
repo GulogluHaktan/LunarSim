@@ -1,4 +1,7 @@
-"""A Gymnasium-compatible lunar lander environment driven entirely by
+"""LAST RESORT (project policy, 2026-11-11): debugging only. No result or paper may use this backend;
+all reported results come from Isaac Sim / Isaac Lab.
+
+A Gymnasium-compatible lunar lander environment driven entirely by
 `lunarsim.core` (terrain + a real-Apollo-LM-spec rigid-body rocket model) --
 no Isaac Sim required. This is the fast, CPU-only backend for RL algorithm
 development/iteration; `lunarsim.adapters.isaac` has the (Isaac-Sim-backed,

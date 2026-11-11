@@ -139,6 +139,9 @@ def generate_tile(cfg: TerrainConfig) -> Tile:
                     center_px=(r["y_m"] / cfg.res_m + px_center, r["x_m"] / cfg.res_m + px_center),
                     sigma_m=r.get("sigma_m", 50.0),
                     weight=r.get("weight", 1.0),
+                    profile=r.get("profile"),
+                    radius_m=r.get("radius_m"),
+                    contact_radius_m=r.get("contact_radius_m"),
                 )
                 for r in regions
             ]

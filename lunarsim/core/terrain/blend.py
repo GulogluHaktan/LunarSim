@@ -27,6 +27,10 @@ class RoiSpec:
     center_px: tuple[float, float]
     sigma_m: float
     weight: float = 1.0
+    # Optional fade profile (see fades.py). None keeps the original untruncated Gaussian(sigma_m).
+    profile: str | None = None
+    radius_m: float | None = None          # truncation radius for ``profile``
+    contact_radius_m: float | None = None  # hybrid only
 
 
 def roi_weight(
@@ -60,7 +64,13 @@ def roi_weight(
     for spec in specs:
         cy, cx = spec.center_px
         r2 = ((x - cx) ** 2 + (y - cy) ** 2) * res_fine_m**2
-        w = np.maximum(w, spec.weight * np.exp(-r2 / (2 * spec.sigma_m**2)))
+        if spec.profile is None:
+            w = np.maximum(w, spec.weight * np.exp(-r2 / (2 * spec.sigma_m**2)))
+        else:
+            from lunarsim.core.terrain.fades import make_fade
+
+            fade = make_fade(spec.profile, spec.radius_m or 3.0 * spec.sigma_m, spec.contact_radius_m)
+            w = np.maximum(w, spec.weight * fade(np.sqrt(r2)))
     return np.clip(w, 0.0, 1.0)
 
 

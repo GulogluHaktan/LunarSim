@@ -1,0 +1,25 @@
+\subsection{Design principles}\label{sec:principles}
+Each experiment varies one factor and holds the others fixed. Arms are paired: the same terrain seed and release state are flown under every setting. Seed lists are written to files before the runs and are not reused for tuning. Every result file stores the git commit, the active landing criterion, the Isaac Sim version, the GPU and driver, the seed list and the controller gains.
+
+\subsection{Experiments}\label{sec:experiments}
+Table~\ref{tab:experiments} lists the experiments. E0 repeats identical seeds to measure the simulator's repeatability (the noise floor). E1 and E2 are geometric: they raycast the Isaac collision surface and need no landing episodes, so they can use many seeds. E3 and E5 fly episodes under changed settings. E4 re-scores stored touchdown states under alternative criteria, so it costs no new episodes. E6 measures cost.
+
+\begin{table}[t]
+\caption{Experiments. All run in Isaac Sim / Isaac Lab on Apollo~11 and Apollo~16 terrain, stage \texttt{orbit\_descent}.}\label{tab:experiments}
+\begin{tabular}{@{}llll@{}}
+\toprule
+ID & Factor varied & Main metrics & Episodes \\
+\midrule
+E0 & none (A/A repeat) & outcome flip rate, touchdown spread & yes \\
+E1 & fade shape at joins & C0/C1 at the join, fade cost & no \\
+E2 & terrain resolution & footpad error, hazard-map agreement & no \\
+E3 & detail, crater, rock layers & landing rate, touchdown state & yes \\
+E4 & landing criterion & landing rate per criterion & re-score \\
+E5 & PhysX settings & landing rate, step time & yes \\
+E6 & quality profile & build time, VRAM, step time & no \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Statistics}\label{sec:stats}
+Binary landing outcomes are paired by seed and compared with McNemar's exact test; we report the discordant counts, the difference in rates and a 95\,\% bootstrap interval. Continuous geometric measures are compared with the Wilcoxon signed-rank test on per-seed log ratios, which stays valid when two methods coincide analytically and the difference has near-zero variance. Next to every episode-based result we report the minimum detectable difference for the number of paired episodes used, and the E0 flip rate as the reference for ``no effect''. \todo{insert the final episode counts and minimum detectable differences once the P0 throughput measurement fixes the budget}

@@ -31,14 +31,14 @@
 flowchart TD
   DATA["Gerçek Ay verisi - DEM / LOLA"] --> CORE["core: arazi, ışık, LiDAR, toz"]
   CORE --> ISAAC["adapters/isaac: USD sahne"]
-  CORE --> AN["Analitik backend - Isaac'siz"]
+  CORE -. "son çare, yalnız hata ayıklama" .-> AN["Analitik backend - Isaac'siz"]
   ISAAC --> ENVS["RL / ES / MPC ortamları"]
   AN --> ENVS
   ENVS --> RUN["Eğitim ve değerlendirme betikleri"]
   RUN --> REP["report/: PDF raporlar"]
 ```
 
-Çekirdek Isaac'ten bağımsızdır; aynı ortamlar hem hızlı analitik backend'de hem Isaac sahnesinde çalışır.
+Çekirdek Isaac'ten bağımsızdır. **Birincil backend Isaac Sim / Isaac Lab'dir: raporlanan her sonuç ondan gelir.** Analitik backend, GPU olmadan betik ayıklamak için son çaredir; sonuç ve makalelerde kullanılmaz (benzer bir makale yalnız analitik testler yüzünden reddedildi).
 
 ## Seçilmiş sonuçlar
 

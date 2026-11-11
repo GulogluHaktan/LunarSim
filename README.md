@@ -31,14 +31,14 @@
 flowchart TD
   DATA["Real lunar data - DEM / LOLA"] --> CORE["core: terrain, light, LiDAR, dust"]
   CORE --> ISAAC["adapters/isaac: USD scene"]
-  CORE --> AN["Analytic backend - no Isaac"]
+  CORE -. "last resort, debug only" .-> AN["Analytic backend - no Isaac"]
   ISAAC --> ENVS["RL / ES / MPC environments"]
   AN --> ENVS
   ENVS --> RUN["Training and evaluation scripts"]
   RUN --> REP["report/: PDF reports"]
 ```
 
-The core is independent of Isaac; the same environments run both on the fast analytic backend and in an Isaac scene.
+The core is independent of Isaac. **Isaac Sim / Isaac Lab is the primary backend: every reported result comes from it.** The analytic backend is a last resort for debugging scripts without a GPU; it is not used for results or papers (a similar article was rejected for analytic-only tests).
 
 ## Selected results
 

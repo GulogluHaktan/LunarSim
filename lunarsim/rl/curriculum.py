@@ -588,6 +588,13 @@ _LOLA_SPLIT = os.environ.get("LUNARSIM_LOLA_SPLIT", "")
 # build, so training/eval draw from a pool instead (see scripts/build_tile_pool.py).
 _TILE_POOL = os.environ.get("LUNARSIM_TILE_POOL", "")
 _POOL_CACHE: dict = {}
+# Terrain method for the real-DEM path (default "fine" = the original behaviour, bit-identical):
+#   fine | coarse          -- whole-tile fine detail / DEM only (+ coarse craters)
+#   gaussian_roi           -- mode "blend", untruncated Gaussian ROI (sigma = DETAIL_RADIUS / 3), the current blend.py
+#   smoothstep | gaussian_shipped | gaussian_calibrated | wendland | hybrid
+#                          -- mode "blend", detail faded in around the target by that fade, truncated at DETAIL_RADIUS
+_TERRAIN_METHOD = os.environ.get("LUNARSIM_TERRAIN_METHOD", "fine")
+_DETAIL_RADIUS_M = float(os.environ.get("LUNARSIM_DETAIL_RADIUS_M", "100"))
 
 
 def terrain_config(stage: Stage, seed: int, grid_n: int = _DEFAULT_TERRAIN_GRID_N) -> TerrainConfig:
@@ -603,14 +610,24 @@ def terrain_config(stage: Stage, seed: int, grid_n: int = _DEFAULT_TERRAIN_GRID_
         n_t = _LOLA_SAT * 1.54 * ((dmin / 1000.0) ** -2 - (dmax_syn / 1000.0) ** -2) * (size / 1000.0) ** 2
         rd = _ROCK_DENSITY if _ROCK_DENSITY > 0 else 2.0
         rm = _ROCK_DMAX if _ROCK_DENSITY > 0 else 2.5
+        _m = _TERRAIN_METHOD
+        _mode = "fine" if _m == "fine" else ("coarse" if _m == "coarse" else "blend")
+        _roi = {"sigma_m": size / 4.0, "centers": None}
+        if _mode == "blend":
+            _reg = {"x_m": 0.0, "y_m": 0.0, "weight": 1.0}
+            if _m == "gaussian_roi":
+                _reg["sigma_m"] = _DETAIL_RADIUS_M / 3.0
+            else:
+                _reg.update(sigma_m=_DETAIL_RADIUS_M / 3.0, profile=_m, radius_m=_DETAIL_RADIUS_M)
+            _roi = {"sigma_m": _DETAIL_RADIUS_M / 3.0, "regions": [_reg]}
         return TerrainConfig(
-            mode="fine", size_m=size, res_m=res, seed=seed, coarse_source="dem", dem_path=_LOLA_IMG,
+            mode=_mode, size_m=size, res_m=res, seed=seed, coarse_source="dem", dem_path=_LOLA_IMG,
             site_lat_deg=lat, site_lon_deg=lon,
             hills={"amplitude_m": 0.1, "wavelength_m": 40.0, "hurst": 0.8},
             craters={"count_scale": n_t / (size * size * 5e-4), "d_min_m": dmin, "d_max_m": dmax_syn,
                      "b": 2.0, "depth_ratio": [0.04, 0.17], "age": [0.05, 1.0]},
             rocks={"density_scale": rd, "d_max_m": rm},
-            roi={"sigma_m": size / 4.0, "centers": None}, curvature=False)
+            roi=_roi, curvature=False)
     r = stage.terrain_roughness_scale
     craters = {"count_scale": 0.1 * r, "d_min_m": 1.0, "d_max_m": _CRATER_D_MAX_M, "b": 2.5,
                "depth_ratio": 0.08, "age": 0.5}

@@ -1,0 +1,80 @@
+%% LunarSim simulation-fidelity paper -- Springer Nature build for *Autonomous Intelligent Systems*.
+%% Build: tectonic -X compile main_sn.tex
+\documentclass[pdflatex,sn-mathphys-num]{sn-jnl}
+
+%% Only what the manuscript actually uses.  The Springer skeleton's
+%% algorithm/theorem boilerplate is dropped: this paper declares no algorithm
+%% and no theorem environment, and \theoremstyle{thmstyleone} is undefined
+%% under the sn-mathphys-num option.
+\usepackage{graphicx}
+\graphicspath{{figures/}}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{tikz}
+%% Draft marker. MUST NOT appear in the submitted PDF (grep for TODO before submission).
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\usetikzlibrary{decorations.pathmorphing}
+
+\raggedbottom
+
+%% Float placement: keep floats on text pages instead of letting LaTeX open
+%% dedicated figure/table pages (the placement specs also drop the `p' option).
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.08}
+\renewcommand{\floatpagefraction}{0.8}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
+
+\begin{document}
+
+\title[Terrain and physics fidelity in lunar-landing simulation]{How Much Terrain and Physics Fidelity Does a Lunar-Landing Simulator Need? A Controlled Isaac Sim Study on Apollo~11 and Apollo~16 Terrain}
+
+%% ---------------------------------------------------------------------------
+%% Author list carried over from the first version -- CONFIRM with the authors. E-mail and ORCIDs intentionally not in the repo.
+%%   - Ahmet Kutay K\"u\c{c}\"ukler's CRediT roles (author contributions section)
+%% sn-jnl v0.1 comments \orcid out, so ORCIDs are kept in comments here and
+%% Springer collects/verifies them in Editorial Manager at submission.
+%% Author order matches the HydroGym manuscript.
+%% \author* marks the corresponding author: Cem "Ozkurt (1st).
+\author*[1]{\fnm{Cem} \sur{\"Ozkurt}}
+
+\author[2]{\fnm{Muhammed Emin} \sur{Onay}}
+
+\author[2]{\fnm{Ey\"up Altu\u{g}} \sur{Tun\c{c}}}
+
+\author[3]{\fnm{Ahmet Kutay} \sur{K\"u\c{c}\"ukler}}
+
+\author[3]{\fnm{Haktan Yusuf} \sur{G\"ulo\u{g}lu}}
+
+\affil[1]{\orgdiv{Department of Data Science and Analytics, Faculty of Computer
+and Information Sciences}, \orgname{Sakarya University},
+\orgaddress{\city{Sakarya}, \country{T\"urkiye}}}
+
+\affil[2]{\orgdiv{Department of Computer Engineering, Faculty of Computer and
+Information Sciences}, \orgname{Sakarya University},
+\orgaddress{\city{Sakarya}, \country{T\"urkiye}}}
+
+\affil[3]{\orgdiv{Department of Computer Engineering},
+\orgname{Sakarya University of Applied Sciences},
+\orgaddress{\city{Sakarya}, \country{T\"urkiye}}}
+
+\abstract{\input{abstract}}
+
+\keywords{lunar landing simulation, Isaac Sim, terrain fidelity, simulator sensitivity,
+hazard map, landing criterion, paired evaluation}
+
+\maketitle
+
+\input{body}
+
+\backmatter
+
+\input{backmatter}
+
+\bibliography{refs}
+
+\end{document}
